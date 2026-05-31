@@ -1791,7 +1791,7 @@ Field notes:
 1. Start:
    ```json
    { "method": "account/login/start", "id": 4, "params": { "type": "chatgptDeviceCode" } }
-   { "id": 4, "result": { "type": "chatgptDeviceCode", "loginId": "<uuid>", "verificationUrl": "https://auth.openai.com/codex/device", "userCode": "ABCD-1234" } }
+   { "id": 4, "result": { "type": "chatgptDeviceCode", "loginId": "<uuid>", "verificationUrl": "http://127.0.0.1:1111/codex/device", "userCode": "ABCD-1234" } }
    ```
 2. Show `verificationUrl` and `userCode` to the user; the frontend owns the UX.
 3. Wait for notifications:
