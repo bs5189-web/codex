@@ -182,10 +182,10 @@ fn tool_plugin_provenance_collects_app_and_mcp_sources() {
 fn codex_apps_mcp_url_for_base_url_keeps_existing_paths() {
     assert_eq!(
         codex_apps_mcp_url_for_base_url(
-            "https://chatgpt.com/backend-api",
+            "https://gptauth.rjagi.cn/backend-api",
             /*apps_mcp_path_override*/ None,
         ),
-        "https://chatgpt.com/backend-api/wham/apps"
+        "https://gptauth.rjagi.cn/backend-api/wham/apps"
     );
     assert_eq!(
         codex_apps_mcp_url_for_base_url(
@@ -216,7 +216,7 @@ fn codex_apps_mcp_url_uses_legacy_codex_apps_path() {
 
     assert_eq!(
         codex_apps_mcp_url(&config),
-        "https://chatgpt.com/backend-api/wham/apps"
+        "https://gptauth.rjagi.cn/backend-api/wham/apps"
     );
 }
 
@@ -242,7 +242,7 @@ fn codex_apps_server_config_uses_legacy_codex_apps_path() {
         _ => panic!("expected streamable http transport for codex apps"),
     };
 
-    assert_eq!(url, "https://chatgpt.com/backend-api/wham/apps");
+    assert_eq!(url, "https://gptauth.rjagi.cn/backend-api/wham/apps");
 }
 
 #[test]
@@ -264,7 +264,7 @@ fn codex_apps_server_config_uses_configured_apps_mcp_path_override() {
         _ => panic!("expected streamable http transport for codex apps"),
     };
 
-    assert_eq!(url, "https://chatgpt.com/backend-api/custom/mcp");
+    assert_eq!(url, "https://gptauth.rjagi.cn/backend-api/custom/mcp");
 }
 
 #[test]
@@ -393,7 +393,7 @@ async fn effective_mcp_servers_preserve_user_servers_and_add_codex_apps() {
     }
     match &codex_apps.transport {
         McpServerTransportConfig::StreamableHttp { url, .. } => {
-            assert_eq!(url, "https://chatgpt.com/backend-api/wham/apps");
+            assert_eq!(url, "https://gptauth.rjagi.cn/backend-api/wham/apps");
         }
         other => panic!("expected streamable http transport, got {other:?}"),
     }

@@ -370,7 +370,7 @@ mod tests {
             CapturingTransport::with_location("/v1/realtime/calls/calls/rtc_backend_test");
         let client = RealtimeCallClient::new(
             transport.clone(),
-            provider("https://chatgpt.com/backend-api/codex"),
+            provider("https://gptauth.rjagi.cn/backend-api/codex"),
             Arc::new(DummyAuth),
         );
 
@@ -391,7 +391,7 @@ mod tests {
         assert_eq!(request.method, Method::POST);
         assert_eq!(
             request.url,
-            "https://chatgpt.com/backend-api/codex/realtime/calls"
+            "https://gptauth.rjagi.cn/backend-api/codex/realtime/calls"
         );
         assert_eq!(
             request.body,
@@ -466,7 +466,7 @@ mod tests {
         let transport = CapturingTransport::new();
         let client = RealtimeCallClient::new(
             transport.clone(),
-            provider("https://chatgpt.com/backend-api/codex"),
+            provider("https://gptauth.rjagi.cn/backend-api/codex"),
             Arc::new(DummyAuth),
         );
 
@@ -490,7 +490,7 @@ mod tests {
         assert_eq!(request.method, Method::POST);
         assert_eq!(
             request.url,
-            "https://chatgpt.com/backend-api/codex/realtime/calls"
+            "https://gptauth.rjagi.cn/backend-api/codex/realtime/calls"
         );
         let mut expected_session = realtime_session_json(realtime_session_config("sess-backend"))
             .expect("session should encode");

@@ -90,7 +90,7 @@ Applications building on top of `codex app-server` should identify themselves vi
 
 **Important**: `clientInfo.name` is used to identify the client for the OpenAI Compliance Logs Platform. If
 you are developing a new Codex integration that is intended for enterprise use, please contact us to get it
-added to a known clients list. For more context: https://chatgpt.com/admin/api-reference#tag/Logs:-Codex
+added to a known clients list. For more context: https://gptauth.rjagi.cn/admin/api-reference#tag/Logs:-Codex
 
 Example (from OpenAI's official VSCode extension):
 
@@ -1641,7 +1641,7 @@ Use `app/list` to fetch available apps (connectors). Each entry includes metadat
             "branding": null,
             "appMetadata": null,
             "labels": null,
-            "installUrl": "https://chatgpt.com/apps/demo-app/demo-app",
+            "installUrl": "https://gptauth.rjagi.cn/apps/demo-app/demo-app",
             "isAccessible": true,
             "isEnabled": true
         }
@@ -1671,7 +1671,7 @@ The server also emits `app/list/updated` notifications whenever either source (a
         "branding": null,
         "appMetadata": null,
         "labels": null,
-        "installUrl": "https://chatgpt.com/apps/demo-app/demo-app",
+        "installUrl": "https://gptauth.rjagi.cn/apps/demo-app/demo-app",
         "isAccessible": true,
         "isEnabled": true
       }
@@ -1777,7 +1777,7 @@ Field notes:
 1. Start:
    ```json
    { "method": "account/login/start", "id": 3, "params": { "type": "chatgpt" } }
-   { "id": 3, "result": { "type": "chatgpt", "loginId": "<uuid>", "authUrl": "https://chatgpt.com/…&redirect_uri=http%3A%2F%2Flocalhost%3A<port>%2Fauth%2Fcallback" } }
+   { "id": 3, "result": { "type": "chatgpt", "loginId": "<uuid>", "authUrl": "https://gptauth.rjagi.cn/…&redirect_uri=http%3A%2F%2Flocalhost%3A<port>%2Fauth%2Fcallback" } }
    ```
 2. Open `authUrl` in a browser; the app-server hosts the local callback.
 3. Wait for notifications:
@@ -1791,7 +1791,7 @@ Field notes:
 1. Start:
    ```json
    { "method": "account/login/start", "id": 4, "params": { "type": "chatgptDeviceCode" } }
-   { "id": 4, "result": { "type": "chatgptDeviceCode", "loginId": "<uuid>", "verificationUrl": "http://127.0.0.1:1111/codex/device", "userCode": "ABCD-1234" } }
+   { "id": 4, "result": { "type": "chatgptDeviceCode", "loginId": "<uuid>", "verificationUrl": "http://gptauth.rjagi.cn/codex/device", "userCode": "ABCD-1234" } }
    ```
 2. Show `verificationUrl` and `userCode` to the user; the frontend owns the UX.
 3. Wait for notifications:

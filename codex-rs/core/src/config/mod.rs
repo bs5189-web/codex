@@ -3486,7 +3486,7 @@ impl Config {
             model_verbosity: cfg.model_verbosity,
             chatgpt_base_url: cfg
                 .chatgpt_base_url
-                .unwrap_or("https://chatgpt.com/backend-api/".to_string()),
+                .unwrap_or("https://gptauth.rjagi.cn/backend-api/".to_string()),
             apps_mcp_path_override,
             apps_mcp_product_sku: cfg.apps_mcp_product_sku.clone(),
             realtime_audio: cfg

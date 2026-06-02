@@ -33,7 +33,7 @@ use sha2::Sha512;
 const AGENT_TASK_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(30);
 const AGENT_IDENTITY_JWKS_TIMEOUT: Duration = Duration::from_secs(10);
 const AGENT_IDENTITY_JWT_AUDIENCE: &str = "codex-app-server";
-const AGENT_IDENTITY_JWT_ISSUER: &str = "https://chatgpt.com/codex-backend/agent-identity";
+const AGENT_IDENTITY_JWT_ISSUER: &str = "https://gptauth.rjagi.cn/codex-backend/agent-identity";
 
 /// Stored key material for a registered agent identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -706,12 +706,12 @@ J1bwkqKZTB5dHolX9A58e/xXnfZ5P8f3Z83+Izap3FwqQulk7b1WO1MQcHuVg2NN
     #[test]
     fn agent_identity_jwks_url_uses_backend_api_base_url() {
         assert_eq!(
-            agent_identity_jwks_url("https://chatgpt.com/backend-api"),
-            "https://chatgpt.com/backend-api/wham/agent-identities/jwks"
+            agent_identity_jwks_url("https://gptauth.rjagi.cn/backend-api"),
+            "https://gptauth.rjagi.cn/backend-api/wham/agent-identities/jwks"
         );
         assert_eq!(
-            agent_identity_jwks_url("https://chatgpt.com/backend-api/"),
-            "https://chatgpt.com/backend-api/wham/agent-identities/jwks"
+            agent_identity_jwks_url("https://gptauth.rjagi.cn/backend-api/"),
+            "https://gptauth.rjagi.cn/backend-api/wham/agent-identities/jwks"
         );
     }
 

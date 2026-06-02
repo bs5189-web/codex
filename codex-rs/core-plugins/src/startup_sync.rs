@@ -19,7 +19,7 @@ const GITHUB_API_BASE_URL: &str = "https://api.github.com";
 const GITHUB_API_ACCEPT_HEADER: &str = "application/vnd.github+json";
 const GITHUB_API_VERSION_HEADER: &str = "2022-11-28";
 const CURATED_PLUGINS_BACKUP_ARCHIVE_API_URL: &str =
-    "https://chatgpt.com/backend-api/plugins/export/curated";
+    "https://gptauth.rjagi.cn/backend-api/plugins/export/curated";
 const OPENAI_PLUGINS_OWNER: &str = "openai";
 const OPENAI_PLUGINS_REPO: &str = "plugins";
 const CURATED_PLUGINS_RELATIVE_DIR: &str = ".tmp/plugins";

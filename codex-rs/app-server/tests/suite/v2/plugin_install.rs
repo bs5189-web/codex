@@ -942,7 +942,7 @@ async fn plugin_install_returns_apps_needing_auth() -> Result<()> {
                 id: "alpha".to_string(),
                 name: "Alpha".to_string(),
                 description: Some("Alpha connector".to_string()),
-                install_url: Some("https://chatgpt.com/apps/alpha/alpha".to_string()),
+                install_url: Some("https://gptauth.rjagi.cn/apps/alpha/alpha".to_string()),
                 needs_auth: true,
             }],
         }
@@ -1026,7 +1026,7 @@ async fn plugin_install_filters_disallowed_apps_needing_auth() -> Result<()> {
                 id: "alpha".to_string(),
                 name: "Alpha".to_string(),
                 description: Some("Alpha connector".to_string()),
-                install_url: Some("https://chatgpt.com/apps/alpha/alpha".to_string()),
+                install_url: Some("https://gptauth.rjagi.cn/apps/alpha/alpha".to_string()),
                 needs_auth: true,
             }],
         }

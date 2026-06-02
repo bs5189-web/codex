@@ -255,12 +255,12 @@ mod tests {
                 &auth_failure_result(),
                 Some("connector_calendar"),
                 Some("Google Calendar"),
-                Some("https://chatgpt.com/apps/google-calendar/connector_calendar".to_string()),
+                Some("https://gptauth.rjagi.cn/apps/google-calendar/connector_calendar".to_string()),
             ),
             Some(CodexAppsConnectorAuthFailure {
                 connector_id: "connector_calendar".to_string(),
                 connector_name: "Google Calendar".to_string(),
-                install_url: "https://chatgpt.com/apps/google-calendar/connector_calendar"
+                install_url: "https://gptauth.rjagi.cn/apps/google-calendar/connector_calendar"
                     .to_string(),
                 auth_reason: Some("reauthentication_required".to_string()),
                 link_id: Some("link_123".to_string()),
@@ -278,7 +278,7 @@ mod tests {
                 &auth_failure_result(),
                 /*connector_id*/ None,
                 Some("Google Calendar"),
-                Some("https://chatgpt.com/apps/google-calendar/connector_calendar".to_string()),
+                Some("https://gptauth.rjagi.cn/apps/google-calendar/connector_calendar".to_string()),
             ),
             None
         );
@@ -287,7 +287,7 @@ mod tests {
                 &auth_failure_result(),
                 Some("connector_drive"),
                 Some("Google Drive"),
-                Some("https://chatgpt.com/apps/google-drive/connector_drive".to_string()),
+                Some("https://gptauth.rjagi.cn/apps/google-drive/connector_drive".to_string()),
             ),
             None
         );
@@ -299,7 +299,7 @@ mod tests {
             &auth_failure_result(),
             Some("connector_calendar"),
             Some("Google Calendar"),
-            Some("https://chatgpt.com/apps/google-calendar/connector_calendar".to_string()),
+            Some("https://gptauth.rjagi.cn/apps/google-calendar/connector_calendar".to_string()),
         )
         .expect("auth failure");
 
@@ -313,7 +313,7 @@ mod tests {
                             CONNECTOR_AUTH_FAILURE_CONNECTOR_ID_KEY: "connector_calendar",
                             "connector_name": "Google Calendar",
                             "install_url":
-                                "https://chatgpt.com/apps/google-calendar/connector_calendar",
+                                "https://gptauth.rjagi.cn/apps/google-calendar/connector_calendar",
                             CONNECTOR_AUTH_FAILURE_AUTH_REASON_KEY: "reauthentication_required",
                             CONNECTOR_AUTH_FAILURE_LINK_ID_KEY: "link_123",
                             CONNECTOR_AUTH_FAILURE_ERROR_CODE_KEY: "UNAUTHORIZED",
@@ -324,7 +324,7 @@ mod tests {
                 }),
                 message: "Reconnect Google Calendar on ChatGPT to restore access for this request."
                     .to_string(),
-                url: "https://chatgpt.com/apps/google-calendar/connector_calendar".to_string(),
+                url: "https://gptauth.rjagi.cn/apps/google-calendar/connector_calendar".to_string(),
                 elicitation_id: "codex_apps_auth_call_123".to_string(),
             }
         );
@@ -337,7 +337,7 @@ mod tests {
             &auth_failure_result(),
             Some("connector_calendar"),
             Some("Google Calendar"),
-            Some("https://chatgpt.com/apps/google-calendar/connector_calendar".to_string()),
+            Some("https://gptauth.rjagi.cn/apps/google-calendar/connector_calendar".to_string()),
         )
         .expect("auth elicitation plan");
 

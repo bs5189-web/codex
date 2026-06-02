@@ -1849,7 +1849,7 @@ command = "sample-mcp"
 
         let fetcher = Arc::new(UnauthorizedFetcher {
             message:
-                "GET https://chatgpt.com/backend-api/wham/config/requirements failed: 401; content-type=text/html; body=<html>nope</html>"
+                "GET https://gptauth.rjagi.cn/backend-api/wham/config/requirements failed: 401; content-type=text/html; body=<html>nope</html>"
                     .to_string(),
             request_count: AtomicUsize::new(0),
         });
