@@ -121,6 +121,7 @@ fn reference_context_item() -> TurnContextItem {
     TurnContextItem {
         turn_id: Some("reference-turn".to_string()),
         cwd: PathBuf::from("/tmp/reference-cwd"),
+        workspace_roots: None,
         current_date: Some("2026-03-23".to_string()),
         timezone: Some("America/Los_Angeles".to_string()),
         approval_policy: AskForApproval::OnRequest,
@@ -131,6 +132,7 @@ fn reference_context_item() -> TurnContextItem {
         model: "gpt-test".to_string(),
         personality: None,
         collaboration_mode: None,
+        multi_agent_version: None,
         realtime_active: Some(false),
         effort: None,
         summary: codex_protocol::config_types::ReasoningSummary::Auto,

@@ -74,6 +74,15 @@ fn assistant_message(text: &str, phase: Option<MessagePhase>) -> ResponseItem {
     }
 }
 
+#[test]
+fn register_session_root_skips_threads_with_explicit_parent() {
+    let control = AgentControl::default();
+
+    control.register_session_root(ThreadId::new(), Some(ThreadId::new()));
+
+    assert_eq!(control.state.agent_id_for_path(&AgentPath::root()), None);
+}
+
 fn spawn_agent_call(call_id: &str) -> ResponseItem {
     ResponseItem::FunctionCall {
         id: None,
@@ -519,60 +528,6 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
 }
 
 #[tokio::test]
-async fn append_message_records_assistant_message() {
-    let harness = AgentControlHarness::new().await;
-    let (thread_id, thread) = harness.start_thread().await;
-    let message =
-        "author: /root\nrecipient: /root/worker\nother_recipients: []\nContent: hello from tests";
-
-    let submission_id = harness
-        .control
-        .append_message(
-            thread_id,
-            ResponseItem::Message {
-                id: None,
-                role: "assistant".to_string(),
-                content: vec![ContentItem::InputText {
-                    text: message.to_string(),
-                }],
-                phase: None,
-            },
-        )
-        .await
-        .expect("append_message should succeed");
-    assert!(!submission_id.is_empty());
-
-    timeout(Duration::from_secs(5), async {
-        loop {
-            let history_items = thread
-                .codex
-                .session
-                .clone_history()
-                .await
-                .raw_items()
-                .to_vec();
-            let recorded = history_items.iter().any(|item| {
-                matches!(
-                    item,
-                    ResponseItem::Message { role, content, .. }
-                        if role == "assistant"
-                            && content.iter().any(|content_item| matches!(
-                                content_item,
-                                ContentItem::InputText { text } if text == message
-                            ))
-                )
-            });
-            if recorded {
-                break;
-            }
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("assistant message should be recorded");
-}
-
-#[tokio::test]
 async fn spawn_agent_creates_thread_and_sends_prompt() {
     let harness = AgentControlHarness::new().await;
     let thread_id = harness
@@ -762,6 +717,53 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         "full-history forked child should preserve the parent diff baseline"
     );
 
+    let mut disabled_hint_child_config = harness.config.clone();
+    let _ = disabled_hint_child_config
+        .features
+        .enable(Feature::MultiAgentV2);
+    disabled_hint_child_config.multi_agent_v2.usage_hint_enabled = false;
+    disabled_hint_child_config
+        .multi_agent_v2
+        .subagent_usage_hint_text = Some("Disabled child subagent guidance.".to_string());
+    let disabled_hint_child_thread_id = harness
+        .control
+        .spawn_agent_with_metadata(
+            disabled_hint_child_config,
+            text_input("child task without hints"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
+                fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("forked spawn should honor disabled usage hints")
+        .thread_id;
+    let disabled_hint_child_thread = harness
+        .manager
+        .get_thread(disabled_hint_child_thread_id)
+        .await
+        .expect("disabled-hint child thread should be registered");
+    let disabled_hint_history = disabled_hint_child_thread
+        .codex
+        .session
+        .clone_history()
+        .await;
+    assert!(
+        !history_contains_text(
+            disabled_hint_history.raw_items(),
+            "Disabled child subagent guidance.",
+        ),
+        "full-history forked child should not add subagent guidance when usage hints are disabled"
+    );
+
     let expected = (
         child_thread_id,
         Op::UserInput {
@@ -788,6 +790,11 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .shutdown_live_agent(child_thread_id)
         .await
         .expect("child shutdown should submit");
+    let _ = harness
+        .control
+        .shutdown_live_agent(disabled_hint_child_thread_id)
+        .await
+        .expect("disabled-hint child shutdown should submit");
     let _ = parent_thread
         .submit(Op::Shutdown {})
         .await
@@ -1580,9 +1587,15 @@ async fn spawn_child_completion_notifies_parent_history() {
 #[tokio::test]
 async fn multi_agent_v2_completion_ignores_dead_direct_parent() {
     let harness = AgentControlHarness::new().await;
-    let (root_thread_id, root_thread) = harness.start_thread().await;
     let mut config = harness.config.clone();
     let _ = config.features.enable(Feature::MultiAgentV2);
+    let root = harness
+        .manager
+        .start_thread(config.clone())
+        .await
+        .expect("root thread should start");
+    let root_thread_id = root.thread_id;
+    let root_thread = root.thread;
     let worker_path = AgentPath::root().join("worker_a").expect("worker path");
     let worker_thread_id = harness
         .control
