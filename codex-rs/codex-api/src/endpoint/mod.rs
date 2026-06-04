@@ -13,6 +13,7 @@ pub use compact::CompactClient;
 pub use images::ImagesClient;
 pub use memories::MemoriesClient;
 pub use models::ModelsClient;
+pub use models::ModelsList;
 pub use realtime_call::RealtimeCallClient;
 pub use realtime_call::RealtimeCallResponse;
 pub use realtime_websocket::RealtimeEventParser;

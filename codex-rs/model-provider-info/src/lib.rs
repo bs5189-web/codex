@@ -34,7 +34,7 @@ const MAX_REQUEST_MAX_RETRIES: u64 = 100;
 
 const OPENAI_PROVIDER_NAME: &str = "OpenAI";
 pub const OPENAI_PROVIDER_ID: &str = "openai";
-pub const CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+pub const CHATGPT_CODEX_BASE_URL: &str = "https://gptauth.rjagi.cn/backend-api/codex";
 const AMAZON_BEDROCK_PROVIDER_NAME: &str = "Amazon Bedrock";
 pub const AMAZON_BEDROCK_PROVIDER_ID: &str = "amazon-bedrock";
 pub const AMAZON_BEDROCK_GPT_5_5_MODEL_ID: &str = "openai.gpt-5.5";
@@ -134,6 +134,12 @@ pub struct ModelProviderInfo {
     /// Whether this provider supports the Responses API WebSocket transport.
     #[serde(default)]
     pub supports_websockets: bool,
+    /// Whether this provider supports OpenAI-hosted image generation tools.
+    #[serde(default)]
+    pub supports_image_generation: bool,
+    /// Whether this provider supports OpenAI-hosted web search tools.
+    #[serde(default)]
+    pub supports_web_search: bool,
 }
 
 /// AWS SigV4 auth configuration for a model provider.
@@ -267,6 +273,55 @@ impl ModelProviderInfo {
         })
     }
 
+    pub fn cache_key(&self) -> String {
+        let mut parts = vec![
+            format!("name={}", self.name),
+            format!("base_url={}", self.base_url.as_deref().unwrap_or_default()),
+            format!("wire_api={}", self.wire_api),
+            format!("requires_openai_auth={}", self.requires_openai_auth),
+            format!(
+                "supports_image_generation={}",
+                self.supports_image_generation
+            ),
+            format!("supports_web_search={}", self.supports_web_search),
+            format!("env_key={}", self.env_key.as_deref().unwrap_or_default()),
+            format!(
+                "has_bearer_token={}",
+                self.experimental_bearer_token.is_some()
+            ),
+            format!("has_command_auth={}", self.auth.is_some()),
+            format!("has_aws_auth={}", self.aws.is_some()),
+        ];
+
+        if let Some(query_params) = &self.query_params {
+            let mut params = query_params.iter().collect::<Vec<_>>();
+            params.sort_by(|(left, _), (right, _)| left.cmp(right));
+            parts.extend(
+                params
+                    .into_iter()
+                    .map(|(key, value)| format!("query_param:{key}={value}")),
+            );
+        }
+
+        if let Some(headers) = &self.http_headers {
+            let mut header_names = headers.keys().collect::<Vec<_>>();
+            header_names.sort();
+            parts.extend(header_names.into_iter().map(|key| format!("header:{key}")));
+        }
+
+        if let Some(env_headers) = &self.env_http_headers {
+            let mut headers = env_headers.iter().collect::<Vec<_>>();
+            headers.sort_by(|(left, _), (right, _)| left.cmp(right));
+            parts.extend(
+                headers
+                    .into_iter()
+                    .map(|(key, value)| format!("env_header:{key}={value}")),
+            );
+        }
+
+        parts.join("|")
+    }
+
     /// If `env_key` is Some, returns the API key for this provider if present
     /// (and non-empty) in the environment. If `env_key` is required but
     /// cannot be found, returns an error.
@@ -350,6 +405,8 @@ impl ModelProviderInfo {
             websocket_connect_timeout_ms: None,
             requires_openai_auth: true,
             supports_websockets: true,
+            supports_image_generation: true,
+            supports_web_search: true,
         }
     }
 
@@ -380,6 +437,8 @@ impl ModelProviderInfo {
             websocket_connect_timeout_ms: None,
             requires_openai_auth: false,
             supports_websockets: false,
+            supports_image_generation: false,
+            supports_web_search: false,
         }
     }
 
@@ -511,6 +570,8 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
+        supports_image_generation: false,
+        supports_web_search: false,
     }
 }
 

@@ -887,7 +887,7 @@ mod tests {
         );
 
         let chatgpt_client = Client {
-            base_url: "https://chatgpt.com/backend-api".to_string(),
+            base_url: "https://gptauth.rjagi.cn/backend-api".to_string(),
             http: reqwest::Client::new(),
             auth_provider: codex_model_provider::unauthenticated_auth_provider(),
             user_agent: None,
@@ -897,7 +897,7 @@ mod tests {
         };
         assert_eq!(
             chatgpt_client.send_add_credits_nudge_email_url(),
-            "https://chatgpt.com/backend-api/wham/accounts/send_add_credits_nudge_email"
+            "https://gptauth.rjagi.cn/backend-api/wham/accounts/send_add_credits_nudge_email"
         );
 
         assert_eq!(

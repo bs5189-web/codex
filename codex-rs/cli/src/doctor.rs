@@ -2518,7 +2518,7 @@ fn default_reachability_plan() -> ReachabilityPlan {
         /*provider_base_url*/ None,
         /*provider_query_params*/ None,
         /*is_amazon_bedrock*/ false,
-        "https://chatgpt.com/backend-api/",
+        "https://gptauth.rjagi.cn/backend-api/",
     )
 }
 
@@ -3467,7 +3467,7 @@ mod tests {
                 Some("https://example.openai.azure.com/openai/v1"),
                 /*provider_query_params*/ None,
                 /*is_amazon_bedrock*/ false,
-                "https://chatgpt.com/backend-api/",
+                "https://gptauth.rjagi.cn/backend-api/",
             ),
             ReachabilityPlan {
                 description: "provider auth".to_string(),
@@ -3493,7 +3493,7 @@ mod tests {
                 Some("https://example.com/openai/v1/"),
                 Some(&query_params),
                 /*is_amazon_bedrock*/ false,
-                "https://chatgpt.com/backend-api/",
+                "https://gptauth.rjagi.cn/backend-api/",
             ),
             ReachabilityPlan {
                 description: "provider auth".to_string(),
@@ -3518,7 +3518,7 @@ mod tests {
             Some("https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"),
             /*provider_query_params*/ None,
             /*is_amazon_bedrock*/ true,
-            "https://chatgpt.com/backend-api/",
+            "https://gptauth.rjagi.cn/backend-api/",
         );
 
         assert_eq!(plan.endpoints[0].route_probe_url, None);
@@ -3533,7 +3533,7 @@ mod tests {
             /*provider_base_url*/ None,
             /*provider_query_params*/ None,
             /*is_amazon_bedrock*/ false,
-            "https://chatgpt.com/backend-api/",
+            "https://gptauth.rjagi.cn/backend-api/",
         );
 
         assert_eq!(
@@ -3586,7 +3586,7 @@ mod tests {
             Some(&format!("http://{addr}/xxxx")),
             /*provider_query_params*/ None,
             /*is_amazon_bedrock*/ false,
-            "https://chatgpt.com/backend-api/",
+            "https://gptauth.rjagi.cn/backend-api/",
         );
 
         let check = provider_reachability_check(plan).await;
@@ -3627,7 +3627,7 @@ mod tests {
             Some(&format!("http://{addr}/v1")),
             /*provider_query_params*/ None,
             /*is_amazon_bedrock*/ false,
-            "https://chatgpt.com/backend-api/",
+            "https://gptauth.rjagi.cn/backend-api/",
         );
 
         let check = provider_reachability_check(plan).await;

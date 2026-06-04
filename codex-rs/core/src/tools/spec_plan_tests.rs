@@ -283,6 +283,20 @@ fn use_bedrock_provider(turn: &mut TurnContext) {
     turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
 }
 
+fn use_custom_provider(turn: &mut TurnContext) {
+    let provider_info = ModelProviderInfo {
+        name: "DeepSeek".to_string(),
+        base_url: Some("https://api.deepseek.example/v1".to_string()),
+        requires_openai_auth: true,
+        ..Default::default()
+    };
+    update_config(turn, |config| {
+        config.model_provider_id = "deepseek".to_string();
+        config.model_provider = provider_info.clone();
+    });
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+}
+
 struct WebRunExtensionTool;
 
 #[async_trait::async_trait]
@@ -1228,6 +1242,15 @@ async fn hosted_tools_follow_provider_auth_model_and_config_gates() {
     extension_flag_without_imagegen_tool.assert_visible_contains(&["image_generation"]);
     extension_flag_without_imagegen_tool.assert_visible_lacks(&["image_gen"]);
 
+    let custom_provider_image_generation = probe(|turn| {
+        use_chatgpt_auth(turn);
+        use_custom_provider(turn);
+        set_feature(turn, Feature::ImageGeneration, /*enabled*/ true);
+        turn.model_info.input_modalities = vec![InputModality::Image];
+    })
+    .await;
+    custom_provider_image_generation.assert_visible_lacks(&["image_generation"]);
+
     let live_web_search = probe(|turn| {
         set_web_search_mode(turn, WebSearchMode::Live);
         turn.model_info.web_search_tool_type = WebSearchToolType::TextAndImage;
@@ -1296,4 +1319,11 @@ async fn hosted_tools_follow_provider_auth_model_and_config_gates() {
     })
     .await;
     unsupported_provider.assert_visible_lacks(&["web_search"]);
+
+    let custom_provider_web_search = probe(|turn| {
+        set_web_search_mode(turn, WebSearchMode::Live);
+        use_custom_provider(turn);
+    })
+    .await;
+    custom_provider_web_search.assert_visible_lacks(&["web_search"]);
 }

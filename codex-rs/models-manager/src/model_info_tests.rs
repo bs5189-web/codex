@@ -1,5 +1,6 @@
 use super::*;
 use crate::ModelsManagerConfig;
+use codex_protocol::openai_models::InputModality;
 use pretty_assertions::assert_eq;
 
 #[test]
@@ -15,6 +16,13 @@ fn reasoning_summaries_override_true_enables_support() {
     expected.supports_reasoning_summaries = true;
 
     assert_eq!(updated, expected);
+}
+
+#[test]
+fn provider_model_info_from_slug_uses_text_only_input_modalities() {
+    let model = provider_model_info_from_slug("provider-model", /*priority*/ 0);
+
+    assert_eq!(model.input_modalities, vec![InputModality::Text]);
 }
 
 #[test]

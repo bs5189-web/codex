@@ -9,10 +9,17 @@ use codex_protocol::openai_models::ModelsResponse;
 use http::HeaderMap;
 use http::Method;
 use http::header::ETAG;
+use serde::Deserialize;
 use std::sync::Arc;
 
 pub struct ModelsClient<T: HttpTransport> {
     session: EndpointSession<T>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelsList {
+    CodexCatalog(Vec<ModelInfo>),
+    OpenAiCompatible(Vec<String>),
 }
 
 impl<T: HttpTransport> ModelsClient<T> {
@@ -41,7 +48,7 @@ impl<T: HttpTransport> ModelsClient<T> {
         &self,
         client_version: &str,
         extra_headers: HeaderMap,
-    ) -> Result<(Vec<ModelInfo>, Option<String>), ApiError> {
+    ) -> Result<(ModelsList, Option<String>), ApiError> {
         let resp = self
             .session
             .execute_with(
@@ -61,16 +68,36 @@ impl<T: HttpTransport> ModelsClient<T> {
             .and_then(|value| value.to_str().ok())
             .map(ToString::to_string);
 
-        let ModelsResponse { models } = serde_json::from_slice::<ModelsResponse>(&resp.body)
-            .map_err(|e| {
-                ApiError::Stream(format!(
-                    "failed to decode models response: {e}; body: {}",
-                    String::from_utf8_lossy(&resp.body)
-                ))
-            })?;
+        let models = decode_models_response(&resp.body)?;
 
         Ok((models, header_etag))
     }
+}
+
+fn decode_models_response(body: &[u8]) -> Result<ModelsList, ApiError> {
+    if let Ok(ModelsResponse { models }) = serde_json::from_slice::<ModelsResponse>(body) {
+        return Ok(ModelsList::CodexCatalog(models));
+    }
+
+    let response = serde_json::from_slice::<OpenAiCompatibleModelsResponse>(body).map_err(|e| {
+        ApiError::Stream(format!(
+            "failed to decode models response: {e}; body: {}",
+            String::from_utf8_lossy(body)
+        ))
+    })?;
+    Ok(ModelsList::OpenAiCompatible(
+        response.data.into_iter().map(|model| model.id).collect(),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiCompatibleModelsResponse {
+    data: Vec<OpenAiCompatibleModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiCompatibleModel {
+    id: String,
 }
 
 #[cfg(test)]
@@ -174,7 +201,7 @@ mod tests {
             .await
             .expect("request should succeed");
 
-        assert_eq!(models.len(), 0);
+        assert_eq!(models, ModelsList::CodexCatalog(Vec::new()));
 
         let url = transport
             .last_request
@@ -238,9 +265,12 @@ mod tests {
             .await
             .expect("request should succeed");
 
+        let ModelsList::CodexCatalog(models) = models else {
+            panic!("expected Codex catalog response");
+        };
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].slug, "gpt-test");
-        assert_eq!(models[0].supported_in_api, true);
+        assert!(models[0].supported_in_api);
         assert_eq!(models[0].priority, 1);
     }
 
@@ -265,7 +295,67 @@ mod tests {
             .await
             .expect("request should succeed");
 
-        assert_eq!(models.len(), 0);
+        assert_eq!(models, ModelsList::CodexCatalog(Vec::new()));
         assert_eq!(etag, Some("\"abc\"".to_string()));
+    }
+
+    #[tokio::test]
+    async fn parses_openai_compatible_models_response() {
+        let body = Arc::new(json!({
+            "object": "list",
+            "data": [
+                {
+                    "id": "provider-model-a",
+                    "object": "model",
+                    "created": 1,
+                    "owned_by": "provider"
+                },
+                {
+                    "id": "provider-model-b",
+                    "object": "model",
+                    "created": 2,
+                    "owned_by": "provider"
+                }
+            ]
+        }));
+
+        #[derive(Clone)]
+        struct JsonTransport {
+            body: Arc<serde_json::Value>,
+        }
+
+        #[async_trait]
+        impl HttpTransport for JsonTransport {
+            async fn execute(&self, _req: Request) -> Result<Response, TransportError> {
+                Ok(Response {
+                    status: StatusCode::OK,
+                    headers: HeaderMap::new(),
+                    body: serde_json::to_vec(&*self.body).unwrap().into(),
+                })
+            }
+
+            async fn stream(&self, _req: Request) -> Result<StreamResponse, TransportError> {
+                Err(TransportError::Build("stream should not run".to_string()))
+            }
+        }
+
+        let client = ModelsClient::new(
+            JsonTransport { body },
+            provider("https://example.com/v1"),
+            Arc::new(DummyAuth),
+        );
+
+        let (models, _) = client
+            .list_models("0.99.0", HeaderMap::new())
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(
+            models,
+            ModelsList::OpenAiCompatible(vec![
+                "provider-model-a".to_string(),
+                "provider-model-b".to_string()
+            ])
+        );
     }
 }

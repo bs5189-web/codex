@@ -45,6 +45,7 @@ pub use crate::endpoint::CompactClient;
 pub use crate::endpoint::ImagesClient;
 pub use crate::endpoint::MemoriesClient;
 pub use crate::endpoint::ModelsClient;
+pub use crate::endpoint::ModelsList;
 pub use crate::endpoint::RealtimeCallClient;
 pub use crate::endpoint::RealtimeCallResponse;
 pub use crate::endpoint::RealtimeEventParser;

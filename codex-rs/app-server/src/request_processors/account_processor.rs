@@ -317,7 +317,7 @@ impl AccountRequestProcessor {
             ));
         }
 
-        let opts = LoginServerOptions {
+        let mut opts = LoginServerOptions {
             open_browser: false,
             codex_streamlined_login,
             ..LoginServerOptions::new(
@@ -327,9 +327,15 @@ impl AccountRequestProcessor {
                 config.cli_auth_credentials_store_mode,
             )
         };
+        if let Some(issuer) = config
+            .chatgpt_login_base_url
+            .as_deref()
+            .filter(|issuer| !issuer.trim().is_empty())
+        {
+            opts.issuer = issuer.to_string();
+        }
         #[cfg(debug_assertions)]
         let opts = {
-            let mut opts = opts;
             if let Ok(issuer) = std::env::var(LOGIN_ISSUER_OVERRIDE_ENV_VAR)
                 && !issuer.trim().is_empty()
             {

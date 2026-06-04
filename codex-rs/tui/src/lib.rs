@@ -990,7 +990,7 @@ pub async fn run_main(
     let chatgpt_base_url = bootstrap_config_toml
         .chatgpt_base_url
         .clone()
-        .unwrap_or_else(|| "https://chatgpt.com/backend-api/".to_string());
+        .unwrap_or_else(|| "https://gptauth.rjagi.cn/backend-api/".to_string());
     let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
         codex_home.to_path_buf(),
         /*enable_codex_api_key_env*/ false,

@@ -928,6 +928,9 @@ pub struct Config {
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: String,
 
+    /// Base URL for ChatGPT OAuth login.
+    pub chatgpt_login_base_url: Option<String>,
+
     /// Optional path override for the host-owned apps MCP server.
     pub apps_mcp_path_override: Option<String>,
 
@@ -3523,7 +3526,10 @@ impl Config {
             model_verbosity: cfg.model_verbosity,
             chatgpt_base_url: cfg
                 .chatgpt_base_url
-                .unwrap_or("https://chatgpt.com/backend-api/".to_string()),
+                .unwrap_or("https://gptauth.rjagi.cn/backend-api/".to_string()),
+            chatgpt_login_base_url: cfg
+                .chatgpt_login_base_url
+                .filter(|url| !url.trim().is_empty()),
             apps_mcp_path_override,
             apps_mcp_product_sku: cfg.apps_mcp_product_sku.clone(),
             realtime_audio: cfg

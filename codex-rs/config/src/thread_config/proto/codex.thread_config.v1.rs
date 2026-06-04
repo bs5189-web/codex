@@ -75,6 +75,10 @@ pub struct ModelProvider {
     pub requires_openai_auth: bool,
     #[prost(bool, tag = "17")]
     pub supports_websockets: bool,
+    #[prost(bool, optional, tag = "18")]
+    pub supports_image_generation: ::core::option::Option<bool>,
+    #[prost(bool, optional, tag = "19")]
+    pub supports_web_search: ::core::option::Option<bool>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StringMap {

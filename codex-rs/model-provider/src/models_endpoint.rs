@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use codex_api::ModelsClient;
+use codex_api::ModelsList;
 use codex_api::RequestTelemetry;
 use codex_api::ReqwestTransport;
 use codex_api::TransportError;
@@ -17,6 +18,7 @@ use codex_login::collect_auth_env_telemetry;
 use codex_login::default_client::build_reqwest_client;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::manager::ModelsEndpointClient;
+use codex_models_manager::model_info::provider_model_info_from_slug;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CoreResult;
@@ -71,6 +73,14 @@ impl ModelsEndpointClient for OpenAiModelsEndpoint {
         self.provider_info.has_command_auth()
     }
 
+    fn provider_cache_key(&self) -> String {
+        self.provider_info.cache_key()
+    }
+
+    fn has_provider_models_endpoint(&self) -> bool {
+        self.provider_info.base_url.is_some()
+    }
+
     async fn uses_codex_backend(&self) -> bool {
         self.auth()
             .await
@@ -99,13 +109,30 @@ impl ModelsEndpointClient for OpenAiModelsEndpoint {
         let client = ModelsClient::new(transport, api_provider, api_auth)
             .with_telemetry(Some(request_telemetry));
 
-        timeout(
+        let (models, etag) = timeout(
             MODELS_REFRESH_TIMEOUT,
             client.list_models(client_version, HeaderMap::new()),
         )
         .await
         .map_err(|_| CodexErr::Timeout)?
-        .map_err(map_api_error)
+        .map_err(map_api_error)?;
+        Ok((model_infos_from_response(models), etag))
+    }
+}
+
+fn model_infos_from_response(models: ModelsList) -> Vec<ModelInfo> {
+    match models {
+        ModelsList::CodexCatalog(models) => models,
+        ModelsList::OpenAiCompatible(model_ids) => model_ids
+            .into_iter()
+            .enumerate()
+            .map(|(priority, model_id)| {
+                provider_model_info_from_slug(
+                    &model_id,
+                    i32::try_from(priority).unwrap_or(i32::MAX),
+                )
+            })
+            .collect(),
     }
 }
 

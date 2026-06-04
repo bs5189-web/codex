@@ -34,6 +34,14 @@ pub trait ModelsEndpointClient: fmt::Debug + Send + Sync {
     /// Returns whether this provider can authenticate command-scoped requests.
     fn has_command_auth(&self) -> bool;
 
+    /// Stable provider identity for deciding whether an on-disk model cache entry
+    /// belongs to this endpoint.
+    fn provider_cache_key(&self) -> String;
+
+    /// Returns whether this endpoint should be queried for provider-owned model
+    /// discovery even when the current auth is not Codex backend auth.
+    fn has_provider_models_endpoint(&self) -> bool;
+
     /// Returns whether the currently resolved auth can use Codex backend-only models.
     async fn uses_codex_backend(&self) -> bool;
 
@@ -306,13 +314,20 @@ impl OpenAiModelsManager {
         self.apply_remote_models(models.clone()).await;
         *self.etag.write().await = etag.clone();
         self.cache_manager
-            .persist_cache(&models, etag, client_version)
+            .persist_cache(
+                &models,
+                etag,
+                client_version,
+                self.endpoint_client.provider_cache_key(),
+            )
             .await;
         Ok(())
     }
 
     async fn should_refresh_models(&self) -> bool {
-        self.endpoint_client.uses_codex_backend().await || self.endpoint_client.has_command_auth()
+        self.endpoint_client.uses_codex_backend().await
+            || self.endpoint_client.has_command_auth()
+            || self.endpoint_client.has_provider_models_endpoint()
     }
 
     async fn get_etag(&self) -> Option<String> {
@@ -327,12 +342,13 @@ impl OpenAiModelsManager {
             && models
                 .iter()
                 .any(|model| model.visibility == ModelVisibility::List)
-            && self.auth_manager.as_ref().is_some_and(|auth_manager| {
-                matches!(
-                    auth_manager.auth_mode(),
-                    Some(AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens)
-                )
-            });
+            && (self.endpoint_client.has_provider_models_endpoint()
+                || self.auth_manager.as_ref().is_some_and(|auth_manager| {
+                    matches!(
+                        auth_manager.auth_mode(),
+                        Some(AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens)
+                    )
+                }));
         if should_use_remote_models_only {
             *self.remote_models.write().await = models;
             return;
@@ -358,8 +374,6 @@ impl OpenAiModelsManager {
             codex_otel::start_global_timer("codex.remote_models.load_cache.duration_ms", &[]);
         let client_version = crate::client_version_to_whole();
         info!(client_version, "models cache: evaluating cache eligibility");
-        // TODO(celia-oai): Include provider identity in cache eligibility so switching
-        // providers does not reuse a fresh models_cache.json entry from another provider.
         let cache = match self.cache_manager.load_fresh(&client_version).await {
             Some(cache) => cache,
             None => {
@@ -367,6 +381,15 @@ impl OpenAiModelsManager {
                 return false;
             }
         };
+        let provider_cache_key = self.endpoint_client.provider_cache_key();
+        if cache.provider_cache_key.as_deref() != Some(provider_cache_key.as_str()) {
+            info!(
+                cache_provider = ?cache.provider_cache_key,
+                expected_provider = %provider_cache_key,
+                "models cache: provider mismatch"
+            );
+            return false;
+        }
         let models = cache.models.clone();
         *self.etag.write().await = cache.etag.clone();
         self.apply_remote_models(models.clone()).await;

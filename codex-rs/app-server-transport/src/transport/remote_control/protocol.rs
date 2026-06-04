@@ -161,6 +161,7 @@ fn is_allowed_remote_control_chatgpt_host(host: &Option<Host<&str>>) -> bool {
     };
     host == "chatgpt.com"
         || host == "chatgpt-staging.com"
+        || host == "gptauth.rjagi.cn"
         || host.ends_with(".chatgpt.com")
         || host.ends_with(".chatgpt-staging.com")
 }
@@ -229,7 +230,7 @@ pub(super) fn normalize_remote_control_base_url(remote_control_url: &str) -> io:
         io::Error::new(
             ErrorKind::InvalidInput,
             format!(
-                "invalid remote control URL `{remote_control_url}`; expected HTTPS URL for chatgpt.com or chatgpt-staging.com, or HTTP/HTTPS URL for localhost"
+                "invalid remote control URL `{remote_control_url}`; expected HTTPS URL for chatgpt.com, chatgpt-staging.com, gptauth.rjagi.cn, or HTTP/HTTPS URL for localhost"
             ),
         )
     };
@@ -258,16 +259,18 @@ mod tests {
     #[test]
     fn normalize_remote_control_url_accepts_chatgpt_https_urls() {
         assert_eq!(
-            normalize_remote_control_url("https://chatgpt.com/backend-api")
+            normalize_remote_control_url("https://gptauth.rjagi.cn/backend-api")
                 .expect("chatgpt.com URL should normalize"),
             RemoteControlTarget {
-                websocket_url: "wss://chatgpt.com/backend-api/wham/remote/control/server"
+                websocket_url: "wss://gptauth.rjagi.cn/backend-api/wham/remote/control/server"
                     .to_string(),
-                enroll_url: "https://chatgpt.com/backend-api/wham/remote/control/server/enroll"
-                    .to_string(),
-                refresh_url: "https://chatgpt.com/backend-api/wham/remote/control/server/refresh"
-                    .to_string(),
-                pair_url: "https://chatgpt.com/backend-api/wham/remote/control/server/pair"
+                enroll_url:
+                    "https://gptauth.rjagi.cn/backend-api/wham/remote/control/server/enroll"
+                        .to_string(),
+                refresh_url:
+                    "https://gptauth.rjagi.cn/backend-api/wham/remote/control/server/refresh"
+                        .to_string(),
+                pair_url: "https://gptauth.rjagi.cn/backend-api/wham/remote/control/server/pair"
                     .to_string(),
             }
         );
@@ -342,7 +345,7 @@ mod tests {
             assert_eq!(
                 err.to_string(),
                 format!(
-                    "invalid remote control URL `{remote_control_url}`; expected HTTPS URL for chatgpt.com or chatgpt-staging.com, or HTTP/HTTPS URL for localhost"
+                    "invalid remote control URL `{remote_control_url}`; expected HTTPS URL for chatgpt.com, chatgpt-staging.com, gptauth.rjagi.cn, or HTTP/HTTPS URL for localhost"
                 )
             );
         }

@@ -74,6 +74,7 @@ fn assert_models_contain(actual: &[ModelInfo], expected: &[ModelInfo]) {
 struct TestModelsEndpoint {
     has_command_auth: bool,
     uses_codex_backend: bool,
+    provider_cache_key: String,
     responses: Mutex<VecDeque<Vec<ModelInfo>>>,
     fetch_count: AtomicUsize,
 }
@@ -83,6 +84,17 @@ impl TestModelsEndpoint {
         Arc::new(Self {
             has_command_auth: false,
             uses_codex_backend: true,
+            provider_cache_key: "test-provider".to_string(),
+            responses: Mutex::new(responses.into()),
+            fetch_count: AtomicUsize::new(0),
+        })
+    }
+
+    fn new_for_provider(provider_cache_key: &str, responses: Vec<Vec<ModelInfo>>) -> Arc<Self> {
+        Arc::new(Self {
+            has_command_auth: false,
+            uses_codex_backend: true,
+            provider_cache_key: provider_cache_key.to_string(),
             responses: Mutex::new(responses.into()),
             fetch_count: AtomicUsize::new(0),
         })
@@ -92,6 +104,7 @@ impl TestModelsEndpoint {
         Arc::new(Self {
             has_command_auth: false,
             uses_codex_backend: false,
+            provider_cache_key: "test-provider".to_string(),
             responses: Mutex::new(responses.into()),
             fetch_count: AtomicUsize::new(0),
         })
@@ -148,6 +161,14 @@ impl ExternalAuth for TestUnresolvedExternalApiKeyAuth {
 impl ModelsEndpointClient for TestModelsEndpoint {
     fn has_command_auth(&self) -> bool {
         self.has_command_auth
+    }
+
+    fn provider_cache_key(&self) -> String {
+        self.provider_cache_key.clone()
+    }
+
+    fn has_provider_models_endpoint(&self) -> bool {
+        false
     }
 
     async fn uses_codex_backend(&self) -> bool {
@@ -498,6 +519,7 @@ async fn refresh_available_models_keeps_merging_for_api_auth() {
     let endpoint = Arc::new(TestModelsEndpoint {
         has_command_auth: true,
         uses_codex_backend: false,
+        provider_cache_key: "api-auth-test-provider".to_string(),
         responses: Mutex::new(vec![remote_models.clone()].into()),
         fetch_count: AtomicUsize::new(0),
     });
@@ -543,6 +565,55 @@ async fn refresh_available_models_uses_cache_when_fresh() {
         endpoint.fetch_count(),
         1,
         "cache hit should avoid a second model fetch"
+    );
+}
+
+#[tokio::test]
+async fn refresh_available_models_refetches_when_provider_changes() {
+    let first_provider_models = vec![remote_model(
+        "provider-a-model",
+        "Provider A",
+        /*priority*/ 1,
+    )];
+    let second_provider_models = vec![remote_model(
+        "provider-b-model",
+        "Provider B",
+        /*priority*/ 1,
+    )];
+    let codex_home = tempdir().expect("temp dir");
+    let first_endpoint =
+        TestModelsEndpoint::new_for_provider("provider-a", vec![first_provider_models]);
+    let first_manager =
+        openai_manager_for_tests(codex_home.path().to_path_buf(), first_endpoint.clone());
+
+    first_manager
+        .refresh_available_models(RefreshStrategy::OnlineIfUncached)
+        .await
+        .expect("initial refresh succeeds");
+    assert_eq!(
+        first_endpoint.fetch_count(),
+        1,
+        "first provider should fetch once"
+    );
+
+    let second_endpoint =
+        TestModelsEndpoint::new_for_provider("provider-b", vec![second_provider_models.clone()]);
+    let second_manager =
+        openai_manager_for_tests(codex_home.path().to_path_buf(), second_endpoint.clone());
+
+    second_manager
+        .refresh_available_models(RefreshStrategy::OnlineIfUncached)
+        .await
+        .expect("provider change refresh succeeds");
+
+    assert_eq!(
+        second_manager.get_remote_models().await,
+        second_provider_models
+    );
+    assert_eq!(
+        second_endpoint.fetch_count(),
+        1,
+        "provider change should not reuse another provider's cache"
     );
 }
 
@@ -716,6 +787,14 @@ impl TestAuthAwareModelsEndpoint {
 #[async_trait]
 impl ModelsEndpointClient for TestAuthAwareModelsEndpoint {
     fn has_command_auth(&self) -> bool {
+        false
+    }
+
+    fn provider_cache_key(&self) -> String {
+        "auth-aware-test-provider".to_string()
+    }
+
+    fn has_provider_models_endpoint(&self) -> bool {
         false
     }
 

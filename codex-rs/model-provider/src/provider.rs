@@ -179,6 +179,14 @@ impl ModelProvider for ConfiguredModelProvider {
         &self.info
     }
 
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            namespace_tools: true,
+            image_generation: self.info.supports_image_generation,
+            web_search: self.info.supports_web_search,
+        }
+    }
+
     fn auth_manager(&self) -> Option<Arc<AuthManager>> {
         self.auth_manager.clone()
     }
@@ -321,6 +329,8 @@ mod tests {
             websocket_connect_timeout_ms: None,
             requires_openai_auth: false,
             supports_websockets: false,
+            supports_image_generation: false,
+            supports_web_search: false,
         }
     }
 
@@ -352,13 +362,35 @@ mod tests {
     }
 
     #[test]
-    fn configured_provider_uses_default_capabilities() {
+    fn openai_provider_supports_openai_hosted_tools() {
         let provider = create_model_provider(
             ModelProviderInfo::create_openai_provider(/*base_url*/ None),
             /*auth_manager*/ None,
         );
 
         assert_eq!(provider.capabilities(), ProviderCapabilities::default());
+    }
+
+    #[test]
+    fn custom_provider_disables_openai_hosted_tools_by_default() {
+        let provider = create_model_provider(
+            ModelProviderInfo {
+                name: "DeepSeek".to_string(),
+                base_url: Some("https://api.deepseek.example/v1".to_string()),
+                requires_openai_auth: true,
+                ..Default::default()
+            },
+            /*auth_manager*/ None,
+        );
+
+        assert_eq!(
+            provider.capabilities(),
+            ProviderCapabilities {
+                namespace_tools: true,
+                image_generation: false,
+                web_search: false,
+            }
+        );
     }
 
     #[test]
@@ -590,6 +622,60 @@ mod tests {
                 .models
                 .iter()
                 .any(|model| model.slug == "provider-model")
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_provider_models_manager_reads_openai_compatible_model_ids() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({
+                        "object": "list",
+                        "data": [
+                            {
+                                "id": "provider-dynamic-a",
+                                "object": "model",
+                                "created": 1,
+                                "owned_by": "provider"
+                            },
+                            {
+                                "id": "provider-dynamic-b",
+                                "object": "model",
+                                "created": 2,
+                                "owned_by": "provider"
+                            }
+                        ]
+                    })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider =
+            create_model_provider(provider_for(server.uri()), /*auth_manager*/ None);
+        let manager =
+            provider.models_manager(test_codex_home(), /*config_model_catalog*/ None);
+        let catalog = manager.raw_model_catalog(RefreshStrategy::Online).await;
+
+        assert_eq!(
+            catalog
+                .models
+                .iter()
+                .map(|model| model.slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["provider-dynamic-a", "provider-dynamic-b"]
+        );
+        assert!(
+            catalog
+                .models
+                .iter()
+                .all(|model| model.visibility
+                    == codex_protocol::openai_models::ModelVisibility::List)
         );
     }
 }

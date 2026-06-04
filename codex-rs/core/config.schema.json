@@ -371,6 +371,9 @@
         "chatgpt_base_url": {
           "type": "string"
         },
+        "chatgpt_login_base_url": {
+          "type": "string"
+        },
         "experimental_compact_prompt_file": {
           "$ref": "#/definitions/AbsolutePathBuf"
         },
@@ -1523,6 +1526,16 @@
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "supports_image_generation": {
+          "default": false,
+          "description": "Whether this provider supports OpenAI-hosted image generation tools.",
+          "type": "boolean"
+        },
+        "supports_web_search": {
+          "default": false,
+          "description": "Whether this provider supports OpenAI-hosted web search tools.",
+          "type": "boolean"
         },
         "supports_websockets": {
           "default": false,
@@ -4416,6 +4429,10 @@
     },
     "chatgpt_base_url": {
       "description": "Base URL for requests to ChatGPT (as opposed to the OpenAI API).",
+      "type": "string"
+    },
+    "chatgpt_login_base_url": {
+      "description": "Base URL for ChatGPT OAuth login.",
       "type": "string"
     },
     "check_for_update_on_startup": {
