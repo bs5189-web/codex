@@ -9873,7 +9873,7 @@ non_code_mode_only = true
     assert_eq!(
         (
             config.agent_max_threads,
-            config.effective_agent_max_threads(MultiAgentVersion::V2)?
+            config.effective_agent_max_threads(MultiAgentVersion::V2)
         ),
         (None, Some(4))
     );
@@ -9923,7 +9923,7 @@ enabled = true
     assert_eq!(
         (
             config.agent_max_threads,
-            config.effective_agent_max_threads(MultiAgentVersion::V2)?
+            config.effective_agent_max_threads(MultiAgentVersion::V2)
         ),
         (None, Some(3))
     );
@@ -9951,6 +9951,7 @@ enabled = true
             .unwrap_or_default()
             .contains("maximum concurrency"),
     );
+    assert!(config.multi_agent_v2.hide_spawn_agent_metadata);
     assert!(config.multi_agent_v2.non_code_mode_only);
 
     Ok(())
@@ -9981,7 +9982,7 @@ subagent_usage_hint_text = ""
 }
 
 #[tokio::test]
-async fn multi_agent_v2_rejects_agents_max_threads() -> std::io::Result<()> {
+async fn multi_agent_v2_feature_rejects_agents_max_threads() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     std::fs::write(
         codex_home.path().join(CONFIG_TOML_FILE),
@@ -9999,13 +10000,45 @@ max_threads = 3
         .build()
         .await?;
     let err = config
-        .effective_agent_max_threads(MultiAgentVersion::V2)
+        .validate_multi_agent_v2_config()
         .expect_err("agents.max_threads should conflict with multi_agent_v2");
 
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     assert_eq!(
         err.to_string(),
-        "agents.max_threads cannot be set when the multi-agent runtime is v2"
+        "agents.max_threads cannot be set when features.multi_agent_v2 is enabled"
+    );
+    assert_eq!(
+        config.effective_agent_max_threads(MultiAgentVersion::V2),
+        Some(3)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn catalog_v2_allows_agents_max_threads_when_feature_disabled() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        r#"[features.multi_agent_v2]
+enabled = false
+
+[agents]
+max_threads = 3
+"#,
+    )?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .build()
+        .await?;
+
+    config.validate_multi_agent_v2_config()?;
+    assert_eq!(
+        config.effective_agent_max_threads(MultiAgentVersion::V2),
+        Some(3)
     );
 
     Ok(())
@@ -10267,7 +10300,7 @@ max_concurrent_threads_per_session = 1
     assert_eq!(
         (
             config.agent_max_threads,
-            config.effective_agent_max_threads(MultiAgentVersion::V2)?
+            config.effective_agent_max_threads(MultiAgentVersion::V2)
         ),
         (None, Some(0))
     );
