@@ -26,6 +26,18 @@ The Rust implementation is now the maintained Codex CLI and serves as the defaul
 
 Codex supports a rich set of configuration options. Note that the Rust CLI uses `config.toml` instead of `config.json`. See [`docs/config.md`](../docs/config.md) for details.
 
+### Local login smoke test
+
+On macOS, this command runs the Rust CLI login flow without opening a browser and prints the authorization URL that the local login server generated:
+
+```shell
+MACOSX_DEPLOYMENT_TARGET=13.3 \
+CXXFLAGS='-std=c++17' \
+RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup' \
+BROWSER=/usr/bin/false \
+cargo run -p codex-cli --bin codex -- login
+```
+
 ### Model Context Protocol Support
 
 #### MCP client

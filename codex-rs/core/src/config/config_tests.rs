@@ -206,6 +206,43 @@ async fn load_config_normalizes_relative_cwd_override() -> std::io::Result<()> {
 }
 
 #[tokio::test]
+async fn load_config_reads_chatgpt_login_base_url() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            chatgpt_login_base_url: Some("http://localhost:3000".to_string()),
+            ..Default::default()
+        },
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.chatgpt_login_base_url.as_deref(),
+        Some("http://localhost:3000")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_ignores_empty_chatgpt_login_base_url() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            chatgpt_login_base_url: Some("  ".to_string()),
+            ..Default::default()
+        },
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.chatgpt_login_base_url, None);
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_config_loads_global_agents_instructions() -> std::io::Result<()> {
     let codex_home = tempdir()?;
     std::fs::write(

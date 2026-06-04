@@ -363,6 +363,9 @@
         "chatgpt_base_url": {
           "type": "string"
         },
+        "chatgpt_login_base_url": {
+          "type": "string"
+        },
         "experimental_compact_prompt_file": {
           "$ref": "#/definitions/AbsolutePathBuf"
         },
@@ -4376,6 +4379,10 @@
     },
     "chatgpt_base_url": {
       "description": "Base URL for requests to ChatGPT (as opposed to the OpenAI API).",
+      "type": "string"
+    },
+    "chatgpt_login_base_url": {
+      "description": "Base URL for ChatGPT OAuth login.",
       "type": "string"
     },
     "check_for_update_on_startup": {

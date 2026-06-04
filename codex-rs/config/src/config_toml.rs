@@ -353,6 +353,9 @@ pub struct ConfigToml {
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: Option<String>,
 
+    /// Base URL for ChatGPT OAuth login.
+    pub chatgpt_login_base_url: Option<String>,
+
     /// Optional product SKU forwarded on host-owned Codex Apps MCP requests.
     pub apps_mcp_product_sku: Option<String>,
 
