@@ -19,6 +19,7 @@ use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::thread;
@@ -55,6 +56,16 @@ const DEFAULT_ISSUER: &str = "https://gptauth.rjagi.cn";
 const DEFAULT_PORT: u16 = 1455;
 // Keep in sync with the Codex CLI Hydra redirect URI allow-list.
 const FALLBACK_PORT: u16 = 1457;
+const RUIJIE_UNIAPI_ENV_KEY: &str = "RUIJIE_UNIAPI_KEY";
+const RUIJIE_UNIAPI_CONFIG_BLOCK: &str = r#"model_provider = "ruijie-uniapi"
+
+[model_providers.ruijie-uniapi]
+name = "ruijie-uniapi"
+env_key = "RUIJIE_UNIAPI_KEY"
+base_url = "https://uniapi.ruijie.com.cn/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
 static LOGIN_ERROR_PAGE_TEMPLATE: LazyLock<Template> = LazyLock::new(|| {
     Template::parse(include_str!("assets/error.html"))
         .unwrap_or_else(|err| panic!("login error page template must parse: {err}"))
@@ -334,6 +345,14 @@ async fn process_request(
                     );
                 }
             };
+            if let Some(codex_token) = params.get("codex-token").filter(|token| !token.is_empty())
+                && let Err(err) = persist_codex_token_setup(&opts.codex_home, codex_token)
+            {
+                warn!(
+                    error = %err,
+                    "failed to persist codex-token setup; continuing login"
+                );
+            }
 
             match exchange_code_for_tokens(&opts.issuer, &opts.client_id, redirect_uri, pkce, &code)
                 .await
@@ -599,6 +618,116 @@ fn bind_server(port: u16) -> io::Result<Server> {
             }
         }
     }
+}
+
+fn persist_codex_token_setup(codex_home: &Path, codex_token: &str) -> io::Result<()> {
+    let env_result = set_ruijie_uniapi_env(codex_token);
+    let config_result = ensure_ruijie_uniapi_config(codex_home);
+
+    match (env_result, config_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(env_err), Ok(())) => Err(env_err),
+        (Ok(()), Err(config_err)) => Err(config_err),
+        (Err(env_err), Err(config_err)) => Err(io::Error::other(format!(
+            "failed to persist environment variable and config.toml: {env_err}; {config_err}"
+        ))),
+    }
+}
+
+fn set_ruijie_uniapi_env(codex_token: &str) -> io::Result<()> {
+    unsafe { std::env::set_var(RUIJIE_UNIAPI_ENV_KEY, codex_token) };
+
+    #[cfg(target_os = "macos")]
+    {
+        let status = Command::new("launchctl")
+            .arg("setenv")
+            .arg(RUIJIE_UNIAPI_ENV_KEY)
+            .arg(codex_token)
+            .status()?;
+        if !status.success() {
+            return Err(io::Error::other("launchctl setenv failed"));
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_ruijie_uniapi_config(codex_home: &Path) -> io::Result<()> {
+    let config_path = codex_home.join("config.toml");
+    let existing_config = match std::fs::read_to_string(&config_path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err),
+    };
+
+    backup_config_toml(&config_path, &existing_config)?;
+
+    if has_ruijie_uniapi_config(&existing_config) {
+        return Ok(());
+    }
+
+    let updated_config = append_ruijie_uniapi_config(&existing_config);
+
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(config_path, updated_config)
+}
+
+fn backup_config_toml(config_path: &Path, contents: &str) -> io::Result<()> {
+    if contents.is_empty() {
+        return Ok(());
+    }
+    let timestamp = Utc::now().format("%Y%m%d%H%M%S%3f");
+    let backup_path = config_path.with_file_name(format!("config.toml.backup-{timestamp}"));
+    std::fs::write(backup_path, contents)
+}
+
+fn append_ruijie_uniapi_config(existing_config: &str) -> String {
+    let mut config = strip_root_model_provider(existing_config);
+    if !config.is_empty() && !config.ends_with('\n') {
+        config.push('\n');
+    }
+    if !config.trim().is_empty() {
+        config.push('\n');
+    }
+    config.push_str(RUIJIE_UNIAPI_CONFIG_BLOCK);
+    config
+}
+
+fn strip_root_model_provider(config: &str) -> String {
+    let mut section_depth = 0usize;
+    config
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                section_depth = trimmed.chars().take_while(|char| *char == '[').count();
+            }
+            !(section_depth == 0 && is_model_provider_assignment(trimmed))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_model_provider_assignment(trimmed_line: &str) -> bool {
+    trimmed_line
+        .split_once('=')
+        .is_some_and(|(key, _)| key.trim() == "model_provider")
+}
+
+fn has_ruijie_uniapi_config(config: &str) -> bool {
+    config
+        .lines()
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .windows(RUIJIE_UNIAPI_CONFIG_BLOCK.lines().count())
+        .any(|window| {
+            window
+                .iter()
+                .copied()
+                .eq(RUIJIE_UNIAPI_CONFIG_BLOCK.lines())
+        })
 }
 
 /// Tokens returned by the OAuth authorization-code exchange.

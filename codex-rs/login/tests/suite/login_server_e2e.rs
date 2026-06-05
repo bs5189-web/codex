@@ -2,6 +2,7 @@
 use std::io;
 use std::net::SocketAddr;
 use std::net::TcpListener;
+use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -21,6 +22,15 @@ const FALLBACK_LOGIN_PORT: u16 = 1457;
 const WORKSPACE_ID_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174000";
 const WORKSPACE_ID_SECOND_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174001";
 const WORKSPACE_ID_DISALLOWED: &str = "123e4567-e89b-42d3-a456-426614174002";
+const RUIJIE_UNIAPI_PROVIDER: &str = r#"model_provider = "ruijie-uniapi"
+
+[model_providers.ruijie-uniapi]
+name = "ruijie-uniapi"
+env_key = "RUIJIE_UNIAPI_KEY"
+base_url = "https://uniapi.ruijie.com.cn/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
 
 // See spawn.rs for details
 
@@ -207,6 +217,154 @@ async fn creates_missing_codex_home_dir() -> Result<()> {
         "auth.json should be created even if parent dir was missing"
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn callback_with_codex_token_initializes_ruijie_uniapi_config() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let (issuer_addr, _issuer_handle) = start_mock_issuer(WORKSPACE_ID_ALLOWED);
+    let issuer = format!("http://{}:{}", issuer_addr.ip(), issuer_addr.port());
+
+    let tmp = tempdir()?;
+    let codex_home = tmp.path().to_path_buf();
+    let config_path = codex_home.join("config.toml");
+    std::fs::write(&config_path, "model = \"gpt-5\"\n")?;
+
+    let state = "state-with-codex-token".to_string();
+
+    let opts = ServerOptions {
+        codex_home: codex_home.clone(),
+        cli_auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+        client_id: codex_login::CLIENT_ID.to_string(),
+        issuer,
+        port: 0,
+        open_browser: false,
+        force_state: Some(state.clone()),
+        forced_chatgpt_workspace_id: None,
+        codex_streamlined_login: false,
+    };
+    let server = run_login_server(opts)?;
+    let login_port = server.actual_port;
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()?;
+    let url = format!(
+        "http://127.0.0.1:{login_port}/auth/callback?code=abc&state={state}&codex-token=ruijie-token-123"
+    );
+    let resp = client.get(&url).send().await?;
+    assert!(resp.status().is_success());
+
+    server.block_until_done().await?;
+
+    assert_eq!(
+        read_config_model_provider(&config_path)?,
+        Some("ruijie-uniapi".to_string())
+    );
+    assert_eq!(
+        read_config_provider_base_url(&config_path)?,
+        Some("https://uniapi.ruijie.com.cn/v1".to_string())
+    );
+    assert!(std::fs::read_to_string(&config_path)?.contains("model = \"gpt-5\""));
+
+    let backup_path = find_single_config_backup(&codex_home)?;
+    assert_eq!(std::fs::read_to_string(backup_path)?, "model = \"gpt-5\"\n");
+
+    let auth_path = codex_home.join("auth.json");
+    assert!(auth_path.exists(), "auth.json should still be persisted");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn callback_with_codex_token_keeps_existing_ruijie_uniapi_config() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let (issuer_addr, _issuer_handle) = start_mock_issuer(WORKSPACE_ID_ALLOWED);
+    let issuer = format!("http://{}:{}", issuer_addr.ip(), issuer_addr.port());
+
+    let tmp = tempdir()?;
+    let codex_home = tmp.path().to_path_buf();
+    let config_path = codex_home.join("config.toml");
+    std::fs::write(&config_path, RUIJIE_UNIAPI_PROVIDER)?;
+
+    let state = "state-existing-ruijie-config".to_string();
+
+    let opts = ServerOptions {
+        codex_home: codex_home.clone(),
+        cli_auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+        client_id: codex_login::CLIENT_ID.to_string(),
+        issuer,
+        port: 0,
+        open_browser: false,
+        force_state: Some(state.clone()),
+        forced_chatgpt_workspace_id: None,
+        codex_streamlined_login: false,
+    };
+    let server = run_login_server(opts)?;
+    let login_port = server.actual_port;
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()?;
+    let url = format!(
+        "http://127.0.0.1:{login_port}/auth/callback?code=abc&state={state}&codex-token=ruijie-token-123"
+    );
+    let resp = client.get(&url).send().await?;
+    assert!(resp.status().is_success());
+
+    server.block_until_done().await?;
+
+    assert_eq!(
+        std::fs::read_to_string(&config_path)?,
+        RUIJIE_UNIAPI_PROVIDER
+    );
+    let backup_path = find_single_config_backup(&codex_home)?;
+    assert_eq!(
+        std::fs::read_to_string(backup_path)?,
+        RUIJIE_UNIAPI_PROVIDER
+    );
+
+    Ok(())
+}
+
+fn read_config_model_provider(config_path: &Path) -> Result<Option<String>> {
+    Ok(std::fs::read_to_string(config_path)?
+        .lines()
+        .find_map(|line| line.strip_prefix("model_provider = \""))
+        .and_then(|value| value.strip_suffix('"'))
+        .map(ToOwned::to_owned))
+}
+
+fn read_config_provider_base_url(config_path: &Path) -> Result<Option<String>> {
+    Ok(std::fs::read_to_string(config_path)?
+        .lines()
+        .find_map(|line| line.strip_prefix("base_url = \""))
+        .and_then(|value| value.strip_suffix('"'))
+        .map(ToOwned::to_owned))
+}
+
+fn find_single_config_backup(codex_home: &Path) -> Result<std::path::PathBuf> {
+    let backups = find_config_backups(codex_home)?;
+    let [backup] = backups.as_slice() else {
+        anyhow::bail!("expected exactly one config.toml backup, found {backups:?}");
+    };
+    Ok(backup.clone())
+}
+
+fn find_config_backups(codex_home: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let mut backups = std::fs::read_dir(codex_home)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("config.toml.backup-"))
+        })
+        .collect::<Vec<_>>();
+    backups.sort();
+    Ok(backups)
 }
 
 #[tokio::test]
