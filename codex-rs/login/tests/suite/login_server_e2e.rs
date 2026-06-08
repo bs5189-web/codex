@@ -31,6 +31,16 @@ base_url = "https://uniapi.ruijie.com.cn/v1"
 wire_api = "responses"
 requires_openai_auth = true
 "#;
+const RUIJIE_UNIAPI_PROVIDER_WITH_API_KEY: &str = r#"model_provider = "ruijie-uniapi"
+
+[model_providers.ruijie-uniapi]
+name = "ruijie-uniapi"
+env_key = "RUIJIE_UNIAPI_KEY"
+base_url = "https://uniapi.ruijie.com.cn/v1"
+wire_api = "responses"
+requires_openai_auth = true
+api_key = "ruijie-token-123"
+"#;
 
 // See spawn.rs for details
 
@@ -266,6 +276,10 @@ async fn callback_with_codex_token_initializes_ruijie_uniapi_config() -> Result<
         read_config_provider_base_url(&config_path)?,
         Some("https://uniapi.ruijie.com.cn/v1".to_string())
     );
+    assert_eq!(
+        read_config_provider_api_key(&config_path)?,
+        Some("ruijie-token-123".to_string())
+    );
     assert!(std::fs::read_to_string(&config_path)?.contains("model = \"gpt-5\""));
 
     let backup_path = find_single_config_backup(&codex_home)?;
@@ -318,13 +332,80 @@ async fn callback_with_codex_token_keeps_existing_ruijie_uniapi_config() -> Resu
 
     assert_eq!(
         std::fs::read_to_string(&config_path)?,
-        RUIJIE_UNIAPI_PROVIDER
+        RUIJIE_UNIAPI_PROVIDER_WITH_API_KEY
     );
     let backup_path = find_single_config_backup(&codex_home)?;
     assert_eq!(
         std::fs::read_to_string(backup_path)?,
         RUIJIE_UNIAPI_PROVIDER
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn callback_with_codex_token_preserves_existing_provider_and_writes_selection_and_api_key()
+-> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let (issuer_addr, _issuer_handle) = start_mock_issuer(WORKSPACE_ID_ALLOWED);
+    let issuer = format!("http://{}:{}", issuer_addr.ip(), issuer_addr.port());
+
+    let tmp = tempdir()?;
+    let codex_home = tmp.path().to_path_buf();
+    let config_path = codex_home.join("config.toml");
+    let original_config = r#"model = "gpt-5"
+
+[model_providers.ruijie-uniapi]
+name = "custom ruijie provider"
+env_key = "CUSTOM_RUIJIE_KEY"
+base_url = "https://custom.example.com/v1"
+wire_api = "responses"
+"#;
+    std::fs::write(&config_path, original_config)?;
+
+    let state = "state-existing-provider-missing-selection".to_string();
+
+    let opts = ServerOptions {
+        codex_home: codex_home.clone(),
+        cli_auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+        client_id: codex_login::CLIENT_ID.to_string(),
+        issuer,
+        port: 0,
+        open_browser: false,
+        force_state: Some(state.clone()),
+        forced_chatgpt_workspace_id: None,
+        codex_streamlined_login: false,
+    };
+    let server = run_login_server(opts)?;
+    let login_port = server.actual_port;
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()?;
+    let url = format!(
+        "http://127.0.0.1:{login_port}/auth/callback?code=abc&state={state}&codex-token=ruijie-token-123"
+    );
+    let resp = client.get(&url).send().await?;
+    assert!(resp.status().is_success());
+
+    server.block_until_done().await?;
+
+    assert_eq!(
+        std::fs::read_to_string(&config_path)?,
+        r#"model = "gpt-5"
+model_provider = "ruijie-uniapi"
+
+[model_providers.ruijie-uniapi]
+name = "custom ruijie provider"
+env_key = "CUSTOM_RUIJIE_KEY"
+base_url = "https://custom.example.com/v1"
+wire_api = "responses"
+api_key = "ruijie-token-123"
+"#
+    );
+    let backup_path = find_single_config_backup(&codex_home)?;
+    assert_eq!(std::fs::read_to_string(backup_path)?, original_config);
 
     Ok(())
 }
@@ -341,6 +422,14 @@ fn read_config_provider_base_url(config_path: &Path) -> Result<Option<String>> {
     Ok(std::fs::read_to_string(config_path)?
         .lines()
         .find_map(|line| line.strip_prefix("base_url = \""))
+        .and_then(|value| value.strip_suffix('"'))
+        .map(ToOwned::to_owned))
+}
+
+fn read_config_provider_api_key(config_path: &Path) -> Result<Option<String>> {
+    Ok(std::fs::read_to_string(config_path)?
+        .lines()
+        .find_map(|line| line.strip_prefix("api_key = \""))
         .and_then(|value| value.strip_suffix('"'))
         .map(ToOwned::to_owned))
 }

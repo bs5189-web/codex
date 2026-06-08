@@ -57,9 +57,9 @@ const DEFAULT_PORT: u16 = 1455;
 // Keep in sync with the Codex CLI Hydra redirect URI allow-list.
 const FALLBACK_PORT: u16 = 1457;
 const RUIJIE_UNIAPI_ENV_KEY: &str = "RUIJIE_UNIAPI_KEY";
-const RUIJIE_UNIAPI_CONFIG_BLOCK: &str = r#"model_provider = "ruijie-uniapi"
-
-[model_providers.ruijie-uniapi]
+const RUIJIE_UNIAPI_PROVIDER_ID: &str = "ruijie-uniapi";
+const RUIJIE_UNIAPI_PROVIDER_SECTION: &str = "[model_providers.ruijie-uniapi]";
+const RUIJIE_UNIAPI_CONFIG_BLOCK: &str = r#"[model_providers.ruijie-uniapi]
 name = "ruijie-uniapi"
 env_key = "RUIJIE_UNIAPI_KEY"
 base_url = "https://uniapi.ruijie.com.cn/v1"
@@ -622,7 +622,7 @@ fn bind_server(port: u16) -> io::Result<Server> {
 
 fn persist_codex_token_setup(codex_home: &Path, codex_token: &str) -> io::Result<()> {
     let env_result = set_ruijie_uniapi_env(codex_token);
-    let config_result = ensure_ruijie_uniapi_config(codex_home);
+    let config_result = ensure_ruijie_uniapi_config(codex_home, codex_token);
 
     match (env_result, config_result) {
         (Ok(()), Ok(())) => Ok(()),
@@ -652,7 +652,7 @@ fn set_ruijie_uniapi_env(codex_token: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn ensure_ruijie_uniapi_config(codex_home: &Path) -> io::Result<()> {
+fn ensure_ruijie_uniapi_config(codex_home: &Path, codex_token: &str) -> io::Result<()> {
     let config_path = codex_home.join("config.toml");
     let existing_config = match std::fs::read_to_string(&config_path) {
         Ok(contents) => contents,
@@ -662,11 +662,10 @@ fn ensure_ruijie_uniapi_config(codex_home: &Path) -> io::Result<()> {
 
     backup_config_toml(&config_path, &existing_config)?;
 
-    if has_ruijie_uniapi_config(&existing_config) {
+    let updated_config = update_ruijie_uniapi_config(&existing_config, codex_token);
+    if updated_config == existing_config {
         return Ok(());
     }
-
-    let updated_config = append_ruijie_uniapi_config(&existing_config);
 
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -683,8 +682,17 @@ fn backup_config_toml(config_path: &Path, contents: &str) -> io::Result<()> {
     std::fs::write(backup_path, contents)
 }
 
-fn append_ruijie_uniapi_config(existing_config: &str) -> String {
-    let mut config = strip_root_model_provider(existing_config);
+fn update_ruijie_uniapi_config(existing_config: &str, codex_token: &str) -> String {
+    let config = ensure_root_ruijie_uniapi_model_provider(existing_config);
+    if has_ruijie_uniapi_config(&config) {
+        return write_ruijie_uniapi_api_key(&config, codex_token);
+    }
+
+    append_ruijie_uniapi_config(&config, codex_token)
+}
+
+fn append_ruijie_uniapi_config(existing_config: &str, codex_token: &str) -> String {
+    let mut config = existing_config.to_string();
     if !config.is_empty() && !config.ends_with('\n') {
         config.push('\n');
     }
@@ -692,7 +700,19 @@ fn append_ruijie_uniapi_config(existing_config: &str) -> String {
         config.push('\n');
     }
     config.push_str(RUIJIE_UNIAPI_CONFIG_BLOCK);
+    config.push_str(&format!(
+        "api_key = \"{}\"\n",
+        escape_toml_basic_string(codex_token)
+    ));
     config
+}
+
+fn ensure_root_ruijie_uniapi_model_provider(config: &str) -> String {
+    if has_root_ruijie_uniapi_model_provider(config) {
+        return config.to_string();
+    }
+
+    insert_root_model_provider(&strip_root_model_provider(config))
 }
 
 fn strip_root_model_provider(config: &str) -> String {
@@ -701,13 +721,49 @@ fn strip_root_model_provider(config: &str) -> String {
         .lines()
         .filter(|line| {
             let trimmed = line.trim();
-            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if is_toml_table_header(trimmed) {
                 section_depth = trimmed.chars().take_while(|char| *char == '[').count();
             }
             !(section_depth == 0 && is_model_provider_assignment(trimmed))
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn insert_root_model_provider(config: &str) -> String {
+    let mut lines = config.lines().map(str::to_string).collect::<Vec<_>>();
+    let mut insertion_index = lines
+        .iter()
+        .position(|line| is_toml_table_header(line.trim()))
+        .unwrap_or(lines.len());
+
+    while insertion_index > 0 && lines[insertion_index - 1].trim().is_empty() {
+        insertion_index -= 1;
+    }
+
+    lines.insert(
+        insertion_index,
+        format!("model_provider = \"{RUIJIE_UNIAPI_PROVIDER_ID}\""),
+    );
+
+    let mut updated = lines.join("\n");
+    updated.push('\n');
+    updated
+}
+
+fn has_root_ruijie_uniapi_model_provider(config: &str) -> bool {
+    let mut section_depth = 0usize;
+    config.lines().any(|line| {
+        let trimmed = line.trim();
+        if is_toml_table_header(trimmed) {
+            section_depth = trimmed.chars().take_while(|char| *char == '[').count();
+        }
+        section_depth == 0
+            && is_model_provider_assignment(trimmed)
+            && trimmed
+                .split_once('=')
+                .is_some_and(|(_, value)| value.trim() == "\"ruijie-uniapi\"")
+    })
 }
 
 fn is_model_provider_assignment(trimmed_line: &str) -> bool {
@@ -719,15 +775,71 @@ fn is_model_provider_assignment(trimmed_line: &str) -> bool {
 fn has_ruijie_uniapi_config(config: &str) -> bool {
     config
         .lines()
-        .map(str::trim)
-        .collect::<Vec<_>>()
-        .windows(RUIJIE_UNIAPI_CONFIG_BLOCK.lines().count())
-        .any(|window| {
-            window
-                .iter()
-                .copied()
-                .eq(RUIJIE_UNIAPI_CONFIG_BLOCK.lines())
+        .any(|line| line.trim() == RUIJIE_UNIAPI_PROVIDER_SECTION)
+}
+
+fn write_ruijie_uniapi_api_key(config: &str, codex_token: &str) -> String {
+    let mut lines = config.lines().map(str::to_string).collect::<Vec<_>>();
+    let Some(section_index) = lines
+        .iter()
+        .position(|line| line.trim() == RUIJIE_UNIAPI_PROVIDER_SECTION)
+    else {
+        return append_ruijie_uniapi_config(config, codex_token);
+    };
+
+    let section_end_index = lines
+        .iter()
+        .enumerate()
+        .skip(section_index + 1)
+        .find_map(|(index, line)| is_toml_table_header(line.trim()).then_some(index))
+        .unwrap_or(lines.len());
+    let api_key_value = format!("api_key = \"{}\"", escape_toml_basic_string(codex_token));
+
+    if let Some(api_key_index) = lines[section_index + 1..section_end_index]
+        .iter()
+        .position(|line| is_api_key_assignment(line.trim()))
+        .map(|offset| section_index + 1 + offset)
+    {
+        let indentation = lines[api_key_index]
+            .chars()
+            .take_while(|char| char.is_whitespace())
+            .collect::<String>();
+        lines[api_key_index] = format!("{indentation}{api_key_value}");
+    } else {
+        let mut insertion_index = section_end_index;
+        while insertion_index > section_index + 1 && lines[insertion_index - 1].trim().is_empty() {
+            insertion_index -= 1;
+        }
+        lines.insert(insertion_index, api_key_value);
+    }
+
+    let mut updated = lines.join("\n");
+    updated.push('\n');
+    updated
+}
+
+fn is_api_key_assignment(trimmed_line: &str) -> bool {
+    trimmed_line
+        .split_once('=')
+        .is_some_and(|(key, _)| key.trim() == "api_key")
+}
+
+fn is_toml_table_header(trimmed_line: &str) -> bool {
+    trimmed_line.starts_with('[') && trimmed_line.ends_with(']')
+}
+
+fn escape_toml_basic_string(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|char| match char {
+            '\\' => "\\\\".chars().collect::<Vec<_>>(),
+            '"' => "\\\"".chars().collect::<Vec<_>>(),
+            '\n' => "\\n".chars().collect::<Vec<_>>(),
+            '\r' => "\\r".chars().collect::<Vec<_>>(),
+            '\t' => "\\t".chars().collect::<Vec<_>>(),
+            _ => vec![char],
         })
+        .collect()
 }
 
 /// Tokens returned by the OAuth authorization-code exchange.
