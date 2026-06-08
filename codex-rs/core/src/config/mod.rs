@@ -2263,6 +2263,21 @@ pub fn resolve_oss_provider(
     }
 }
 
+fn set_model_provider_api_key_env(model_provider: &ModelProviderInfo) {
+    let (Some(env_key), Some(api_key)) = (&model_provider.env_key, &model_provider.api_key) else {
+        return;
+    };
+    if env_key.trim().is_empty() || api_key.trim().is_empty() {
+        return;
+    }
+
+    // SAFETY: config loading happens during startup before Codex starts worker
+    // threads that may read the provider environment.
+    unsafe {
+        std::env::set_var(env_key, api_key);
+    }
+}
+
 /// Resolve the web search mode from explicit config and feature flags.
 fn resolve_web_search_mode(config_toml: &ConfigToml, features: &Features) -> Option<WebSearchMode> {
     if let Some(mode) = config_toml.web_search {
@@ -3055,6 +3070,7 @@ impl Config {
                 std::io::Error::new(std::io::ErrorKind::NotFound, message)
             })?
             .clone();
+        set_model_provider_api_key_env(&model_provider);
 
         let shell_environment_policy = cfg.shell_environment_policy.into();
         let allow_login_shell = cfg.allow_login_shell.unwrap_or(true);

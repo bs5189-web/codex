@@ -1446,6 +1446,10 @@
       "additionalProperties": false,
       "description": "Serializable representation of a provider definition.",
       "properties": {
+        "api_key": {
+          "description": "API key to place into `env_key` during config loading.",
+          "type": "string"
+        },
         "auth": {
           "allOf": [
             {

@@ -169,6 +169,7 @@ fn model_provider_from_proto(
         env_key: provider.env_key,
         env_key_instructions: provider.env_key_instructions,
         experimental_bearer_token: provider.experimental_bearer_token,
+        api_key: None,
         auth: provider
             .auth
             .map(model_provider_auth_from_proto)
@@ -205,6 +206,7 @@ fn model_provider_to_proto(
         env_key,
         env_key_instructions,
         experimental_bearer_token,
+        api_key: _,
         auth,
         aws: _,
         wire_api,
@@ -497,6 +499,7 @@ mod tests {
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
+            api_key: None,
             auth: Some(ModelProviderAuthInfo {
                 command: "token-helper".to_string(),
                 args: vec!["--json".to_string()],

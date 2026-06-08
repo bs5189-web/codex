@@ -98,6 +98,8 @@ pub struct ModelProviderInfo {
     /// config is discouraged in favor of `env_key` for security reasons, but
     /// this may be necessary when using this programmatically.
     pub experimental_bearer_token: Option<String>,
+    /// API key to place into `env_key` during config loading.
+    pub api_key: Option<String>,
     /// Command-backed bearer-token configuration for this provider.
     pub auth: Option<ModelProviderAuthInfo>,
     /// AWS SigV4 auth configuration for this provider.
@@ -378,6 +380,7 @@ impl ModelProviderInfo {
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
+            api_key: None,
             auth: None,
             aws: None,
             wire_api: WireApi::Responses,
@@ -419,6 +422,7 @@ impl ModelProviderInfo {
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
+            api_key: None,
             auth: None,
             aws: Some(aws.unwrap_or(ModelProviderAwsAuthInfo {
                 profile: None,
@@ -558,6 +562,7 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         env_key: None,
         env_key_instructions: None,
         experimental_bearer_token: None,
+        api_key: None,
         auth: None,
         aws: None,
         wire_api,

@@ -106,6 +106,7 @@ use rmcp::model::UrlElicitationCapability;
 use codex_config::test_support::CloudConfigBundleFixture;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -158,6 +159,34 @@ fn http_mcp(url: &str) -> McpServerConfig {
         oauth: None,
         oauth_resource: None,
         tools: HashMap::new(),
+    }
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn unset(key: &'static str) -> Self {
+        let original = std::env::var_os(key);
+        // SAFETY: callers use a serial_test lock while mutating process environment.
+        unsafe {
+            std::env::remove_var(key);
+        }
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        // SAFETY: the guard restores the original environment value while the serial lock is held.
+        unsafe {
+            match &self.original {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
     }
 }
 
@@ -618,6 +647,41 @@ region = "us-west-2"
             .and_then(|aws| aws.region.as_deref()),
         Some("us-west-2")
     );
+}
+
+#[tokio::test]
+#[serial_test::serial(ruijie_uniapi_env)]
+async fn load_config_sets_ruijie_uniapi_env_from_config_api_key() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let _env_guard = EnvVarGuard::unset("CUSTOM_RUIJIE_UNIAPI_KEY");
+    let cfg: ConfigToml = toml::from_str(
+        r#"
+model_provider = "ruijie-uniapi"
+
+[model_providers.ruijie-uniapi]
+name = "ruijie-uniapi"
+env_key = "CUSTOM_RUIJIE_UNIAPI_KEY"
+base_url = "https://uniapi.ruijie.com.cn/v1"
+wire_api = "responses"
+requires_openai_auth = true
+api_key = "configured-token"
+"#,
+    )
+    .expect("ruijie provider config should parse");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, "ruijie-uniapi");
+    assert_eq!(
+        std::env::var("CUSTOM_RUIJIE_UNIAPI_KEY").ok().as_deref(),
+        Some("configured-token")
+    );
+    Ok(())
 }
 
 #[tokio::test]

@@ -303,6 +303,7 @@ mod tests {
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
+            api_key: None,
             auth: None,
             aws: None,
             wire_api: WireApi::Responses,

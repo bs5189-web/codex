@@ -857,6 +857,7 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
         env_key: None,
         env_key_instructions: None,
         experimental_bearer_token: None,
+        api_key: None,
         auth: Some(auth),
         aws: None,
         wire_api: WireApi::Responses,
@@ -2317,6 +2318,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         env_key: None,
         env_key_instructions: None,
         experimental_bearer_token: None,
+        api_key: None,
         auth: None,
         aws: None,
         wire_api: WireApi::Responses,
@@ -2926,6 +2928,7 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
         // Reuse the existing environment variable to avoid using unsafe code
         env_key: Some(EXISTING_ENV_VAR_WITH_NON_EMPTY_VALUE.to_string()),
         experimental_bearer_token: None,
+        api_key: None,
         auth: None,
         aws: None,
         query_params: Some(std::collections::HashMap::from([(
@@ -3023,6 +3026,7 @@ async fn env_var_overrides_loaded_auth() {
         )])),
         env_key_instructions: None,
         experimental_bearer_token: None,
+        api_key: None,
         auth: None,
         aws: None,
         wire_api: WireApi::Responses,
