@@ -1,0 +1,193 @@
+name: bootstrap-macos-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag to create or update."
+        required: true
+        default: "codex-macos-bootstrap-20260608-1"
+      target:
+        description: "Rust target triple. Use native to match the macOS runner host."
+        required: true
+        default: "native"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bootstrap-macos-release-${{ inputs.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build bootstrap macOS package
+    runs-on: macos-latest
+    timeout-minutes: 120
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      CARGO_PROFILE_RELEASE_LTO: "thin"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Resolve target
+        id: target
+        shell: bash
+        env:
+          REQUESTED_TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          if [[ "${REQUESTED_TARGET}" == "native" ]]; then
+            target="$(rustc -vV | awk '/^host:/ {print $2}')"
+          else
+            target="${REQUESTED_TARGET}"
+          fi
+
+          case "${target}" in
+            aarch64-apple-darwin|x86_64-apple-darwin)
+              ;;
+            *)
+              echo "Unsupported bootstrap macOS target: ${target}" >&2
+              exit 1
+              ;;
+          esac
+
+          rustup target add "${target}"
+          echo "target=${target}" >> "$GITHUB_OUTPUT"
+
+      - name: Print runner specs
+        shell: bash
+        run: |
+          set -euo pipefail
+          total_ram="$(sysctl -n hw.memsize | awk '{printf "%.1f GiB\n", $1 / 1024 / 1024 / 1024}')"
+          echo "Runner: ${RUNNER_NAME:-unknown}"
+          echo "OS: $(sw_vers -productName) $(sw_vers -productVersion)"
+          echo "Hardware model: $(sysctl -n hw.model)"
+          echo "CPU architecture: $(uname -m)"
+          echo "Rust target: ${{ steps.target.outputs.target }}"
+          echo "Logical CPUs: $(sysctl -n hw.logicalcpu)"
+          echo "Physical CPUs: $(sysctl -n hw.physicalcpu)"
+          echo "Total RAM: ${total_ram}"
+          df -h .
+
+      - name: Configure rusty_v8 artifact overrides and verify checksums
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ steps.target.outputs.target }}
+
+      - name: Build Codex CLI
+        shell: bash
+        working-directory: codex-rs
+        run: |
+          set -euo pipefail
+          cargo build \
+            --target "${{ steps.target.outputs.target }}" \
+            --release \
+            --timings \
+            --bin codex
+
+      - name: Build package archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ steps.target.outputs.target }}"
+          archive_dir="${GITHUB_WORKSPACE}/dist/${target}"
+          mkdir -p "${archive_dir}"
+
+          bash "${GITHUB_WORKSPACE}/.github/scripts/build-codex-package-archive.sh" \
+            --target "${target}" \
+            --bundle primary \
+            --entrypoint-dir "${GITHUB_WORKSPACE}/codex-rs/target/${target}/release" \
+            --archive-dir "${archive_dir}"
+
+      - name: Verify package archive
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ steps.target.outputs.target }}"
+          archive="dist/${target}/codex-package-${target}.tar.gz"
+          zstd_archive="dist/${target}/codex-package-${target}.tar.zst"
+          tmpdir="$(mktemp -d)"
+
+          test -f "${archive}"
+          test -f "${zstd_archive}"
+          tar -tzf "${archive}" | sort | tee "${tmpdir}/manifest.txt"
+          tar -xzf "${archive}" -C "${tmpdir}"
+          test -x "${tmpdir}/bin/codex"
+          file "${tmpdir}/bin/codex"
+          "${tmpdir}/bin/codex" --version
+
+          shasum -a 256 "${archive}" "${zstd_archive}" | tee "dist/${target}/SHA256SUMS"
+          archive_sha="$(shasum -a 256 "${archive}" | awk '{print $1}')"
+          zstd_sha="$(shasum -a 256 "${zstd_archive}" | awk '{print $1}')"
+          echo "archive_sha=${archive_sha}" >> "$GITHUB_OUTPUT"
+          echo "zstd_sha=${zstd_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Write bootstrap release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ steps.target.outputs.target }}"
+          cat > release-notes.md <<EOF
+          Bootstrap macOS Codex package built from \`${GITHUB_SHA}\`.
+
+          This is a controlled bootstrap release for the \`bs5189-web/codex\` fork while the full upstream release path remains unavailable in this repository because self-hosted runners and signing secrets are not configured.
+
+          Artifacts:
+
+          - \`codex-package-${target}.tar.gz\` - SHA-256 \`${{ steps.verify.outputs.archive_sha }}\`
+          - \`codex-package-${target}.tar.zst\` - SHA-256 \`${{ steps.verify.outputs.zstd_sha }}\`
+          - \`SHA256SUMS\`
+
+          Signing and notarization:
+
+          - The package is built on a GitHub-hosted macOS runner.
+          - The binary is not signed with an Apple Developer ID certificate.
+          - The package is not notarized.
+          - macOS Gatekeeper may warn or block first launch; users should treat this as an unsigned bootstrap artifact, not a production-signed release.
+
+          Workflow evidence:
+
+          - Workflow: \`${GITHUB_WORKFLOW}\`
+          - Run ID: \`${GITHUB_RUN_ID}\`
+          - Source ref: \`${GITHUB_REF_NAME}\`
+          - Target: \`${target}\`
+          EOF
+
+      - name: Create or update GitHub prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag_name }}
+        run: |
+          set -euo pipefail
+          target="${{ steps.target.outputs.target }}"
+          assets=(
+            "dist/${target}/codex-package-${target}.tar.gz"
+            "dist/${target}/codex-package-${target}.tar.zst"
+            "dist/${target}/SHA256SUMS"
+          )
+
+          if gh release view "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${TAG_NAME}" "${assets[@]}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+            gh release edit "${TAG_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${TAG_NAME} bootstrap macOS package" \
+              --notes-file release-notes.md \
+              --prerelease
+          else
+            gh release create "${TAG_NAME}" "${assets[@]}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --target "${GITHUB_SHA}" \
+              --title "${TAG_NAME} bootstrap macOS package" \
+              --notes-file release-notes.md \
+              --prerelease
+          fi
