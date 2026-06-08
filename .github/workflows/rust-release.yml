@@ -821,59 +821,38 @@ jobs:
           path: |
             codex-rs/dist/${{ matrix.target }}/*
 
-  build-windows:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.release_mode != 'promote_signed' }}
-    needs: tag-check
-    uses: ./.github/workflows/rust-release-windows.yml
-    with:
-      release-lto: ${{ contains(github.ref_name, '-alpha') && 'thin' || 'fat' }}
-    secrets: inherit
+  # build-windows:
+  #   if: ${{ github.event_name != 'workflow_dispatch' || inputs.release_mode != 'promote_signed' }}
+  #   needs: tag-check
+  #   uses: ./.github/workflows/rust-release-windows.yml
+  #   with:
+  #     release-lto: ${{ contains(github.ref_name, '-alpha') && 'thin' || 'fat' }}
+  #   secrets: inherit
 
-  argument-comment-lint-release-assets:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.release_mode != 'promote_signed' }}
-    name: argument-comment-lint release assets
-    needs: tag-check
-    uses: ./.github/workflows/rust-release-argument-comment-lint.yml
-    with:
-      publish: true
+  # argument-comment-lint-release-assets:
+  #   if: ${{ github.event_name != 'workflow_dispatch' || inputs.release_mode != 'promote_signed' }}
+  #   name: argument-comment-lint release assets
+  #   needs: tag-check
+  #   uses: ./.github/workflows/rust-release-argument-comment-lint.yml
+  #   with:
+  #     publish: true
 
-  zsh-release-assets:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.release_mode != 'promote_signed' }}
-    name: zsh release assets
-    needs: tag-check
-    uses: ./.github/workflows/rust-release-zsh.yml
+  # zsh-release-assets:
+  #   if: ${{ github.event_name != 'workflow_dispatch' || inputs.release_mode != 'promote_signed' }}
+  #   name: zsh release assets
+  #   needs: tag-check
+  #   uses: ./.github/workflows/rust-release-zsh.yml
 
   release:
     needs:
       - tag-check
       - build
-      - stage-signed-macos
-      - build-windows
-      - argument-comment-lint-release-assets
-      - zsh-release-assets
     if: >-
       ${{
         always() &&
         needs.tag-check.result == 'success' &&
-        (
-          (
-            github.event_name == 'workflow_dispatch' &&
-            inputs.release_mode == 'promote_signed' &&
-            needs.stage-signed-macos.result == 'success' &&
-            needs.build.result == 'skipped' &&
-            needs.build-windows.result == 'skipped' &&
-            needs.argument-comment-lint-release-assets.result == 'skipped' &&
-            needs.zsh-release-assets.result == 'skipped'
-          ) ||
-          (
-            (github.event_name != 'workflow_dispatch' || inputs.release_mode != 'promote_signed') &&
-            needs.build.result == 'success' &&
-            needs.stage-signed-macos.result == 'skipped' &&
-            needs.build-windows.result == 'success' &&
-            needs.argument-comment-lint-release-assets.result == 'success' &&
-            needs.zsh-release-assets.result == 'success'
-          )
-        )
+        needs.build.result == 'success'
+      }
       }}
     name: release
     runs-on: ubuntu-latest
