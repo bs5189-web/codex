@@ -1,0 +1,222 @@
+name: bootstrap-windows-x64-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag to create or update."
+        required: true
+        default: "codex-windows-x64-bootstrap-20260609-1"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bootstrap-windows-x64-release-${{ inputs.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build bootstrap Windows x64 package
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      CARGO_PROFILE_RELEASE_LTO: "thin"
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Print runner specs
+        shell: powershell
+        run: |
+          $computer = Get-CimInstance Win32_ComputerSystem
+          $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+          $ramGiB = [math]::Round($computer.TotalPhysicalMemory / 1GB, 1)
+          Write-Host "Runner: $env:RUNNER_NAME"
+          Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
+          Write-Host "CPU: $($cpu.Name)"
+          Write-Host "Logical CPUs: $($computer.NumberOfLogicalProcessors)"
+          Write-Host "Physical CPUs: $($computer.NumberOfProcessors)"
+          Write-Host "Total RAM: $ramGiB GiB"
+          Write-Host "Rust target: $env:TARGET"
+          Write-Host "Disk usage:"
+          Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize Name, @{Name='Size(GB)';Expression={[math]::Round(($_.Used + $_.Free) / 1GB, 1)}}, @{Name='Free(GB)';Expression={[math]::Round($_.Free / 1GB, 1)}}
+
+      - name: Build Windows x64 binaries
+        shell: bash
+        working-directory: codex-rs
+        run: |
+          set -euo pipefail
+          export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
+          cargo build \
+            --target "${TARGET}" \
+            --release \
+            --timings \
+            --bin codex \
+            --bin codex-windows-sandbox-setup \
+            --bin codex-command-runner
+
+      - name: Build package archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${TARGET}"
+          release_dir="${GITHUB_WORKSPACE}/codex-rs/target/${target}/release"
+          archive_dir="${GITHUB_WORKSPACE}/dist/${target}"
+          package_dir="${archive_dir}/package"
+          mkdir -p "${archive_dir}"
+
+          cp "${release_dir}/codex.exe" "${archive_dir}/codex-${target}.exe"
+          cp "${release_dir}/codex-command-runner.exe" \
+            "${archive_dir}/codex-command-runner-${target}.exe"
+          cp "${release_dir}/codex-windows-sandbox-setup.exe" \
+            "${archive_dir}/codex-windows-sandbox-setup-${target}.exe"
+
+          python scripts/build_codex_package.py \
+            --target "${target}" \
+            --variant codex \
+            --entrypoint-bin "${release_dir}/codex.exe" \
+            --codex-command-runner-bin "${release_dir}/codex-command-runner.exe" \
+            --codex-windows-sandbox-setup-bin "${release_dir}/codex-windows-sandbox-setup.exe" \
+            --cargo-profile release \
+            --package-dir "${package_dir}" \
+            --archive-output "${archive_dir}/codex-package-${target}.tar.gz" \
+            --archive-output "${archive_dir}/codex-package-${target}.zip" \
+            --force
+
+      - name: Verify package archives
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${TARGET}"
+          archive_dir="dist/${target}"
+          tmpdir="$(mktemp -d)"
+
+          test -f "${archive_dir}/codex-${target}.exe"
+          test -f "${archive_dir}/codex-package-${target}.tar.gz"
+          test -f "${archive_dir}/codex-package-${target}.zip"
+
+          tar -tzf "${archive_dir}/codex-package-${target}.tar.gz" | sort | tee "${tmpdir}/tar-manifest.txt"
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import zipfile
+
+          target = os.environ["TARGET"]
+          archive = Path("dist") / target / f"codex-package-{target}.zip"
+          required = {
+              "bin/codex.exe",
+              "codex-resources/codex-command-runner.exe",
+              "codex-resources/codex-windows-sandbox-setup.exe",
+              "codex-path/rg.exe",
+              "codex-package.json",
+          }
+          with zipfile.ZipFile(archive) as zip_file:
+              names = set(zip_file.namelist())
+          missing = sorted(required - names)
+          if missing:
+              raise SystemExit(f"Missing files in package zip: {missing}")
+          print("Package zip contains expected Windows runtime files")
+          PY
+
+          package_unpack="${tmpdir}/package"
+          mkdir -p "${package_unpack}"
+          tar -xzf "${archive_dir}/codex-package-${target}.tar.gz" -C "${package_unpack}"
+          test -f "${package_unpack}/bin/codex.exe"
+          test -f "${package_unpack}/codex-resources/codex-command-runner.exe"
+          test -f "${package_unpack}/codex-resources/codex-windows-sandbox-setup.exe"
+
+          "codex-rs/target/${target}/release/codex.exe" --version
+
+          sha256sum \
+            "${archive_dir}/codex-${target}.exe" \
+            "${archive_dir}/codex-package-${target}.tar.gz" \
+            "${archive_dir}/codex-package-${target}.zip" \
+            "${archive_dir}/codex-command-runner-${target}.exe" \
+            "${archive_dir}/codex-windows-sandbox-setup-${target}.exe" \
+            | tee "${archive_dir}/SHA256SUMS"
+
+          codex_sha="$(sha256sum "${archive_dir}/codex-${target}.exe" | awk '{print $1}')"
+          package_zip_sha="$(sha256sum "${archive_dir}/codex-package-${target}.zip" | awk '{print $1}')"
+          package_targz_sha="$(sha256sum "${archive_dir}/codex-package-${target}.tar.gz" | awk '{print $1}')"
+          echo "codex_sha=${codex_sha}" >> "$GITHUB_OUTPUT"
+          echo "package_zip_sha=${package_zip_sha}" >> "$GITHUB_OUTPUT"
+          echo "package_targz_sha=${package_targz_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Write bootstrap release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${TARGET}"
+          cat > release-notes.md <<EOF
+          Bootstrap Windows x64 Codex package built from \`${GITHUB_SHA}\`.
+
+          This is a controlled bootstrap release for the \`bs5189-web/codex\` fork while the full upstream Windows release path remains unavailable in this repository because the \`codex-runners\` self-hosted Windows runner group and Azure Trusted Signing secrets are not configured.
+
+          Artifacts:
+
+          - \`codex-package-${target}.zip\` - SHA-256 \`${{ steps.verify.outputs.package_zip_sha }}\`
+          - \`codex-package-${target}.tar.gz\` - SHA-256 \`${{ steps.verify.outputs.package_targz_sha }}\`
+          - \`codex-${target}.exe\` - SHA-256 \`${{ steps.verify.outputs.codex_sha }}\`
+          - \`codex-command-runner-${target}.exe\`
+          - \`codex-windows-sandbox-setup-${target}.exe\`
+          - \`SHA256SUMS\`
+
+          Signing:
+
+          - The binaries are built on a GitHub-hosted Windows runner.
+          - The binaries are not signed with Azure Trusted Signing.
+          - This release does not include a signed installer or WinGet package.
+          - Windows SmartScreen may warn or block first launch; users should treat this as an unsigned bootstrap artifact, not a production-signed release.
+
+          Workflow evidence:
+
+          - Workflow: \`${GITHUB_WORKFLOW}\`
+          - Run ID: \`${GITHUB_RUN_ID}\`
+          - Source ref: \`${GITHUB_REF_NAME}\`
+          - Target: \`${target}\`
+          EOF
+
+      - name: Create or update GitHub prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag_name }}
+        run: |
+          set -euo pipefail
+          target="${TARGET}"
+          assets=(
+            "dist/${target}/codex-${target}.exe"
+            "dist/${target}/codex-package-${target}.tar.gz"
+            "dist/${target}/codex-package-${target}.zip"
+            "dist/${target}/codex-command-runner-${target}.exe"
+            "dist/${target}/codex-windows-sandbox-setup-${target}.exe"
+            "dist/${target}/SHA256SUMS"
+          )
+
+          if gh release view "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${TAG_NAME}" "${assets[@]}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+            gh release edit "${TAG_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${TAG_NAME} bootstrap Windows x64 package" \
+              --notes-file release-notes.md \
+              --prerelease
+          else
+            gh release create "${TAG_NAME}" "${assets[@]}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --target "${GITHUB_SHA}" \
+              --title "${TAG_NAME} bootstrap Windows x64 package" \
+              --notes-file release-notes.md \
+              --prerelease
+          fi
