@@ -7,6 +7,10 @@ on:
         description: "Release tag to create or update."
         required: true
         default: "codex-windows-x64-bootstrap-20260609-1"
+      source_ref:
+        description: "Git ref to package. Defaults to the dispatch ref."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -29,6 +33,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ inputs.source_ref || github.ref }}
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
@@ -157,8 +162,10 @@ jobs:
         run: |
           set -euo pipefail
           target="${TARGET}"
+          source_ref="${{ inputs.source_ref || github.ref_name }}"
+          source_sha="$(git rev-parse HEAD)"
           cat > release-notes.md <<EOF
-          Bootstrap Windows x64 Codex package built from \`${GITHUB_SHA}\`.
+          Bootstrap Windows x64 Codex package built from \`${source_sha}\`.
 
           This is a controlled bootstrap release for the \`bs5189-web/codex\` fork while the full upstream Windows release path remains unavailable in this repository because the \`codex-runners\` self-hosted Windows runner group and Azure Trusted Signing secrets are not configured.
 
@@ -182,7 +189,8 @@ jobs:
 
           - Workflow: \`${GITHUB_WORKFLOW}\`
           - Run ID: \`${GITHUB_RUN_ID}\`
-          - Source ref: \`${GITHUB_REF_NAME}\`
+          - Source ref: \`${source_ref}\`
+          - Source SHA: \`${source_sha}\`
           - Target: \`${target}\`
           EOF
 
@@ -213,9 +221,10 @@ jobs:
               --notes-file release-notes.md \
               --prerelease
           else
+            source_sha="$(git rev-parse HEAD)"
             gh release create "${TAG_NAME}" "${assets[@]}" \
               --repo "${GITHUB_REPOSITORY}" \
-              --target "${GITHUB_SHA}" \
+              --target "${source_sha}" \
               --title "${TAG_NAME} bootstrap Windows x64 package" \
               --notes-file release-notes.md \
               --prerelease
