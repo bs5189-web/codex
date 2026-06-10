@@ -262,9 +262,6 @@ impl ModelsManager for OpenAiModelsManager {
     async fn refresh_if_new_etag(&self, etag: String) {
         let current_etag = self.get_etag().await;
         if current_etag.clone().is_some() && current_etag.as_deref() == Some(etag.as_str()) {
-            if let Err(err) = self.cache_manager.renew_cache_ttl().await {
-                error!("failed to renew cache TTL: {err}");
-            }
             return;
         }
         if let Err(err) = self.refresh_available_models(RefreshStrategy::Online).await {
@@ -313,14 +310,6 @@ impl OpenAiModelsManager {
         let (models, etag) = self.endpoint_client.list_models(&client_version).await?;
         self.apply_remote_models(models.clone()).await;
         *self.etag.write().await = etag.clone();
-        self.cache_manager
-            .persist_cache(
-                &models,
-                etag,
-                client_version,
-                self.endpoint_client.provider_cache_key(),
-            )
-            .await;
         Ok(())
     }
 

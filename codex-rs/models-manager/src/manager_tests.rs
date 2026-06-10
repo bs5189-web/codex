@@ -215,6 +215,25 @@ fn static_manager_for_tests(model_catalog: ModelsResponse) -> StaticModelsManage
     StaticModelsManager::new(/*auth_manager*/ None, model_catalog)
 }
 
+async fn write_models_cache_for_tests(
+    manager: &OpenAiModelsManager,
+    models: Vec<ModelInfo>,
+    provider_cache_key: &str,
+    fetched_at: chrono::DateTime<Utc>,
+) {
+    manager
+        .cache_manager
+        .persist_cache_for_test(
+            models,
+            /*etag*/ None,
+            crate::client_version_to_whole(),
+            provider_cache_key.to_string(),
+            fetched_at,
+        )
+        .await
+        .expect("cache write should succeed");
+}
+
 async fn chatgpt_auth_tokens_for_tests(codex_home: &Path) -> CodexAuth {
     let auth_dot_json = codex_login::AuthDotJson {
         auth_mode: Some(AuthMode::ChatgptAuthTokens),
@@ -361,15 +380,10 @@ async fn refresh_available_models_sorts_by_priority() {
         remote_model("priority-high", "High", /*priority*/ 0),
     ];
     let codex_home = tempdir().expect("temp dir");
-    let endpoint = TestModelsEndpoint::new(vec![remote_models.clone()]);
+    let endpoint = TestModelsEndpoint::new(Vec::new());
     let manager = openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint.clone());
-
-    manager
-        .refresh_available_models(RefreshStrategy::OnlineIfUncached)
-        .await
-        .expect("refresh succeeds");
-    let cached_remote = manager.get_remote_models().await;
-    assert_models_contain(&cached_remote, &remote_models);
+    write_models_cache_for_tests(&manager, remote_models.clone(), "test-provider", Utc::now())
+        .await;
 
     let available = manager.list_models(RefreshStrategy::OnlineIfUncached).await;
     let high_idx = available
@@ -384,7 +398,7 @@ async fn refresh_available_models_sorts_by_priority() {
         high_idx < low_idx,
         "higher priority should be listed before lower priority"
     );
-    assert_eq!(endpoint.fetch_count(), 1, "expected a single model fetch");
+    assert_eq!(endpoint.fetch_count(), 0, "cache hit should avoid a fetch");
 }
 
 #[tokio::test]
@@ -415,18 +429,16 @@ async fn refresh_available_models_uses_cached_remote_only_catalog_for_chatgpt_au
         /*priority*/ 0,
     )];
     let codex_home = tempdir().expect("temp dir");
-    let fetch_endpoint = TestModelsEndpoint::new(vec![remote_models.clone()]);
-    let fetch_manager =
-        openai_manager_for_tests(codex_home.path().to_path_buf(), fetch_endpoint.clone());
-
-    fetch_manager
-        .refresh_available_models(RefreshStrategy::OnlineIfUncached)
-        .await
-        .expect("initial refresh succeeds");
-
     let cache_endpoint = TestModelsEndpoint::new(Vec::new());
     let cache_manager =
         openai_manager_for_tests(codex_home.path().to_path_buf(), cache_endpoint.clone());
+    write_models_cache_for_tests(
+        &cache_manager,
+        remote_models.clone(),
+        "test-provider",
+        Utc::now(),
+    )
+    .await;
 
     cache_manager
         .refresh_available_models(RefreshStrategy::OnlineIfUncached)
@@ -546,16 +558,11 @@ async fn refresh_available_models_keeps_merging_for_api_auth() {
 async fn refresh_available_models_uses_cache_when_fresh() {
     let remote_models = vec![remote_model("cached", "Cached", /*priority*/ 5)];
     let codex_home = tempdir().expect("temp dir");
-    let endpoint = TestModelsEndpoint::new(vec![remote_models.clone()]);
+    let endpoint = TestModelsEndpoint::new(Vec::new());
     let manager = openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint.clone());
+    write_models_cache_for_tests(&manager, remote_models.clone(), "test-provider", Utc::now())
+        .await;
 
-    manager
-        .refresh_available_models(RefreshStrategy::OnlineIfUncached)
-        .await
-        .expect("first refresh succeeds");
-    assert_models_contain(&manager.get_remote_models().await, &remote_models);
-
-    // Second call should read from cache and avoid the network.
     manager
         .refresh_available_models(RefreshStrategy::OnlineIfUncached)
         .await
@@ -563,8 +570,28 @@ async fn refresh_available_models_uses_cache_when_fresh() {
     assert_models_contain(&manager.get_remote_models().await, &remote_models);
     assert_eq!(
         endpoint.fetch_count(),
-        1,
-        "cache hit should avoid a second model fetch"
+        0,
+        "cache hit should avoid a model fetch"
+    );
+}
+
+#[tokio::test]
+async fn refresh_available_models_does_not_write_models_cache() {
+    let remote_models = vec![remote_model("uncached", "Uncached", /*priority*/ 5)];
+    let codex_home = tempdir().expect("temp dir");
+    let endpoint = TestModelsEndpoint::new(vec![remote_models.clone()]);
+    let manager = openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint.clone());
+
+    manager
+        .refresh_available_models(RefreshStrategy::OnlineIfUncached)
+        .await
+        .expect("refresh succeeds");
+
+    assert_models_contain(&manager.get_remote_models().await, &remote_models);
+    assert_eq!(endpoint.fetch_count(), 1, "expected a single model fetch");
+    assert!(
+        !codex_home.path().join(MODEL_CACHE_FILE).exists(),
+        "remote refresh should not write models_cache.json"
     );
 }
 
@@ -581,25 +608,17 @@ async fn refresh_available_models_refetches_when_provider_changes() {
         /*priority*/ 1,
     )];
     let codex_home = tempdir().expect("temp dir");
-    let first_endpoint =
-        TestModelsEndpoint::new_for_provider("provider-a", vec![first_provider_models]);
-    let first_manager =
-        openai_manager_for_tests(codex_home.path().to_path_buf(), first_endpoint.clone());
-
-    first_manager
-        .refresh_available_models(RefreshStrategy::OnlineIfUncached)
-        .await
-        .expect("initial refresh succeeds");
-    assert_eq!(
-        first_endpoint.fetch_count(),
-        1,
-        "first provider should fetch once"
-    );
-
     let second_endpoint =
         TestModelsEndpoint::new_for_provider("provider-b", vec![second_provider_models.clone()]);
     let second_manager =
         openai_manager_for_tests(codex_home.path().to_path_buf(), second_endpoint.clone());
+    write_models_cache_for_tests(
+        &second_manager,
+        first_provider_models,
+        "provider-a",
+        Utc::now(),
+    )
+    .await;
 
     second_manager
         .refresh_available_models(RefreshStrategy::OnlineIfUncached)
@@ -622,22 +641,15 @@ async fn refresh_available_models_refetches_when_cache_stale() {
     let initial_models = vec![remote_model("stale", "Stale", /*priority*/ 1)];
     let codex_home = tempdir().expect("temp dir");
     let updated_models = vec![remote_model("fresh", "Fresh", /*priority*/ 9)];
-    let endpoint = TestModelsEndpoint::new(vec![initial_models.clone(), updated_models.clone()]);
+    let endpoint = TestModelsEndpoint::new(vec![updated_models.clone()]);
     let manager = openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint.clone());
-
-    manager
-        .refresh_available_models(RefreshStrategy::OnlineIfUncached)
-        .await
-        .expect("initial refresh succeeds");
-
-    // Rewrite cache with an old timestamp so it is treated as stale.
-    manager
-        .cache_manager
-        .manipulate_cache_for_test(|fetched_at| {
-            *fetched_at = Utc::now() - chrono::Duration::hours(1);
-        })
-        .await
-        .expect("cache manipulation succeeds");
+    write_models_cache_for_tests(
+        &manager,
+        initial_models,
+        "test-provider",
+        Utc::now() - chrono::Duration::hours(1),
+    )
+    .await;
 
     manager
         .refresh_available_models(RefreshStrategy::OnlineIfUncached)
@@ -646,7 +658,7 @@ async fn refresh_available_models_refetches_when_cache_stale() {
     assert_models_contain(&manager.get_remote_models().await, &updated_models);
     assert_eq!(
         endpoint.fetch_count(),
-        2,
+        1,
         "stale cache refresh should fetch models again"
     );
 }
@@ -656,22 +668,20 @@ async fn refresh_available_models_refetches_when_version_mismatch() {
     let initial_models = vec![remote_model("old", "Old", /*priority*/ 1)];
     let codex_home = tempdir().expect("temp dir");
     let updated_models = vec![remote_model("new", "New", /*priority*/ 2)];
-    let endpoint = TestModelsEndpoint::new(vec![initial_models.clone(), updated_models.clone()]);
+    let endpoint = TestModelsEndpoint::new(vec![updated_models.clone()]);
     let manager = openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint.clone());
-
-    manager
-        .refresh_available_models(RefreshStrategy::OnlineIfUncached)
-        .await
-        .expect("initial refresh succeeds");
-
+    let client_version = crate::client_version_to_whole();
     manager
         .cache_manager
-        .mutate_cache_for_test(|cache| {
-            let client_version = crate::client_version_to_whole();
-            cache.client_version = Some(format!("{client_version}-mismatch"));
-        })
+        .persist_cache_for_test(
+            initial_models,
+            /*etag*/ None,
+            format!("{client_version}-mismatch"),
+            "test-provider".to_string(),
+            Utc::now(),
+        )
         .await
-        .expect("cache mutation succeeds");
+        .expect("cache write should succeed");
 
     manager
         .refresh_available_models(RefreshStrategy::OnlineIfUncached)
@@ -680,7 +690,7 @@ async fn refresh_available_models_refetches_when_version_mismatch() {
     assert_models_contain(&manager.get_remote_models().await, &updated_models);
     assert_eq!(
         endpoint.fetch_count(),
-        2,
+        1,
         "version mismatch should fetch models again"
     );
 }

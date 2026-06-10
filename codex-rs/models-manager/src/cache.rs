@@ -73,33 +73,23 @@ impl ModelsCacheManager {
         Some(cache)
     }
 
+    #[cfg(test)]
     /// Persist the cache to disk, creating parent directories as needed.
-    pub(crate) async fn persist_cache(
+    pub(crate) async fn persist_cache_for_test(
         &self,
-        models: &[ModelInfo],
+        models: Vec<ModelInfo>,
         etag: Option<String>,
         client_version: String,
         provider_cache_key: String,
-    ) {
+        fetched_at: DateTime<Utc>,
+    ) -> io::Result<()> {
         let cache = ModelsCache {
-            fetched_at: Utc::now(),
+            fetched_at,
             etag,
             client_version: Some(client_version),
             provider_cache_key: Some(provider_cache_key),
-            models: models.to_vec(),
+            models,
         };
-        if let Err(err) = self.save_internal(&cache).await {
-            error!("failed to write models cache: {err}");
-        }
-    }
-
-    /// Renew the cache TTL by updating the fetched_at timestamp to now.
-    pub(crate) async fn renew_cache_ttl(&self) -> io::Result<()> {
-        let mut cache = match self.load().await? {
-            Some(cache) => cache,
-            None => return Err(io::Error::new(ErrorKind::NotFound, "cache not found")),
-        };
-        cache.fetched_at = Utc::now();
         self.save_internal(&cache).await
     }
 
@@ -115,6 +105,7 @@ impl ModelsCacheManager {
         }
     }
 
+    #[cfg(test)]
     async fn save_internal(&self, cache: &ModelsCache) -> io::Result<()> {
         if let Some(parent) = self.cache_path.parent() {
             fs::create_dir_all(parent).await?;
@@ -128,34 +119,6 @@ impl ModelsCacheManager {
     /// Set the cache TTL.
     pub(crate) fn set_ttl(&mut self, ttl: Duration) {
         self.cache_ttl = ttl;
-    }
-
-    #[cfg(test)]
-    /// Manipulate cache file for testing. Allows setting a custom fetched_at timestamp.
-    pub(crate) async fn manipulate_cache_for_test<F>(&self, f: F) -> io::Result<()>
-    where
-        F: FnOnce(&mut DateTime<Utc>),
-    {
-        let mut cache = match self.load().await? {
-            Some(cache) => cache,
-            None => return Err(io::Error::new(ErrorKind::NotFound, "cache not found")),
-        };
-        f(&mut cache.fetched_at);
-        self.save_internal(&cache).await
-    }
-
-    #[cfg(test)]
-    /// Mutate the full cache contents for testing.
-    pub(crate) async fn mutate_cache_for_test<F>(&self, f: F) -> io::Result<()>
-    where
-        F: FnOnce(&mut ModelsCache),
-    {
-        let mut cache = match self.load().await? {
-            Some(cache) => cache,
-            None => return Err(io::Error::new(ErrorKind::NotFound, "cache not found")),
-        };
-        f(&mut cache);
-        self.save_internal(&cache).await
     }
 }
 

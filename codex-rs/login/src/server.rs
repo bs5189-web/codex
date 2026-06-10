@@ -795,16 +795,12 @@ fn write_ruijie_uniapi_api_key(config: &str, codex_token: &str) -> String {
         .unwrap_or(lines.len());
     let api_key_value = format!("api_key = \"{}\"", escape_toml_basic_string(codex_token));
 
-    if let Some(api_key_index) = lines[section_index + 1..section_end_index]
+    if lines[section_index + 1..section_end_index]
         .iter()
         .position(|line| is_api_key_assignment(line.trim()))
-        .map(|offset| section_index + 1 + offset)
+        .is_some()
     {
-        let indentation = lines[api_key_index]
-            .chars()
-            .take_while(|char| char.is_whitespace())
-            .collect::<String>();
-        lines[api_key_index] = format!("{indentation}{api_key_value}");
+        return config.to_string();
     } else {
         let mut insertion_index = section_end_index;
         while insertion_index > section_index + 1 && lines[insertion_index - 1].trim().is_empty() {
