@@ -43,7 +43,6 @@ pub const AMAZON_BEDROCK_DEFAULT_BASE_URL: &str =
     "https://bedrock-mantle.us-east-1.api.aws/openai/v1";
 const AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_HEADER: &str = "x-amzn-mantle-client-agent";
 const AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_VALUE: &str = "codex";
-const CHAT_WIRE_API_REMOVED_ERROR: &str = "`wire_api = \"chat\"` is no longer supported.\nHow to fix: set `wire_api = \"responses\"` in your provider config.\nMore info: https://github.com/openai/codex/discussions/7782";
 pub const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
 pub const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
 
@@ -54,12 +53,15 @@ pub enum WireApi {
     /// The Responses API exposed by OpenAI at `/v1/responses`.
     #[default]
     Responses,
+    /// OpenAI-compatible Chat Completions API exposed at `/v1/chat/completions`.
+    Chat,
 }
 
 impl fmt::Display for WireApi {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
             Self::Responses => "responses",
+            Self::Chat => "chat",
         };
         f.write_str(value)
     }
@@ -73,8 +75,11 @@ impl<'de> Deserialize<'de> for WireApi {
         let value = String::deserialize(deserializer)?;
         match value.as_str() {
             "responses" => Ok(Self::Responses),
-            "chat" => Err(serde::de::Error::custom(CHAT_WIRE_API_REMOVED_ERROR)),
-            _ => Err(serde::de::Error::unknown_variant(&value, &["responses"])),
+            "chat" => Ok(Self::Chat),
+            _ => Err(serde::de::Error::unknown_variant(
+                &value,
+                &["responses", "chat"],
+            )),
         }
     }
 }
@@ -107,6 +112,9 @@ pub struct ModelProviderInfo {
     /// Which wire protocol this provider expects.
     #[serde(default)]
     pub wire_api: WireApi,
+    /// Model id prefixes that should use Chat Completions even when `wire_api` is Responses.
+    #[serde(default)]
+    pub chat_model_prefixes: Vec<String>,
     /// Optional query parameters to append to the base URL.
     pub query_params: Option<HashMap<String, String>>,
     /// Additional HTTP headers to include in requests to this provider where
@@ -155,6 +163,18 @@ pub struct ModelProviderAwsAuthInfo {
 }
 
 impl ModelProviderInfo {
+    pub fn wire_api_for_model(&self, model: &str) -> WireApi {
+        if self
+            .chat_model_prefixes
+            .iter()
+            .any(|prefix| model.starts_with(prefix))
+        {
+            WireApi::Chat
+        } else {
+            self.wire_api
+        }
+    }
+
     pub fn validate(&self) -> std::result::Result<(), String> {
         if self.aws.is_some() {
             if self.supports_websockets {
@@ -297,7 +317,7 @@ impl ModelProviderInfo {
 
         if let Some(query_params) = &self.query_params {
             let mut params = query_params.iter().collect::<Vec<_>>();
-            params.sort_by(|(left, _), (right, _)| left.cmp(right));
+            params.sort_by_key(|(left, _)| *left);
             parts.extend(
                 params
                     .into_iter()
@@ -313,7 +333,7 @@ impl ModelProviderInfo {
 
         if let Some(env_headers) = &self.env_http_headers {
             let mut headers = env_headers.iter().collect::<Vec<_>>();
-            headers.sort_by(|(left, _), (right, _)| left.cmp(right));
+            headers.sort_by_key(|(left, _)| *left);
             parts.extend(
                 headers
                     .into_iter()
@@ -384,6 +404,7 @@ impl ModelProviderInfo {
             auth: None,
             aws: None,
             wire_api: WireApi::Responses,
+            chat_model_prefixes: Vec::new(),
             query_params: None,
             http_headers: Some(
                 [("version".to_string(), env!("CARGO_PKG_VERSION").to_string())]
@@ -429,6 +450,7 @@ impl ModelProviderInfo {
                 region: None,
             })),
             wire_api: WireApi::Responses,
+            chat_model_prefixes: Vec::new(),
             query_params: None,
             http_headers: Some(HashMap::from([(
                 AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_HEADER.to_string(),
@@ -566,6 +588,7 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         auth: None,
         aws: None,
         wire_api,
+        chat_model_prefixes: Vec::new(),
         query_params: None,
         http_headers: None,
         env_http_headers: None,

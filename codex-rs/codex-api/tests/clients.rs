@@ -8,8 +8,10 @@ use bytes::Bytes;
 use codex_api::ApiError;
 use codex_api::AuthError;
 use codex_api::AuthProvider;
+use codex_api::ChatCompletionsClient;
 use codex_api::Compression;
 use codex_api::Provider;
+use codex_api::ResponseEvent;
 use codex_api::ResponsesApiRequest;
 use codex_api::ResponsesClient;
 use codex_api::ResponsesOptions;
@@ -20,6 +22,7 @@ use codex_client::Response;
 use codex_client::StreamResponse;
 use codex_client::TransportError;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -35,6 +38,33 @@ fn assert_path_ends_with(requests: &[Request], suffix: &str) {
         url.ends_with(suffix),
         "expected url to end with {suffix}, got {url}"
     );
+}
+
+fn json_body(request: &Request) -> Result<&serde_json::Value> {
+    request
+        .body
+        .as_ref()
+        .and_then(RequestBody::json)
+        .ok_or_else(|| anyhow::anyhow!("request should have a JSON body"))
+}
+
+fn responses_request() -> ResponsesApiRequest {
+    ResponsesApiRequest {
+        model: "gpt-test".into(),
+        instructions: "Say hi".into(),
+        input: Vec::new(),
+        tools: Vec::new(),
+        tool_choice: "auto".into(),
+        parallel_tool_calls: false,
+        reasoning: None,
+        store: false,
+        stream: true,
+        include: Vec::new(),
+        service_tier: None,
+        prompt_cache_key: None,
+        text: None,
+        client_metadata: None,
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -68,6 +98,40 @@ struct RecordingTransport {
 impl RecordingTransport {
     fn new(state: RecordingState) -> Self {
         Self { state }
+    }
+}
+
+#[derive(Clone)]
+struct StaticStreamTransport {
+    state: RecordingState,
+    chunks: Vec<&'static str>,
+}
+
+impl StaticStreamTransport {
+    fn new(state: RecordingState, chunks: Vec<&'static str>) -> Self {
+        Self { state, chunks }
+    }
+}
+
+#[async_trait]
+impl HttpTransport for StaticStreamTransport {
+    async fn execute(&self, _req: Request) -> Result<Response, TransportError> {
+        Err(TransportError::Build("execute should not run".to_string()))
+    }
+
+    async fn stream(&self, req: Request) -> Result<StreamResponse, TransportError> {
+        self.state.record(req);
+
+        let chunks = self
+            .chunks
+            .iter()
+            .map(|chunk| Ok(Bytes::from_static(chunk.as_bytes())))
+            .collect::<Vec<_>>();
+        Ok(StreamResponse {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            bytes: Box::pin(futures::stream::iter(chunks)),
+        })
     }
 }
 
@@ -273,6 +337,161 @@ async fn responses_client_uses_responses_path() -> Result<()> {
 }
 
 #[tokio::test]
+async fn chat_completions_client_uses_chat_path() -> Result<()> {
+    let state = RecordingState::default();
+    let transport = RecordingTransport::new(state.clone());
+    let client = ChatCompletionsClient::new(transport, provider("openai"), Arc::new(NoAuth));
+
+    let _stream = client
+        .stream_request(
+            responses_request(),
+            ResponsesOptions {
+                compression: Compression::None,
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    let requests = state.take_stream_requests();
+    assert_path_ends_with(&requests, "/chat/completions");
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_completions_client_converts_responses_request() -> Result<()> {
+    let state = RecordingState::default();
+    let transport = RecordingTransport::new(state.clone());
+    let client = ChatCompletionsClient::new(transport, provider("openai"), Arc::new(NoAuth));
+
+    let mut request = responses_request();
+    request.input = vec![
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "be concise".to_string(),
+            }],
+            phase: None,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "run pwd".to_string(),
+            }],
+            phase: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            call_id: "call-1".to_string(),
+            output: FunctionCallOutputPayload::from_text("/tmp".to_string()),
+        },
+    ];
+    request.tools = vec![serde_json::json!({
+        "type": "function",
+        "name": "exec_command",
+        "description": "Runs a command",
+        "parameters": {"type": "object"}
+    })];
+
+    let _stream = client
+        .stream_request(
+            request,
+            ResponsesOptions {
+                compression: Compression::None,
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    let requests = state.take_stream_requests();
+    let body = json_body(&requests[0])?;
+    assert_eq!(
+        body,
+        &serde_json::json!({
+            "model": "gpt-test",
+            "messages": [
+                {"role": "system", "content": "Say hi"},
+                {"role": "system", "content": "be concise"},
+                {"role": "user", "content": "run pwd"},
+                {"role": "tool", "content": "/tmp", "tool_call_id": "call-1"}
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "exec_command",
+                    "description": "Runs a command",
+                    "parameters": {"type": "object"}
+                }
+            }],
+            "tool_choice": "auto",
+            "stream": true
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_completions_stream_wraps_text_deltas_in_message_item() -> Result<()> {
+    let state = RecordingState::default();
+    let transport = StaticStreamTransport::new(
+        state,
+        vec![
+            "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"he\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"llo\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ],
+    );
+    let client = ChatCompletionsClient::new(transport, provider("openai"), Arc::new(NoAuth));
+
+    let mut stream = client
+        .stream_request(
+            responses_request(),
+            ResponsesOptions {
+                compression: Compression::None,
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    let mut events = Vec::new();
+    while let Some(event) = stream.rx_event.recv().await {
+        events.push(event?);
+    }
+
+    assert_eq!(events.len(), 6);
+    assert!(matches!(events[0], ResponseEvent::Created));
+    assert!(matches!(
+        &events[1],
+        ResponseEvent::OutputItemAdded(ResponseItem::Message {
+            role,
+            content,
+            ..
+        }) if role == "assistant" && content.is_empty()
+    ));
+    assert!(matches!(
+        &events[2],
+        ResponseEvent::OutputTextDelta(delta) if delta == "he"
+    ));
+    assert!(matches!(
+        &events[3],
+        ResponseEvent::OutputTextDelta(delta) if delta == "llo"
+    ));
+    assert!(matches!(
+        &events[4],
+        ResponseEvent::OutputItemDone(ResponseItem::Message { role, content, .. })
+            if role == "assistant"
+                && content == &vec![ContentItem::OutputText {
+                    text: "hello".to_string(),
+                }]
+    ));
+    assert!(matches!(
+        &events[5],
+        ResponseEvent::Completed { response_id, .. } if response_id == "chatcmpl-1"
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn streaming_client_adds_auth_headers() -> Result<()> {
     let state = RecordingState::default();
     let transport = RecordingTransport::new(state.clone());
@@ -320,22 +539,7 @@ async fn streaming_client_retries_on_transport_error() -> Result<()> {
     let mut provider = provider("openai");
     provider.retry.max_attempts = 2;
 
-    let request = ResponsesApiRequest {
-        model: "gpt-test".into(),
-        instructions: "Say hi".into(),
-        input: Vec::new(),
-        tools: Vec::new(),
-        tool_choice: "auto".into(),
-        parallel_tool_calls: false,
-        reasoning: None,
-        store: false,
-        stream: true,
-        include: Vec::new(),
-        service_tier: None,
-        prompt_cache_key: None,
-        text: None,
-        client_metadata: None,
-    };
+    let request = responses_request();
     let client = ResponsesClient::new(transport.clone(), provider, Arc::new(NoAuth));
 
     let _stream = client

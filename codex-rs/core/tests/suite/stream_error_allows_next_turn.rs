@@ -73,6 +73,7 @@ async fn continue_after_stream_error() {
         auth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_model_prefixes: Vec::new(),
         query_params: None,
         http_headers: None,
         env_http_headers: None,

@@ -176,6 +176,7 @@ fn model_provider_from_proto(
             .transpose()?,
         aws: None,
         wire_api,
+        chat_model_prefixes: Vec::new(),
         query_params: provider.query_params.map(|map| map.values),
         http_headers: provider.http_headers.map(|map| map.values),
         env_http_headers: provider.env_http_headers.map(|map| map.values),
@@ -210,6 +211,7 @@ fn model_provider_to_proto(
         auth,
         aws: _,
         wire_api,
+        chat_model_prefixes: _,
         query_params,
         http_headers,
         env_http_headers,
@@ -295,6 +297,7 @@ fn proto_string_map(values: HashMap<String, String>) -> proto::StringMap {
 fn proto_wire_api(wire_api: WireApi) -> proto::WireApi {
     match wire_api {
         WireApi::Responses => proto::WireApi::Responses,
+        WireApi::Chat => proto::WireApi::Responses,
     }
 }
 
@@ -508,6 +511,7 @@ mod tests {
                 cwd: workspace_dir(),
             }),
             wire_api: WireApi::Responses,
+            chat_model_prefixes: Vec::new(),
             query_params: Some(HashMap::from([(
                 "api-version".to_string(),
                 "2026-04-16".to_string(),

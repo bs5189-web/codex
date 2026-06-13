@@ -21,6 +21,7 @@ base_url = "http://localhost:11434/v1"
         auth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_model_prefixes: Vec::new(),
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -56,6 +57,7 @@ query_params = { api-version = "2025-04-01-preview" }
         auth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_model_prefixes: Vec::new(),
         query_params: Some(maplit::hashmap! {
             "api-version".to_string() => "2025-04-01-preview".to_string(),
         }),
@@ -94,6 +96,7 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
         auth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_model_prefixes: Vec::new(),
         query_params: None,
         http_headers: Some(maplit::hashmap! {
             "X-Example-Header".to_string() => "example-value".to_string(),
@@ -116,7 +119,7 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
 }
 
 #[test]
-fn test_deserialize_chat_wire_api_shows_helpful_error() {
+fn test_deserialize_chat_wire_api() {
     let provider_toml = r#"
 name = "OpenAI using Chat Completions"
 base_url = "https://api.openai.com/v1"
@@ -124,8 +127,27 @@ env_key = "OPENAI_API_KEY"
 wire_api = "chat"
         "#;
 
-    let err = toml::from_str::<ModelProviderInfo>(provider_toml).unwrap_err();
-    assert!(err.to_string().contains(CHAT_WIRE_API_REMOVED_ERROR));
+    let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
+    assert_eq!(provider.wire_api, WireApi::Chat);
+}
+
+#[test]
+fn test_wire_api_for_model_uses_chat_model_prefixes() {
+    let provider_toml = r#"
+name = "Mixed provider"
+base_url = "https://api.example.com/v1"
+wire_api = "responses"
+chat_model_prefixes = ["glm-", "legacy-chat"]
+        "#;
+
+    let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
+    assert_eq!(provider.wire_api_for_model("glm-5"), WireApi::Chat);
+    assert_eq!(provider.wire_api_for_model("glm-5.1"), WireApi::Chat);
+    assert_eq!(
+        provider.wire_api_for_model("legacy-chat-pro"),
+        WireApi::Chat
+    );
+    assert_eq!(provider.wire_api_for_model("gpt-5.4"), WireApi::Responses);
 }
 
 #[test]
@@ -160,6 +182,7 @@ fn test_supports_remote_compaction_for_azure_name() {
         auth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_model_prefixes: Vec::new(),
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -188,6 +211,7 @@ fn test_supports_remote_compaction_for_non_openai_non_azure_provider() {
         auth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_model_prefixes: Vec::new(),
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -271,6 +295,7 @@ fn test_create_amazon_bedrock_provider() {
                 region: None,
             }),
             wire_api: WireApi::Responses,
+            chat_model_prefixes: Vec::new(),
             query_params: None,
             http_headers: Some(maplit::hashmap! {
                 AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_HEADER.to_string() =>
@@ -405,6 +430,7 @@ fn test_merge_configured_model_providers_allows_amazon_bedrock_default_fields() 
                 region: None,
             }),
             wire_api: WireApi::Responses,
+            chat_model_prefixes: Vec::new(),
             ..ModelProviderInfo::default()
         },
     )]);
