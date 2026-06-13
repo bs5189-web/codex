@@ -284,3 +284,73 @@ This project uses Python 3+. You should not use the `__future__` module.
 
 If you need to worry about feature compatibility between different 3.xx point releases, check the
 closest `pyproject.toml`'s `requires-python` field to see what minimum runtime version is supported.
+
+
+<claude-mem-context>
+# Memory Context
+
+# [codex] recent context, 2026-06-11 2:13pm GMT+8
+
+Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision
+Format: ID TIME TYPE TITLE
+Fetch details: get_observations([IDs]) | Search: mem-search skill
+
+Stats: 50 obs (10,839t read) | 167,978t work | 94% savings
+
+### Jun 8, 2026
+1798 1:19p ⚖️ Workaround: prepend toolchain bin dir to PATH to fix rustc lookup failure
+1799 " ✅ Codex rebuild in progress — multiple workspace crates compiling
+1800 1:20p 🔵 No bazel/bazelisk binary installed on this Mac — only matches were directories inside Rust deps
+1804 1:21p ✅ Codex build advancing — server/extension crates now compiling
+1805 1:22p ✅ codex-app-server crate now compiling — final integration layer approaching
+1806 " ✅ codex-tui and codex-exec crates now compiling — user-facing layers entering build
+1808 1:23p ✅ codex-cli binary compilation started — final build target reached
+1815 1:27p 🔵 Cargo build phase identified: codex-core/codex-tui/codex-exec compiling under release+linker-plugin-lto
+1821 1:29p 🔴 Build still active: codex-core hits81% CPU at9m35s — heavy LTO compilation continues
+1827 1:31p ✅ codex_core and codex_exec compilation finished — only codex_tui still running
+1834 1:34p ✅ codex_tui compilation finished — all three heavy rustc jobs complete
+1838 1:36p ✅ codex binary now compiling — final step with fat-LTO at100% CPU
+1846 1:39p 🔵 Final codex binary rustc still at86.7% CPU/16.9% MEM at06:31 elapsed
+1853 1:41p 🔵 Final codex binary rustc at76.7% CPU/17.4% MEM at09:23 elapsed — fat-LTO still grinding
+1860 1:44p 🔵 Final codex binary rustc back up to95.4% CPU at12:19 — fat-LTO re-saturating
+1868 1:47p 🔵 Final codex binary rustc at89.2% CPU/12.3% MEM at15:14 — fat-LTO still grinding
+1876 1:50p 🔵 Final codex binary rustc at96.1% CPU/10.5% MEM at18:21 — fat-LTO still grinding
+1883 1:53p 🔵 Final codex binary rustc at90.6% CPU/8.1% MEM at21:24 — fat-LTO trending toward completion
+1891 1:56p 🔵 Final codex binary rustc dropped to11.7% CPU at24:27 — LTO likely in I/O phase
+1896 1:59p 🔵 Final codex binary rustc back up to46.6% CPU/17.1% MEM at26:48 — new phase
+1897 " ✅ Codex rebuild completed: Finished release profile in40m09s
+1898 " ✅ codex binary artifact confirmed:177MB Mach-O arm64 executable
+1902 2:37p ✅ macOS ARM64 packaging process documentation requested
+1903 " 🔵 gstack document-release skill exists for post-ship documentation updates
+1904 " 🔵 Primary session working on main-ruijie-codex-0604 branch with AGENTS.md modified
+1905 " 🔵 docs/ contains 15 flat markdown files; no docs/build/ subdirectory exists yet
+1906 2:38p ✅ macOS ARM64 packaging process documentation requested (re-issued)
+1907 2:39p 🔵 git push rejected: remote is ahead of local main-ruijie-codex-0604
+1908 " ✅ Fetched remote branch main-ruijie-codex-0604 to resolve push rejection
+1909 2:40p ✅ Post-fetch git status still shows only AGENTS.md modified
+1910 " 🔵 Remote branch advanced from f3cb3f769 to 23b16115a — one or more new commits to integrate
+1911 " 🔵 Local and remote diverged on parallel macOS packaging docs — local is arm64, remote is x86
+1912 2:41p ✅ Repeated git status --short still reports only AGENTS.md modified
+### Jun 9, 2026
+1978 11:01a 🟣 Build Codex release for ARM64
+1979 " 🔵 Codex repository on ruijie-codex branch with AGENTS.md modifications
+1980 " 🔵 Rust toolchain confirmed for ARM64 build, no bazel/bazelisk available
+1981 " 🔵 Codex project uses justfile with Cargo-based build system in codex-rs subdirectory
+1982 11:02a 🔵 Codex release build recipe depends on bazel, not Cargo
+1983 " 🔵 Codex repo structure: monorepo with codex-rs Rust workspace and bazel/hybrid build system
+1984 " 🔵 Codex docs directory includes build subdirectory and install guide
+1985 " 🔵 Existing macos-arm64-codex-release.md doc in docs/build/
+1986 11:03a 🔵 Prior codex release binary already exists in codex-rs/target/release/
+1988 " 🔵 Codex release profile uses fat LTO optimization
+1990 " 🔵 Confirmed: macOS ARM64 build doc and macOS x86 package doc are the only macOS-related build docs
+1991 11:08a 🔵 Codex macOS ARM64 release build documentation exists and is the canonical reference
+S110 Codex macOS ARM64 release build documentation exists and is the canonical reference (Jun 9 at 11:08 AM)
+1992 11:42a ✅ Codex CLI release binary build completed
+1993 " 🔵 Codex CLI arm64 release build finished successfully
+1994 " 🔵 Full codex-rs workspace compiled successfully for arm64 release
+1995 " 🔵 Codex arm64 release binary verified as 176MB Mach-O executable
+S111 Codex arm64 release binary verified as 176MB Mach-O executable (Jun 9 at 11:42 AM)
+1996 11:51a 🔵 User request: "logiin" (typo for login)
+
+Access 168k tokens of past work via get_observations([IDs]) or mem-search skill.
+</claude-mem-context>
