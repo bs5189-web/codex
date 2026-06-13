@@ -61,6 +61,31 @@ Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your 
 
 You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
 
+## Building from source on macOS Apple Silicon (arm64)
+
+To run a development build of `codex` on a Mac with Apple Silicon
+(`aarch64-apple-darwin`), run the following from the repository root. It
+invokes `cargo run` and passes `codex` as the subcommand to the
+`codex-cli` binary:
+
+```sh
+cd codex-rs
+SDKROOT="$(xcrun --sdk macosx --show-sdk-path)" \
+DEVELOPER_DIR=/Library/Developer/CommandLineTools \
+PATH="/Users/mini/.rustup/toolchains/stable-aarch64-apple-darwin/bin:/Library/Developer/CommandLineTools/usr/bin:/usr/bin:/bin:$PATH" \
+  cargo run -p codex-cli -- codex
+```
+
+The `SDKROOT`, `DEVELOPER_DIR`, and explicit `PATH` exports are required on
+a Mac that only has CommandLineTools installed (no `Xcode.app`): `cc`
+(Apple clang) does not auto-detect a sysroot in that case, so `cargo`'s
+`cc-rs` invocations fail to find SDK headers such as `TargetConditionals.h`,
+and the Rust toolchain shipped via `rustup` is not on the default `PATH`.
+
+For a one-time setup that persists the toolchain in your shell, and for the
+cached release build (`cargo build --release -p codex-cli`) flow, see
+[docs/build/macos-arm64-codex-release.md](./docs/build/macos-arm64-codex-release.md).
+
 ## Docs
 
 - [**Codex Documentation**](https://developers.openai.com/codex)
