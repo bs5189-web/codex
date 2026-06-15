@@ -105,7 +105,6 @@ mod tests {
     use super::*;
     use crate::auth::AuthProvider;
     use crate::provider::RetryConfig;
-    use async_trait::async_trait;
     use codex_client::Request;
     use codex_client::Response;
     use codex_client::StreamResponse;
@@ -135,7 +134,6 @@ mod tests {
         }
     }
 
-    #[async_trait]
     impl HttpTransport for CapturingTransport {
         async fn execute(&self, req: Request) -> Result<Response, TransportError> {
             *self.last_request.lock().unwrap() = Some(req);
@@ -324,7 +322,6 @@ mod tests {
             body: Arc<serde_json::Value>,
         }
 
-        #[async_trait]
         impl HttpTransport for JsonTransport {
             async fn execute(&self, _req: Request) -> Result<Response, TransportError> {
                 Ok(Response {

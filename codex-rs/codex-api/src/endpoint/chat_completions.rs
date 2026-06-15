@@ -307,6 +307,7 @@ fn convert_request(request: ResponsesApiRequest) -> Result<ChatCompletionsReques
                 });
             }
             ResponseItem::Reasoning { .. }
+            | ResponseItem::AgentMessage { .. }
             | ResponseItem::LocalShellCall { .. }
             | ResponseItem::ToolSearchCall { .. }
             | ResponseItem::ToolSearchOutput { .. }

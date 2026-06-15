@@ -8,7 +8,9 @@
 //! support can request from users.
 
 use codex_app_server_protocol::AuthMode;
+use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::config::Config;
+use codex_login::AuthKeyringBackendKind;
 use codex_login::CLIENT_ID;
 use codex_login::CodexAuth;
 use codex_login::ServerOptions;
@@ -22,6 +24,7 @@ use codex_utils_cli::CliConfigOverrides;
 use std::fs::OpenOptions;
 use std::io::IsTerminal;
 use std::io::Read;
+use std::path::Path;
 use tracing_appender::non_blocking;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
@@ -124,16 +127,40 @@ fn apply_login_issuer_config(
     }
 }
 
-fn login_server_options_from_config(
+async fn clear_existing_auth_before_login(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    auth_keyring_backend_kind: AuthKeyringBackendKind,
+) {
+    if let Err(err) = logout_with_revoke(
+        codex_home,
+        auth_credentials_store_mode,
+        auth_keyring_backend_kind,
+    )
+    .await
+    {
+        tracing::warn!("failed to clear existing auth before login: {err}");
+    }
+}
+
+async fn login_server_options_from_config(
     config: &Config,
     issuer_base_url: Option<String>,
     client_id: String,
 ) -> ServerOptions {
+    clear_existing_auth_before_login(
+        &config.codex_home,
+        config.cli_auth_credentials_store_mode,
+        config.auth_keyring_backend_kind(),
+    )
+    .await;
+
     let mut opts = ServerOptions::new(
         config.codex_home.to_path_buf(),
         client_id,
         config.forced_chatgpt_workspace_id.clone(),
         config.cli_auth_credentials_store_mode,
+        config.auth_keyring_backend_kind(),
     );
     apply_login_issuer_config(
         &mut opts,
@@ -161,7 +188,7 @@ pub async fn run_login_with_chatgpt(cli_config_overrides: CliConfigOverrides) ->
         std::process::exit(1);
     }
 
-    let opts = login_server_options_from_config(&config, None, CLIENT_ID.to_string());
+    let opts = login_server_options_from_config(&config, None, CLIENT_ID.to_string()).await;
 
     match login_with_chatgpt(opts).await {
         Ok(_) => {
@@ -192,6 +219,7 @@ pub async fn run_login_with_api_key(
         &config.codex_home,
         &api_key,
         config.cli_auth_credentials_store_mode,
+        config.auth_keyring_backend_kind(),
     ) {
         Ok(_) => {
             eprintln!("{LOGIN_SUCCESS_MESSAGE}");
@@ -221,7 +249,9 @@ pub async fn run_login_with_access_token(
         &config.codex_home,
         &access_token,
         config.cli_auth_credentials_store_mode,
+        config.forced_chatgpt_workspace_id.as_deref(),
         Some(&config.chatgpt_base_url),
+        config.auth_keyring_backend_kind(),
     )
     .await
     {
@@ -294,7 +324,8 @@ pub async fn run_login_with_device_code(
         &config,
         issuer_base_url,
         client_id.unwrap_or_else(|| CLIENT_ID.to_string()),
-    );
+    )
+    .await;
     match run_device_code_login(opts).await {
         Ok(()) => {
             eprintln!("{LOGIN_SUCCESS_MESSAGE}");
@@ -323,12 +354,19 @@ pub async fn run_login_with_device_code_fallback_to_browser(
         eprintln!("{CHATGPT_LOGIN_DISABLED_MESSAGE}");
         std::process::exit(1);
     }
+    clear_existing_auth_before_login(
+        &config.codex_home,
+        config.cli_auth_credentials_store_mode,
+        config.auth_keyring_backend_kind(),
+    )
+    .await;
 
     let mut opts = login_server_options_from_config(
         &config,
         issuer_base_url,
         client_id.unwrap_or_else(|| CLIENT_ID.to_string()),
-    );
+    )
+    .await;
     opts.open_browser = false;
 
     match run_device_code_login(opts.clone()).await {
@@ -373,6 +411,7 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
         &config.codex_home,
         config.cli_auth_credentials_store_mode,
         Some(&config.chatgpt_base_url),
+        config.auth_keyring_backend_kind(),
     )
     .await
     {
@@ -395,6 +434,14 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
                 eprintln!("Logged in using access token");
                 std::process::exit(0);
             }
+            AuthMode::PersonalAccessToken => {
+                eprintln!("Logged in using personal access token");
+                std::process::exit(0);
+            }
+            AuthMode::BedrockApiKey => {
+                eprintln!("Logged in using Amazon Bedrock API key");
+                std::process::exit(0);
+            }
         },
         Ok(None) => {
             eprintln!("Not logged in");
@@ -410,7 +457,13 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
 pub async fn run_logout(cli_config_overrides: CliConfigOverrides) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
 
-    match logout_with_revoke(&config.codex_home, config.cli_auth_credentials_store_mode).await {
+    match logout_with_revoke(
+        &config.codex_home,
+        config.cli_auth_credentials_store_mode,
+        config.auth_keyring_backend_kind(),
+    )
+    .await
+    {
         Ok(true) => {
             eprintln!("Successfully logged out");
             std::process::exit(0);
@@ -456,10 +509,43 @@ fn safe_format_key(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::apply_login_issuer_config;
+    use super::clear_existing_auth_before_login;
     use super::safe_format_key;
     use codex_config::types::AuthCredentialsStoreMode;
+    use codex_login::AuthKeyringBackendKind;
     use codex_login::ServerOptions;
+    use codex_login::load_auth_dot_json;
+    use codex_login::login_with_api_key;
+    use pretty_assertions::assert_eq;
     use tempfile::TempDir;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn clears_existing_auth_before_login() {
+        let codex_home = tempdir().expect("create temporary Codex home");
+        login_with_api_key(
+            codex_home.path(),
+            "sk-existing",
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::default(),
+        )
+        .expect("save existing auth");
+
+        clear_existing_auth_before_login(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::default(),
+        )
+        .await;
+
+        let auth = load_auth_dot_json(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::default(),
+        )
+        .expect("load auth after cleanup");
+        assert_eq!(auth, None);
+    }
 
     #[test]
     fn formats_long_key() {
@@ -481,6 +567,7 @@ mod tests {
             super::CLIENT_ID.to_string(),
             None,
             AuthCredentialsStoreMode::default(),
+            AuthKeyringBackendKind::default(),
         );
 
         apply_login_issuer_config(&mut opts, Some("http://localhost:3000"), None);
@@ -497,6 +584,7 @@ mod tests {
             super::CLIENT_ID.to_string(),
             None,
             AuthCredentialsStoreMode::default(),
+            AuthKeyringBackendKind::default(),
         );
 
         apply_login_issuer_config(
