@@ -86,6 +86,7 @@ class SourceBinariesForTargetTest(unittest.TestCase):
                 bwrap_bin=None,
                 codex_command_runner_bin=command_runner,
                 codex_windows_sandbox_setup_bin=sandbox_setup,
+                cache_dir=None,
             )
 
         self.assertEqual(outputs.entrypoint_bin, entrypoint)

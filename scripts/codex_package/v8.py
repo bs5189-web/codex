@@ -5,12 +5,12 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
-import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.request import urlopen
 
+from .cache import package_cache_root
 from .targets import REPO_ROOT
 from .targets import TargetSpec
 
@@ -69,7 +69,7 @@ def fetch_codex_v8_artifacts(
         f"https://github.com/openai/codex/releases/download/rusty-v8-v{version}"
     )
     target = spec.target
-    cache_dir = (cache_root or default_cache_root()) / f"rusty-v8-{version}-{target}"
+    cache_dir = package_cache_root(cache_root) / f"rusty-v8-{version}-{target}"
     archive = cache_dir / f"librusty_v8_release_{target}.a.gz"
     binding = cache_dir / f"src_binding_release_{target}.rs"
     checksums = cache_dir / f"rusty_v8_release_{target}.sha256"
@@ -102,10 +102,6 @@ def resolved_v8_crate_version() -> str:
             f"Expected exactly one resolved v8 version, found: {versions}"
         )
     return versions[0]
-
-
-def default_cache_root() -> Path:
-    return Path(tempfile.gettempdir()) / "codex-package"
 
 
 def load_checksums(checksums_path: Path, artifact_names: set[str]) -> dict[str, str]:

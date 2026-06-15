@@ -32,6 +32,7 @@ def build_source_binaries(
     bwrap_bin: Path | None,
     codex_command_runner_bin: Path | None,
     codex_windows_sandbox_setup_bin: Path | None,
+    cache_dir: Path | None = None,
 ) -> SourceBuildOutputs:
     validate_prebuilt_resource_inputs(
         spec,
@@ -62,7 +63,7 @@ def build_source_binaries(
 
         cargo_env = None
         if entrypoint_bin is None:
-            codex_v8_env = resolve_codex_v8_cargo_env(spec)
+            codex_v8_env = resolve_codex_v8_cargo_env(spec, cache_root=cache_dir)
             if codex_v8_env:
                 cargo_env = {**os.environ, **codex_v8_env}
 

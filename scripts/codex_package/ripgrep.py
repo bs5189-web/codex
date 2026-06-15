@@ -11,17 +11,23 @@ from .targets import resolve_input_path
 RG_MANIFEST = REPO_ROOT / "scripts" / "codex_package" / "rg"
 
 
-def resolve_rg_bin(spec: TargetSpec, rg_bin: Path | None) -> Path:
+def resolve_rg_bin(
+    spec: TargetSpec,
+    rg_bin: Path | None,
+    *,
+    cache_dir: Path | None = None,
+) -> Path:
     if rg_bin is not None:
         return resolve_input_path(rg_bin, "ripgrep executable", "--rg-bin")
 
-    return fetch_rg(spec)
+    return fetch_rg(spec, cache_dir=cache_dir)
 
 
 def fetch_rg(
     spec: TargetSpec,
     *,
     manifest_path: Path = RG_MANIFEST,
+    cache_dir: Path | None = None,
 ) -> Path:
     rg_bin = fetch_dotslash_executable(
         spec,
@@ -29,6 +35,7 @@ def fetch_rg(
         artifact_label="ripgrep",
         cache_key=f"{spec.target}-rg",
         dest_name=spec.rg_name,
+        cache_root=cache_dir,
     )
     if rg_bin is None:
         raise AssertionError("ripgrep is required for all package targets")

@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 from .archive import write_archive
+from .cache import package_cache_root
 from .cargo import build_source_binaries
 from .layout import build_package_dir
 from .layout import prepare_package_dir
@@ -116,6 +117,15 @@ def parse_args() -> argparse.Namespace:
             "scripts/codex_package/rg."
         ),
     )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        help=(
+            "Directory for downloaded package artifacts such as V8, ripgrep, "
+            "and codex-zsh. Defaults to CODEX_PACKAGE_CACHE_DIR, then "
+            "XDG_CACHE_HOME/codex-package, then ~/.cache/codex-package."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -129,6 +139,7 @@ def main() -> int:
         if package_dir_arg is not None
         else Path(tempfile.mkdtemp(prefix="codex-package-")).resolve()
     )
+    cache_dir = package_cache_root(args.cache_dir)
 
     source_outputs = build_source_binaries(
         spec,
@@ -155,12 +166,13 @@ def main() -> int:
             "prebuilt Windows codex-windows-sandbox-setup.exe executable",
             "--codex-windows-sandbox-setup-bin",
         ),
+        cache_dir=cache_dir,
     )
     version = read_workspace_version()
     inputs = PackageInputs(
         entrypoint_bin=source_outputs.entrypoint_bin,
-        rg_bin=resolve_rg_bin(spec, args.rg_bin),
-        zsh_bin=resolve_zsh_bin(spec),
+        rg_bin=resolve_rg_bin(spec, args.rg_bin, cache_dir=cache_dir),
+        zsh_bin=resolve_zsh_bin(spec, cache_dir=cache_dir),
         bwrap_bin=source_outputs.bwrap_bin,
         codex_command_runner_bin=source_outputs.codex_command_runner_bin,
         codex_windows_sandbox_setup_bin=source_outputs.codex_windows_sandbox_setup_bin,
