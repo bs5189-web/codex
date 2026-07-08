@@ -72,6 +72,13 @@ struct ChatToolCallFunction {
     arguments: String,
 }
 
+#[derive(Debug, Default)]
+struct PendingChatToolCallBatch {
+    calls: Vec<ChatToolCall>,
+    outputs: Vec<Option<ChatMessage>>,
+    invalid: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct ChatTool {
     r#type: String,
@@ -230,6 +237,7 @@ impl<T: HttpTransport> ChatCompletionsClient<T> {
 
 fn convert_request(request: ResponsesApiRequest) -> Result<ChatCompletionsRequest, ApiError> {
     let mut messages = Vec::new();
+    let mut pending_tool_batch = PendingChatToolCallBatch::default();
     if !request.instructions.is_empty() {
         messages.push(ChatMessage {
             role: "system".to_string(),
@@ -242,6 +250,7 @@ fn convert_request(request: ResponsesApiRequest) -> Result<ChatCompletionsReques
     for item in request.input {
         match item {
             ResponseItem::Message { role, content, .. } => {
+                pending_tool_batch.discard_incomplete();
                 if let Some(text) = content_items_to_text(&content) {
                     messages.push(ChatMessage {
                         role: chat_message_role(role),
@@ -257,24 +266,14 @@ fn convert_request(request: ResponsesApiRequest) -> Result<ChatCompletionsReques
                 call_id,
                 ..
             } => {
-                messages.push(ChatMessage {
-                    role: "assistant".to_string(),
-                    content: None,
-                    tool_call_id: None,
-                    tool_calls: Some(vec![ChatToolCall {
-                        id: call_id,
-                        r#type: "function".to_string(),
-                        function: ChatToolCallFunction { name, arguments },
-                    }]),
+                pending_tool_batch.push_call(ChatToolCall {
+                    id: call_id,
+                    r#type: "function".to_string(),
+                    function: ChatToolCallFunction { name, arguments },
                 });
             }
             ResponseItem::FunctionCallOutput { call_id, output } => {
-                messages.push(ChatMessage {
-                    role: "tool".to_string(),
-                    content: Some(output_to_text(output)),
-                    tool_call_id: Some(call_id),
-                    tool_calls: None,
-                });
+                pending_tool_batch.push_output(call_id, output, &mut messages);
             }
             ResponseItem::CustomToolCall {
                 call_id,
@@ -282,29 +281,19 @@ fn convert_request(request: ResponsesApiRequest) -> Result<ChatCompletionsReques
                 input,
                 ..
             } => {
-                messages.push(ChatMessage {
-                    role: "assistant".to_string(),
-                    content: None,
-                    tool_call_id: None,
-                    tool_calls: Some(vec![ChatToolCall {
-                        id: call_id,
-                        r#type: "function".to_string(),
-                        function: ChatToolCallFunction {
-                            name,
-                            arguments: input,
-                        },
-                    }]),
+                pending_tool_batch.push_call(ChatToolCall {
+                    id: call_id,
+                    r#type: "function".to_string(),
+                    function: ChatToolCallFunction {
+                        name,
+                        arguments: input,
+                    },
                 });
             }
             ResponseItem::CustomToolCallOutput {
                 call_id, output, ..
             } => {
-                messages.push(ChatMessage {
-                    role: "tool".to_string(),
-                    content: Some(output_to_text(output)),
-                    tool_call_id: Some(call_id),
-                    tool_calls: None,
-                });
+                pending_tool_batch.push_output(call_id, output, &mut messages);
             }
             ResponseItem::Reasoning { .. }
             | ResponseItem::AgentMessage { .. }
@@ -319,6 +308,7 @@ fn convert_request(request: ResponsesApiRequest) -> Result<ChatCompletionsReques
             | ResponseItem::Other => {}
         }
     }
+    pending_tool_batch.discard_incomplete();
 
     let tools = request
         .tools
@@ -338,6 +328,110 @@ fn convert_request(request: ResponsesApiRequest) -> Result<ChatCompletionsReques
         tool_choice,
         stream: true,
     })
+}
+
+impl PendingChatToolCallBatch {
+    fn push_call(&mut self, call: ChatToolCall) {
+        if self.outputs.iter().any(Option::is_some) {
+            self.discard_incomplete();
+        }
+
+        if self.calls.iter().any(|existing| existing.id == call.id) {
+            debug!(
+                call_id = %call.id,
+                "dropping invalid Chat Completions tool call batch with duplicate call id"
+            );
+            self.invalid = true;
+            return;
+        }
+
+        self.calls.push(call);
+        self.outputs.push(None);
+    }
+
+    fn push_output(
+        &mut self,
+        call_id: String,
+        output: FunctionCallOutputPayload,
+        messages: &mut Vec<ChatMessage>,
+    ) {
+        if self.calls.is_empty() {
+            debug!(
+                %call_id,
+                "dropping orphan Chat Completions tool output without a preceding tool call"
+            );
+            return;
+        }
+
+        if self.invalid {
+            debug!(
+                %call_id,
+                "dropping Chat Completions tool output for invalid tool call batch"
+            );
+            return;
+        }
+
+        let Some(index) = self.calls.iter().position(|call| call.id == call_id) else {
+            debug!(
+                %call_id,
+                "dropping Chat Completions tool output that does not match the active tool call batch"
+            );
+            return;
+        };
+
+        if self.outputs[index].is_some() {
+            debug!(
+                %call_id,
+                "dropping duplicate Chat Completions tool output"
+            );
+            return;
+        }
+
+        self.outputs[index] = Some(ChatMessage {
+            role: "tool".to_string(),
+            content: Some(output_to_text(output)),
+            tool_call_id: Some(call_id),
+            tool_calls: None,
+        });
+        self.flush_if_complete(messages);
+    }
+
+    fn flush_if_complete(&mut self, messages: &mut Vec<ChatMessage>) {
+        if self.calls.is_empty() || self.outputs.iter().any(Option::is_none) {
+            return;
+        }
+
+        messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_call_id: None,
+            tool_calls: Some(std::mem::take(&mut self.calls)),
+        });
+        messages.extend(std::mem::take(&mut self.outputs).into_iter().flatten());
+        self.invalid = false;
+    }
+
+    fn discard_incomplete(&mut self) {
+        if self.calls.is_empty() {
+            self.invalid = false;
+            return;
+        }
+
+        let missing_call_ids = self
+            .calls
+            .iter()
+            .zip(self.outputs.iter())
+            .filter_map(|(call, output)| output.is_none().then_some(call.id.as_str()))
+            .collect::<Vec<_>>()
+            .join(",");
+        debug!(
+            %missing_call_ids,
+            "dropping incomplete Chat Completions tool call batch"
+        );
+        self.calls.clear();
+        self.outputs.clear();
+        self.invalid = false;
+    }
 }
 
 fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
@@ -414,6 +508,7 @@ async fn process_chat_sse(
     let mut pending_tool_calls: Vec<PendingToolCall> = Vec::new();
     let mut usage: Option<TokenUsage> = None;
     let mut assistant_message_started = false;
+    let mut assistant_message_id: Option<String> = None;
     let mut assistant_message_text = String::new();
 
     while let Some(next) = stream.next().await {
@@ -436,7 +531,7 @@ async fn process_chat_sse(
             }
         };
         if response_id.is_none() {
-            response_id = chunk.id;
+            response_id = chunk.id.clone();
         }
         if let Some(chunk_usage) = chunk.usage {
             usage = Some(TokenUsage {
@@ -450,7 +545,16 @@ async fn process_chat_sse(
 
         for choice in chunk.choices {
             if let Some(content) = choice.delta.content {
-                ensure_assistant_message_started(&tx_event, &mut assistant_message_started).await;
+                if content.is_empty() || (!assistant_message_started && content.trim().is_empty()) {
+                    continue;
+                }
+                ensure_assistant_message_started(
+                    &tx_event,
+                    &mut assistant_message_started,
+                    &mut assistant_message_id,
+                    response_id.as_ref(),
+                )
+                .await;
                 assistant_message_text.push_str(&content);
                 let _ = tx_event
                     .send(Ok(ResponseEvent::OutputTextDelta(content)))
@@ -484,8 +588,11 @@ async fn process_chat_sse(
 
     flush_tool_calls(&tx_event, &mut pending_tool_calls).await;
     if assistant_message_started {
+        let id = assistant_message_id
+            .get_or_insert_with(|| chat_assistant_message_id(response_id.as_ref()))
+            .clone();
         let item = ResponseItem::Message {
-            id: None,
+            id: Some(id),
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
                 text: assistant_message_text,
@@ -507,14 +614,19 @@ async fn process_chat_sse(
 async fn ensure_assistant_message_started(
     tx_event: &mpsc::Sender<Result<ResponseEvent, ApiError>>,
     assistant_message_started: &mut bool,
+    assistant_message_id: &mut Option<String>,
+    response_id: Option<&String>,
 ) {
     if *assistant_message_started {
         return;
     }
 
     *assistant_message_started = true;
+    let id = assistant_message_id
+        .get_or_insert_with(|| chat_assistant_message_id(response_id))
+        .clone();
     let item = ResponseItem::Message {
-        id: None,
+        id: Some(id),
         role: "assistant".to_string(),
         content: Vec::new(),
         phase: None,
@@ -522,6 +634,13 @@ async fn ensure_assistant_message_started(
     let _ = tx_event
         .send(Ok(ResponseEvent::OutputItemAdded(item)))
         .await;
+}
+
+fn chat_assistant_message_id(response_id: Option<&String>) -> String {
+    let response_id = response_id
+        .map(String::as_str)
+        .unwrap_or("chatcmpl-adapter");
+    format!("{response_id}-message")
 }
 
 async fn flush_tool_calls(

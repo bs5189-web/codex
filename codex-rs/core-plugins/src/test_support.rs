@@ -114,7 +114,7 @@ pub(crate) async fn load_plugins_config(codex_home: &Path, cwd: &Path) -> Plugin
             "remote_plugin",
             /*default_enabled*/ false,
         ),
-        "https://gptauth.rjagi.cn/backend-api/".to_string(),
+        "https://gptauth.ruijie.com.cn/backend-api/".to_string(),
     )
 }
 

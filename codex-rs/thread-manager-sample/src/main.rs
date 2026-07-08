@@ -254,7 +254,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
         model_supports_reasoning_summaries: None,
         model_catalog: None,
         model_verbosity: None,
-        chatgpt_base_url: "https://gptauth.rjagi.cn/backend-api/".to_string(),
+        chatgpt_base_url: "https://gptauth.ruijie.com.cn/backend-api/".to_string(),
         chatgpt_login_base_url: None,
         apps_mcp_product_sku: None,
         realtime_audio: RealtimeAudioConfig::default(),

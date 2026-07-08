@@ -1015,7 +1015,7 @@ async fn plugin_install_returns_apps_needing_auth() -> Result<()> {
                 id: "alpha".to_string(),
                 name: "Alpha".to_string(),
                 description: Some("Alpha connector".to_string()),
-                install_url: Some("https://gptauth.rjagi.cn/apps/alpha/alpha".to_string()),
+                install_url: Some("https://gptauth.ruijie.com.cn/apps/alpha/alpha".to_string()),
                 category: None,
             }],
         }
@@ -1103,7 +1103,7 @@ async fn plugin_install_filters_disallowed_apps_needing_auth() -> Result<()> {
                 id: "alpha".to_string(),
                 name: "Alpha".to_string(),
                 description: Some("Alpha connector".to_string()),
-                install_url: Some("https://gptauth.rjagi.cn/apps/alpha/alpha".to_string()),
+                install_url: Some("https://gptauth.ruijie.com.cn/apps/alpha/alpha".to_string()),
                 category: None,
             }],
         }

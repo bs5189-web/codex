@@ -256,6 +256,7 @@ async fn callback_with_codex_token_initializes_ruijie_uniapi_config() -> Result<
         force_state: Some(state.clone()),
         forced_chatgpt_workspace_id: None,
         codex_streamlined_login: false,
+        auth_keyring_backend_kind: AuthKeyringBackendKind::Direct,
     };
     let server = run_login_server(opts)?;
     let login_port = server.actual_port;
@@ -318,6 +319,7 @@ async fn callback_with_codex_token_keeps_existing_ruijie_uniapi_config() -> Resu
         force_state: Some(state.clone()),
         forced_chatgpt_workspace_id: None,
         codex_streamlined_login: false,
+        auth_keyring_backend_kind: AuthKeyringBackendKind::Direct,
     };
     let server = run_login_server(opts)?;
     let login_port = server.actual_port;
@@ -379,6 +381,7 @@ wire_api = "responses"
         force_state: Some(state.clone()),
         forced_chatgpt_workspace_id: None,
         codex_streamlined_login: false,
+        auth_keyring_backend_kind: AuthKeyringBackendKind::Direct,
     };
     let server = run_login_server(opts)?;
     let login_port = server.actual_port;
@@ -447,6 +450,7 @@ api_key = "existing-token"
         force_state: Some(state.clone()),
         forced_chatgpt_workspace_id: None,
         codex_streamlined_login: false,
+        auth_keyring_backend_kind: AuthKeyringBackendKind::Direct,
     };
     let server = run_login_server(opts)?;
     let login_port = server.actual_port;

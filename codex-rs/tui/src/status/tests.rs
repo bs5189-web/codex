@@ -683,7 +683,7 @@ async fn status_model_provider_uses_bedrock_runtime_base_url_and_gates_usage_lin
         "expected /status to ignore configured Bedrock base URL, got: {rendered}"
     );
     assert!(
-        !rendered.contains("https://gptauth.rjagi.cn/codex/settings/usage"),
+        !rendered.contains("https://gptauth.ruijie.com.cn/codex/settings/usage"),
         "expected /status to hide ChatGPT usage link for Bedrock, got: {rendered}"
     );
 
@@ -716,7 +716,7 @@ async fn status_model_provider_uses_bedrock_runtime_base_url_and_gates_usage_lin
     let rendered = render_lines(&composite.display_lines(/*width*/ 120)).join("\n");
 
     assert!(
-        rendered.contains("https://gptauth.rjagi.cn/codex/settings/usage"),
+        rendered.contains("https://gptauth.ruijie.com.cn/codex/settings/usage"),
         "expected /status to show ChatGPT usage link for OpenAI-auth proxy, got: {rendered}"
     );
 
@@ -728,7 +728,7 @@ async fn status_model_provider_uses_bedrock_runtime_base_url_and_gates_usage_lin
         .collect();
     assert_eq!(
         wide_destinations,
-        vec!["https://gptauth.rjagi.cn/codex/settings/usage"]
+        vec!["https://gptauth.ruijie.com.cn/codex/settings/usage"]
     );
 
     let narrow_destinations: Vec<String> = composite

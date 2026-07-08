@@ -22,6 +22,9 @@ use codex_client::StreamResponse;
 use codex_client::TransportError;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::LocalShellAction;
+use codex_protocol::models::LocalShellExecAction;
+use codex_protocol::models::LocalShellStatus;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -201,6 +204,74 @@ fn provider(name: &str) -> Provider {
     }
 }
 
+async fn chat_completions_body_for_request(
+    request: ResponsesApiRequest,
+) -> Result<serde_json::Value> {
+    let state = RecordingState::default();
+    let transport = RecordingTransport::new(state.clone());
+    let client = ChatCompletionsClient::new(transport, provider("openai"), Arc::new(NoAuth));
+
+    let _stream = client
+        .stream_request(
+            request,
+            ResponsesOptions {
+                compression: Compression::None,
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    let requests = state.take_stream_requests();
+    assert_eq!(requests.len(), 1);
+    Ok(json_body(&requests[0])?.clone())
+}
+
+fn text_message(role: &str, text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: role.to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+    }
+}
+
+fn function_call(call_id: &str, name: &str, arguments: &str) -> ResponseItem {
+    ResponseItem::FunctionCall {
+        id: None,
+        name: name.to_string(),
+        namespace: None,
+        arguments: arguments.to_string(),
+        call_id: call_id.to_string(),
+    }
+}
+
+fn function_output(call_id: &str, output: &str) -> ResponseItem {
+    ResponseItem::FunctionCallOutput {
+        call_id: call_id.to_string(),
+        output: FunctionCallOutputPayload::from_text(output.to_string()),
+    }
+}
+
+fn custom_tool_call(call_id: &str, name: &str, input: &str) -> ResponseItem {
+    ResponseItem::CustomToolCall {
+        id: None,
+        status: None,
+        call_id: call_id.to_string(),
+        name: name.to_string(),
+        input: input.to_string(),
+    }
+}
+
+fn custom_tool_output(call_id: &str, output: &str) -> ResponseItem {
+    ResponseItem::CustomToolCallOutput {
+        call_id: call_id.to_string(),
+        name: None,
+        output: FunctionCallOutputPayload::from_text(output.to_string()),
+    }
+}
+
 #[derive(Clone)]
 struct FlakyTransport {
     state: Arc<Mutex<i64>>,
@@ -358,32 +429,12 @@ async fn chat_completions_client_uses_chat_path() -> Result<()> {
 
 #[tokio::test]
 async fn chat_completions_client_converts_responses_request() -> Result<()> {
-    let state = RecordingState::default();
-    let transport = RecordingTransport::new(state.clone());
-    let client = ChatCompletionsClient::new(transport, provider("openai"), Arc::new(NoAuth));
-
     let mut request = responses_request();
     request.input = vec![
-        ResponseItem::Message {
-            id: None,
-            role: "developer".to_string(),
-            content: vec![ContentItem::InputText {
-                text: "be concise".to_string(),
-            }],
-            phase: None,
-        },
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: "run pwd".to_string(),
-            }],
-            phase: None,
-        },
-        ResponseItem::FunctionCallOutput {
-            call_id: "call-1".to_string(),
-            output: FunctionCallOutputPayload::from_text("/tmp".to_string()),
-        },
+        text_message("developer", "be concise"),
+        text_message("user", "run pwd"),
+        function_call("call-1", "exec_command", "{\"cmd\":\"pwd\"}"),
+        function_output("call-1", "/tmp"),
     ];
     request.tools = vec![serde_json::json!({
         "type": "function",
@@ -392,26 +443,26 @@ async fn chat_completions_client_converts_responses_request() -> Result<()> {
         "parameters": {"type": "object"}
     })];
 
-    let _stream = client
-        .stream_request(
-            request,
-            ResponsesOptions {
-                compression: Compression::None,
-                ..Default::default()
-            },
-        )
-        .await?;
-
-    let requests = state.take_stream_requests();
-    let body = json_body(&requests[0])?;
+    let body = chat_completions_body_for_request(request).await?;
     assert_eq!(
         body,
-        &serde_json::json!({
+        serde_json::json!({
             "model": "gpt-test",
             "messages": [
                 {"role": "system", "content": "Say hi"},
                 {"role": "system", "content": "be concise"},
                 {"role": "user", "content": "run pwd"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "exec_command",
+                            "arguments": "{\"cmd\":\"pwd\"}"
+                        }
+                    }]
+                },
                 {"role": "tool", "content": "/tmp", "tool_call_id": "call-1"}
             ],
             "tools": [{
@@ -430,11 +481,185 @@ async fn chat_completions_client_converts_responses_request() -> Result<()> {
 }
 
 #[tokio::test]
+async fn chat_completions_client_batches_parallel_tool_calls() -> Result<()> {
+    let mut request = responses_request();
+    request.input = vec![
+        text_message("user", "run both"),
+        function_call("call-1", "first_tool", "{\"value\":1}"),
+        function_call("call-2", "second_tool", "{\"value\":2}"),
+        function_output("call-1", "first output"),
+        function_output("call-2", "second output"),
+    ];
+
+    let body = chat_completions_body_for_request(request).await?;
+    assert_eq!(
+        body["messages"],
+        serde_json::json!([
+            {"role": "system", "content": "Say hi"},
+            {"role": "user", "content": "run both"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "first_tool",
+                            "arguments": "{\"value\":1}"
+                        }
+                    },
+                    {
+                        "id": "call-2",
+                        "type": "function",
+                        "function": {
+                            "name": "second_tool",
+                            "arguments": "{\"value\":2}"
+                        }
+                    }
+                ]
+            },
+            {"role": "tool", "content": "first output", "tool_call_id": "call-1"},
+            {"role": "tool", "content": "second output", "tool_call_id": "call-2"}
+        ])
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_completions_client_drops_incomplete_tool_call_batch() -> Result<()> {
+    let mut request = responses_request();
+    request.input = vec![
+        text_message("user", "run both"),
+        function_call("call-1", "first_tool", "{}"),
+        function_call("call-2", "second_tool", "{}"),
+        function_output("call-1", "first output"),
+        text_message("user", "continue"),
+    ];
+
+    let body = chat_completions_body_for_request(request).await?;
+    assert_eq!(
+        body["messages"],
+        serde_json::json!([
+            {"role": "system", "content": "Say hi"},
+            {"role": "user", "content": "run both"},
+            {"role": "user", "content": "continue"}
+        ])
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_completions_client_drops_orphan_tool_output() -> Result<()> {
+    let mut request = responses_request();
+    request.input = vec![
+        text_message("user", "run pwd"),
+        function_output("call-1", "/tmp"),
+    ];
+
+    let body = chat_completions_body_for_request(request).await?;
+    assert_eq!(
+        body["messages"],
+        serde_json::json!([
+            {"role": "system", "content": "Say hi"},
+            {"role": "user", "content": "run pwd"}
+        ])
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_completions_client_drops_tool_call_interrupted_by_message() -> Result<()> {
+    let mut request = responses_request();
+    request.input = vec![
+        text_message("user", "run pwd"),
+        function_call("call-1", "exec_command", "{}"),
+        text_message("user", "never mind"),
+        function_output("call-1", "/tmp"),
+    ];
+
+    let body = chat_completions_body_for_request(request).await?;
+    assert_eq!(
+        body["messages"],
+        serde_json::json!([
+            {"role": "system", "content": "Say hi"},
+            {"role": "user", "content": "run pwd"},
+            {"role": "user", "content": "never mind"}
+        ])
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_completions_client_converts_custom_tool_call_batch() -> Result<()> {
+    let mut request = responses_request();
+    request.input = vec![
+        text_message("user", "use custom tool"),
+        custom_tool_call("call-1", "custom_tool", "{\"value\":1}"),
+        custom_tool_output("call-1", "custom output"),
+    ];
+
+    let body = chat_completions_body_for_request(request).await?;
+    assert_eq!(
+        body["messages"],
+        serde_json::json!([
+            {"role": "system", "content": "Say hi"},
+            {"role": "user", "content": "use custom tool"},
+            {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "custom_tool",
+                        "arguments": "{\"value\":1}"
+                    }
+                }]
+            },
+            {"role": "tool", "content": "custom output", "tool_call_id": "call-1"}
+        ])
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_completions_client_drops_local_shell_output_without_chat_tool_call() -> Result<()> {
+    let mut request = responses_request();
+    request.input = vec![
+        text_message("user", "run pwd"),
+        ResponseItem::LocalShellCall {
+            id: None,
+            call_id: Some("call-1".to_string()),
+            status: LocalShellStatus::Completed,
+            action: LocalShellAction::Exec(LocalShellExecAction {
+                command: vec!["pwd".to_string()],
+                timeout_ms: None,
+                working_directory: None,
+                env: None,
+                user: None,
+            }),
+        },
+        function_output("call-1", "/tmp"),
+    ];
+
+    let body = chat_completions_body_for_request(request).await?;
+    assert_eq!(
+        body["messages"],
+        serde_json::json!([
+            {"role": "system", "content": "Say hi"},
+            {"role": "user", "content": "run pwd"}
+        ])
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn chat_completions_stream_wraps_text_deltas_in_message_item() -> Result<()> {
     let state = RecordingState::default();
     let transport = StaticStreamTransport::new(
         state,
         vec![
+            "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"\\n\\n\"},\"finish_reason\":null}]}\n\n",
             "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"he\"},\"finish_reason\":null}]}\n\n",
             "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"llo\"},\"finish_reason\":\"stop\"}]}\n\n",
             "data: [DONE]\n\n",
@@ -462,10 +687,13 @@ async fn chat_completions_stream_wraps_text_deltas_in_message_item() -> Result<(
     assert!(matches!(
         &events[1],
         ResponseEvent::OutputItemAdded(ResponseItem::Message {
+            id,
             role,
             content,
             ..
-        }) if role == "assistant" && content.is_empty()
+        }) if id.as_deref() == Some("chatcmpl-1-message")
+            && role == "assistant"
+            && content.is_empty()
     ));
     assert!(matches!(
         &events[2],
@@ -477,8 +705,9 @@ async fn chat_completions_stream_wraps_text_deltas_in_message_item() -> Result<(
     ));
     assert!(matches!(
         &events[4],
-        ResponseEvent::OutputItemDone(ResponseItem::Message { role, content, .. })
-            if role == "assistant"
+        ResponseEvent::OutputItemDone(ResponseItem::Message { id, role, content, .. })
+            if id.as_deref() == Some("chatcmpl-1-message")
+                && role == "assistant"
                 && content == &vec![ContentItem::OutputText {
                     text: "hello".to_string(),
                 }]

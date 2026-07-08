@@ -571,7 +571,7 @@ impl AuthModeWidget {
             Line::from(vec![
                 "  Uses your plan's rate limits and ".into(),
                 crate::terminal_hyperlinks::osc8_hyperlink(
-                    "https://gptauth.rjagi.cn/#settings",
+                    "https://gptauth.ruijie.com.cn/#settings",
                     "training data preferences",
                 )
                 .underlined(),
@@ -1039,7 +1039,7 @@ mod tests {
                 /*enable_codex_api_key_env*/ false,
                 AuthCredentialsStoreMode::File,
                 AuthKeyringBackendKind::default(),
-                "https://gptauth.rjagi.cn/backend-api/".to_string(),
+                "https://gptauth.ruijie.com.cn/backend-api/".to_string(),
             )
             .await,
             feedback: codex_feedback::CodexFeedback::new(),
@@ -1153,7 +1153,7 @@ mod tests {
             SignInState::ChatGptDeviceCode(ContinueWithDeviceCodeState::ready(
                 "request-1".to_string(),
                 "login-1".to_string(),
-                "https://gptauth.rjagi.cn/device".to_string(),
+                "https://gptauth.ruijie.com.cn/device".to_string(),
                 "ABCD-EFGH".to_string(),
             ));
 
@@ -1214,7 +1214,7 @@ mod tests {
             SignInState::ChatGptDeviceCode(ContinueWithDeviceCodeState::ready(
                 "request-1".to_string(),
                 "login-1".to_string(),
-                "https://gptauth.rjagi.cn/device".to_string(),
+                "https://gptauth.ruijie.com.cn/device".to_string(),
                 "ABCD-EFGH".to_string(),
             ));
 
@@ -1239,7 +1239,7 @@ mod tests {
             SignInState::ChatGptDeviceCode(ContinueWithDeviceCodeState::ready(
                 "request-1".to_string(),
                 "login-1".to_string(),
-                "https://gptauth.rjagi.cn/device".to_string(),
+                "https://gptauth.ruijie.com.cn/device".to_string(),
                 "ABCD-EFGH".to_string(),
             ));
 

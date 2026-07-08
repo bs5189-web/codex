@@ -3597,7 +3597,7 @@ impl Config {
             model_verbosity: cfg.model_verbosity,
             chatgpt_base_url: cfg
                 .chatgpt_base_url
-                .unwrap_or("https://gptauth.rjagi.cn/backend-api/".to_string()),
+                .unwrap_or("https://gptauth.ruijie.com.cn/backend-api/".to_string()),
             chatgpt_login_base_url: cfg
                 .chatgpt_login_base_url
                 .filter(|url| !url.trim().is_empty()),
