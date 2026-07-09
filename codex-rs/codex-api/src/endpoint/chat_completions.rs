@@ -11,6 +11,7 @@ use crate::requests::headers::build_session_headers;
 use crate::requests::headers::insert_header;
 use crate::requests::headers::subagent_header;
 use codex_client::ByteStream;
+use codex_client::EncodedJsonBody;
 use codex_client::HttpTransport;
 use codex_client::RequestCompression;
 use codex_client::RequestTelemetry;
@@ -177,7 +178,7 @@ impl<T: HttpTransport> ChatCompletionsClient<T> {
         } = options;
 
         let request = convert_request(request)?;
-        let body = serde_json::to_value(&request).map_err(|e| {
+        let body = EncodedJsonBody::encode(&request).map_err(|e| {
             ApiError::Stream(format!("failed to encode chat completions request: {e}"))
         })?;
 
@@ -205,7 +206,7 @@ impl<T: HttpTransport> ChatCompletionsClient<T> {
     )]
     async fn stream(
         &self,
-        body: Value,
+        body: EncodedJsonBody,
         extra_headers: HeaderMap,
         compression: Compression,
     ) -> Result<ResponseStream, ApiError> {
@@ -216,7 +217,7 @@ impl<T: HttpTransport> ChatCompletionsClient<T> {
 
         let stream_response = self
             .session
-            .stream_with(
+            .stream_encoded_json_with(
                 Method::POST,
                 "chat/completions",
                 extra_headers,
@@ -272,7 +273,9 @@ fn convert_request(request: ResponsesApiRequest) -> Result<ChatCompletionsReques
                     function: ChatToolCallFunction { name, arguments },
                 });
             }
-            ResponseItem::FunctionCallOutput { call_id, output } => {
+            ResponseItem::FunctionCallOutput {
+                call_id, output, ..
+            } => {
                 pending_tool_batch.push_output(call_id, output, &mut messages);
             }
             ResponseItem::CustomToolCall {
@@ -302,8 +305,9 @@ fn convert_request(request: ResponsesApiRequest) -> Result<ChatCompletionsReques
             | ResponseItem::ToolSearchOutput { .. }
             | ResponseItem::WebSearchCall { .. }
             | ResponseItem::ImageGenerationCall { .. }
+            | ResponseItem::AdditionalTools { .. }
             | ResponseItem::Compaction { .. }
-            | ResponseItem::CompactionTrigger
+            | ResponseItem::CompactionTrigger { .. }
             | ResponseItem::ContextCompaction { .. }
             | ResponseItem::Other => {}
         }
@@ -312,6 +316,7 @@ fn convert_request(request: ResponsesApiRequest) -> Result<ChatCompletionsReques
 
     let tools = request
         .tools
+        .unwrap_or_default()
         .into_iter()
         .filter_map(chat_tool_from_responses_tool)
         .collect::<Vec<_>>();
@@ -598,6 +603,7 @@ async fn process_chat_sse(
                 text: assistant_message_text,
             }],
             phase: None,
+            internal_chat_message_metadata_passthrough: None,
         };
         let _ = tx_event.send(Ok(ResponseEvent::OutputItemDone(item))).await;
     }
@@ -630,6 +636,7 @@ async fn ensure_assistant_message_started(
         role: "assistant".to_string(),
         content: Vec::new(),
         phase: None,
+        internal_chat_message_metadata_passthrough: None,
     };
     let _ = tx_event
         .send(Ok(ResponseEvent::OutputItemAdded(item)))
@@ -657,6 +664,7 @@ async fn flush_tool_calls(
             namespace: None,
             arguments: pending.arguments,
             call_id,
+            internal_chat_message_metadata_passthrough: None,
         };
         let _ = tx_event.send(Ok(ResponseEvent::OutputItemDone(item))).await;
     }

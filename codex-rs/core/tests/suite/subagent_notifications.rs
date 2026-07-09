@@ -17,7 +17,6 @@ use core_test_support::hooks::trust_discovered_hooks;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
-use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::ev_tool_search_call;
@@ -28,6 +27,7 @@ use core_test_support::responses::namespace_child_tool;
 use core_test_support::responses::sse;
 use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
+use core_test_support::responses::strip_metadata_from_json;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::local_selections;
@@ -39,18 +39,23 @@ use serde_json::Value;
 use serde_json::json;
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::Duration;
+use test_case::test_case;
 use tokio::time::Instant;
 use tokio::time::sleep;
+use tracing::Level;
+use tracing_test::internal::MockWriter;
 use wiremock::MockServer;
 
 const SPAWN_CALL_ID: &str = "spawn-call-1";
 const MULTI_AGENT_V1_NAMESPACE: &str = "multi_agent_v1";
+const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 const TURN_0_FORK_PROMPT: &str = "seed fork context";
 const TURN_1_PROMPT: &str = "spawn a child and continue";
 const TURN_2_NO_WAIT_PROMPT: &str = "follow up without wait";
 const CHILD_PROMPT: &str = "child: do work";
-const INHERITED_MODEL: &str = "gpt-5.3-codex";
+const INHERITED_MODEL: &str = "gpt-5.2";
 const INHERITED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::XHigh;
 const REQUESTED_MODEL: &str = "gpt-5.4";
 const REQUESTED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Low;
@@ -61,6 +66,23 @@ const SUBAGENT_STOP_CONTINUATION: &str = "continue only the child";
 const INTERNAL_SUBAGENT_PROMPT: &str = "internal subagent: review";
 
 fn body_contains(req: &wiremock::Request, text: &str) -> bool {
+    decoded_body(req)
+        .and_then(|body| String::from_utf8(body).ok())
+        .is_some_and(|body| body.contains(text))
+}
+
+fn request_has_input_type(req: &wiremock::Request, ty: &str) -> bool {
+    decoded_body(req)
+        .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+        .and_then(|body| body.get("input").and_then(Value::as_array).cloned())
+        .is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item.get("type").and_then(Value::as_str) == Some(ty))
+        })
+}
+
+fn decoded_body(req: &wiremock::Request) -> Option<Vec<u8>> {
     let is_zstd = req
         .headers
         .get("content-encoding")
@@ -70,14 +92,18 @@ fn body_contains(req: &wiremock::Request, text: &str) -> bool {
                 .split(',')
                 .any(|entry| entry.trim().eq_ignore_ascii_case("zstd"))
         });
-    let bytes = if is_zstd {
+    if is_zstd {
         zstd::stream::decode_all(std::io::Cursor::new(&req.body)).ok()
     } else {
         Some(req.body.clone())
-    };
-    bytes
-        .and_then(|body| String::from_utf8(body).ok())
-        .is_some_and(|body| body.contains(text))
+    }
+}
+
+fn log_field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    let prefix = format!("{name}=");
+    line.split_ascii_whitespace()
+        .find_map(|field| field.strip_prefix(&prefix))
+        .map(|value| value.trim_matches('"'))
 }
 
 fn has_subagent_notification(req: &ResponsesRequest) -> bool {
@@ -410,7 +436,6 @@ async fn setup_turn_one_with_custom_spawned_child(
     )
     .await;
 
-    #[allow(clippy::expect_used)]
     let mut builder = configure_test(test_codex().with_config(|config| {
         config
             .features
@@ -528,11 +553,8 @@ async fn subagent_start_replaces_session_start_and_injects_context() -> Result<(
 
     let test = test_codex()
         .with_pre_build_hook(|home| {
-            if let Err(error) =
-                write_subagent_lifecycle_hooks(home, /*stop_prompts*/ &[], "worker")
-            {
-                panic!("failed to write subagent hook fixture: {error}");
-            }
+            write_subagent_lifecycle_hooks(home, /*stop_prompts*/ &[], "worker")
+                .expect("failed to write subagent hook fixture");
         })
         .with_config(|config| {
             trust_discovered_hooks(config);
@@ -675,13 +697,12 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
 
     let test = test_codex()
         .with_pre_build_hook(|home| {
-            if let Err(error) = write_subagent_lifecycle_hooks(
+            write_subagent_lifecycle_hooks(
                 home,
                 /*stop_prompts*/ &[SUBAGENT_STOP_CONTINUATION],
                 "",
-            ) {
-                panic!("failed to write subagent hook fixture: {error}");
-            }
+            )
+            .expect("failed to write subagent hook fixture");
         })
         .with_config(|config| {
             trust_discovered_hooks(config);
@@ -750,7 +771,9 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
         .thread_manager
         .start_thread_with_options(StartThreadOptions {
             config: test.config.clone(),
+            allow_provider_model_fallback: false,
             initial_history: InitialHistory::New,
+            history_mode: None,
             session_source: Some(SessionSource::SubAgent(SubAgentSource::Review)),
             thread_source: None,
             dynamic_tools: Vec::new(),
@@ -758,6 +781,7 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
             parent_trace: None,
             environments: Vec::new(),
             thread_extension_init: Default::default(),
+            supports_openai_form_elicitation: false,
         })
         .await?;
 
@@ -1028,8 +1052,16 @@ async fn spawned_multi_agent_v2_child_inherits_parent_developer_context() -> Res
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn encrypted_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result<()> {
+    let output: &'static Mutex<Vec<u8>> = Box::leak(Box::new(Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_max_level(Level::INFO)
+        .with_writer(MockWriter::new(output))
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
     let server = start_mock_server().await;
     let encrypted_message = "opaque-encrypted-message";
     let spawn_args = serde_json::to_string(&json!({
@@ -1041,14 +1073,19 @@ async fn encrypted_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result
         |req: &wiremock::Request| body_contains(req, TURN_1_PROMPT),
         sse(vec![
             ev_response_created("resp-parent-1"),
-            ev_function_call(SPAWN_CALL_ID, "spawn_agent", &spawn_args),
+            ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                MULTI_AGENT_V2_NAMESPACE,
+                "spawn_agent",
+                &spawn_args,
+            ),
             ev_completed("resp-parent-1"),
         ]),
     )
     .await;
     let child_request_log = mount_sse_once_match(
         &server,
-        |req: &wiremock::Request| body_contains(req, "\"type\":\"agent_message\""),
+        |req: &wiremock::Request| request_has_input_type(req, "agent_message"),
         sse(vec![
             ev_response_created("resp-child-1"),
             ev_completed("resp-child-1"),
@@ -1058,7 +1095,7 @@ async fn encrypted_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result
     mount_sse_once_match(
         &server,
         |req: &wiremock::Request| {
-            body_contains(req, SPAWN_CALL_ID) && !body_contains(req, "\"type\":\"agent_message\"")
+            body_contains(req, SPAWN_CALL_ID) && !request_has_input_type(req, "agent_message")
         },
         sse(vec![
             ev_response_created("resp-parent-2"),
@@ -1079,31 +1116,95 @@ async fn encrypted_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result
             .expect("test config should allow feature update");
     });
     let test = builder.build(&server).await?;
+    let root_thread_id = test.session_configured.thread_id;
 
     test.submit_turn(TURN_1_PROMPT).await?;
 
-    let child_request = wait_for_requests(&child_request_log)
-        .await?
-        .pop()
-        .expect("child request");
+    // The response mock records candidate requests before its request matcher runs, so wait for
+    // the child request instead of assuming the latest recorded request is already it.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let child_request = loop {
+        if let Some(request) = child_request_log
+            .requests()
+            .into_iter()
+            .find(|request| !request.inputs_of_type("agent_message").is_empty())
+        {
+            break request;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for child agent message request");
+        }
+        sleep(Duration::from_millis(10)).await;
+    };
     assert_eq!(
-        child_request.inputs_of_type("agent_message"),
-        vec![json!({
+        strip_metadata_from_json(Value::Array(child_request.inputs_of_type("agent_message"))),
+        Value::Array(vec![json!({
             "type": "agent_message",
             "author": "/root",
             "recipient": "/root/worker",
-            "content": [{
-                "type": "encrypted_content",
-                "encrypted_content": encrypted_message,
-            }],
-        })]
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": "Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n",
+                },
+                {
+                    "type": "encrypted_content",
+                    "encrypted_content": encrypted_message,
+                },
+            ],
+        })])
     );
+
+    let child_thread_id = test
+        .thread_manager
+        .list_thread_ids()
+        .await
+        .into_iter()
+        .find(|thread_id| *thread_id != root_thread_id)
+        .expect("child thread ID");
+    let logs = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let logs = String::from_utf8(output.lock().expect("buffer lock").clone())
+                .expect("logs should be UTF-8");
+            if logs.contains("kind=\"spawn\"") && logs.contains("state=\"receive\"") {
+                break logs;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("spawn communication logs should be emitted");
+    let send = logs
+        .lines()
+        .find(|line| line.contains("kind=\"spawn\"") && line.contains("state=\"send\""))
+        .expect("spawn send event");
+    assert!(send.contains(&format!("sender_thread_id={root_thread_id}")));
+    assert!(send.contains(&format!("receiver_thread_id={child_thread_id}")));
+    assert!(send.contains(&format!("content=\"{encrypted_message}\"")));
+
+    let communication_id = log_field(send, "communication_id").expect("communication ID");
+    logs.lines()
+        .find(|line| {
+            line.contains("state=\"receive\"")
+                && log_field(line, "communication_id") == Some(communication_id)
+        })
+        .expect("correlated receive event");
 
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum CompletionScenario {
+    Completed,
+    TerminalError,
+}
+
+#[test_case(CompletionScenario::Completed ; "completed")]
+#[test_case(CompletionScenario::TerminalError ; "terminal_error")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn plaintext_multi_agent_v2_completion_sends_agent_message() -> Result<()> {
+async fn plaintext_multi_agent_v2_completion_sends_agent_message(
+    scenario: CompletionScenario,
+) -> Result<()> {
     let server = start_mock_server().await;
     let spawn_args = serde_json::to_string(&json!({
         "message": "opaque-encrypted-message",
@@ -1114,26 +1215,34 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message() -> Result<()>
         |req: &wiremock::Request| body_contains(req, TURN_1_PROMPT),
         sse(vec![
             ev_response_created("resp-parent-1"),
-            ev_function_call(SPAWN_CALL_ID, "spawn_agent", &spawn_args),
+            ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                MULTI_AGENT_V2_NAMESPACE,
+                "spawn_agent",
+                &spawn_args,
+            ),
             ev_completed("resp-parent-1"),
         ]),
     )
     .await;
-    let child_request = mount_response_once_match(
-        &server,
-        |req: &wiremock::Request| body_contains(req, "\"type\":\"agent_message\""),
-        sse_response(sse(vec![
+    let child_events = match scenario {
+        CompletionScenario::Completed => vec![
             ev_response_created("resp-child-1"),
             ev_assistant_message("msg-child-1", "child done"),
             ev_completed("resp-child-1"),
-        ]))
-        .set_delay(Duration::from_secs(1)),
+        ],
+        CompletionScenario::TerminalError => vec![ev_response_created("resp-child-1")],
+    };
+    let child_request = mount_response_once_match(
+        &server,
+        |req: &wiremock::Request| request_has_input_type(req, "agent_message"),
+        sse_response(sse(child_events)).set_delay(Duration::from_secs(1)),
     )
     .await;
     mount_sse_once_match(
         &server,
         |req: &wiremock::Request| {
-            body_contains(req, SPAWN_CALL_ID) && !body_contains(req, "<subagent_notification>")
+            body_contains(req, SPAWN_CALL_ID) && !body_contains(req, "Message Type: FINAL_ANSWER")
         },
         sse(vec![
             ev_response_created("resp-parent-2"),
@@ -1142,18 +1251,35 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message() -> Result<()>
         ]),
     )
     .await;
-    let notification = "<subagent_notification>\n{\"agent_path\":\"/root/worker\",\"status\":{\"completed\":\"child done\"}}\n</subagent_notification>";
+    let error = "stream disconnected before completion: stream closed before response.completed";
+    let (payload, expected_text) = match scenario {
+        CompletionScenario::Completed => ("child done".to_string(), "child done"),
+        CompletionScenario::TerminalError => (
+            format!(
+                "Agent errored: {error}\n\nThis agent's turn failed. If you still need this agent, use the available collaboration tools to give it another task."
+            ),
+            error,
+        ),
+    };
+    let notification = format!(
+        "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/worker\nPayload:\n{payload}"
+    );
     // If the child is still running when the parent turn starts, wait_agent blocks
     // until mailbox delivery. The follow-up request must then contain that delivery.
     mount_sse_once_match(
         &server,
         |req: &wiremock::Request| {
             body_contains(req, TURN_2_NO_WAIT_PROMPT)
-                && !body_contains(req, "<subagent_notification>")
+                && !body_contains(req, "Message Type: FINAL_ANSWER")
         },
         sse(vec![
             ev_response_created("resp-parent-3"),
-            ev_function_call("wait-agent-call", "wait_agent", "{}"),
+            ev_function_call_with_namespace(
+                "wait-agent-call",
+                MULTI_AGENT_V2_NAMESPACE,
+                "wait_agent",
+                "{}",
+            ),
             ev_completed("resp-parent-3"),
         ]),
     )
@@ -1162,7 +1288,8 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message() -> Result<()>
         &server,
         |req: &wiremock::Request| {
             body_contains(req, TURN_2_NO_WAIT_PROMPT)
-                && body_contains(req, "<subagent_notification>")
+                && body_contains(req, "Message Type: FINAL_ANSWER")
+                && body_contains(req, expected_text)
         },
         sse(vec![
             ev_response_created("resp-parent-4"),
@@ -1182,6 +1309,9 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message() -> Result<()>
                 .features
                 .enable(Feature::MultiAgentV2)
                 .expect("test config should allow feature update");
+            config.model_provider.request_max_retries = Some(0);
+            config.model_provider.stream_max_retries = Some(0);
+            config.model_provider.supports_websockets = false;
         })
         .build(&server)
         .await?;
@@ -1195,8 +1325,8 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message() -> Result<()>
         .pop()
         .expect("agent message request");
     assert_eq!(
-        request.inputs_of_type("agent_message"),
-        vec![json!({
+        strip_metadata_from_json(Value::Array(request.inputs_of_type("agent_message"))),
+        Value::Array(vec![json!({
             "type": "agent_message",
             "author": "/root/worker",
             "recipient": "/root",
@@ -1204,7 +1334,7 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message() -> Result<()>
                 "type": "input_text",
                 "text": notification,
             }],
-        })]
+        })])
     );
 
     Ok(())
@@ -1260,9 +1390,7 @@ async fn skills_toggle_skips_instructions_for_parent_and_spawned_child() -> Resu
 
     let mut builder = test_codex()
         .with_pre_build_hook(|home| {
-            if let Err(err) = write_home_skill(home, "demo", "demo-skill", "demo skill") {
-                panic!("write home skill: {err}");
-            }
+            write_home_skill(home, "demo", "demo-skill", "demo skill").expect("write home skill");
         })
         .with_config(|config| {
             config
@@ -1394,9 +1522,7 @@ async fn spawn_agent_tool_description_mentions_role_locked_settings() -> Result<
     assert_eq!(requests.len(), 2);
     let output = requests[1].tool_search_output(call_id);
     let spawn_agent = namespace_child_tool(&output, "multi_agent_v1", "spawn_agent")
-        .unwrap_or_else(|| {
-            panic!("expected tool_search to return multi_agent_v1.spawn_agent: {output:?}")
-        });
+        .expect("tool_search should return multi_agent_v1.spawn_agent");
     let agent_type_description = tool_parameter_description(spawn_agent, "agent_type")
         .expect("spawn_agent agent_type description");
     let custom_role_description =

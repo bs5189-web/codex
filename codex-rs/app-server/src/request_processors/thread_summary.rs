@@ -1,9 +1,9 @@
 use super::*;
-
 #[cfg(test)]
 use chrono::DateTime;
 #[cfg(test)]
 use chrono::Utc;
+use codex_protocol::config_types::MultiAgentMode;
 
 #[cfg(test)]
 pub(crate) async fn read_summary_from_rollout(
@@ -97,10 +97,7 @@ fn extract_conversation_summary(
             _ => None,
         })?;
 
-    let preview = match preview.find(USER_MESSAGE_BEGIN) {
-        Some(idx) => preview[idx + USER_MESSAGE_BEGIN.len()..].trim(),
-        None => preview.as_str(),
-    };
+    let preview = strip_user_message_prefix(preview.as_str());
 
     let timestamp = if session_meta.timestamp.is_empty() {
         None
@@ -206,6 +203,7 @@ pub(crate) fn thread_settings_from_config_snapshot(
         effort: config_snapshot.reasoning_effort.clone(),
         summary: config_snapshot.reasoning_summary,
         collaboration_mode: config_snapshot.collaboration_mode.clone(),
+        multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
         personality: config_snapshot.personality,
     }
 }
@@ -242,6 +240,7 @@ pub(crate) fn thread_settings_from_core_snapshot(
         effort: reasoning_effort,
         summary: reasoning_summary,
         collaboration_mode,
+        multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
         personality,
     }
 }
@@ -312,14 +311,17 @@ pub(crate) fn summary_to_thread(
     let thread_id = conversation_id.to_string();
     Thread {
         id: thread_id.clone(),
+        extra: None,
         session_id: thread_id,
         forked_from_id: None,
         parent_thread_id: None,
         preview,
         ephemeral: false,
+        history_mode: ThreadHistoryMode::Legacy,
         model_provider,
         created_at: created_at.map(|dt| dt.timestamp()).unwrap_or(0),
         updated_at: updated_at.map(|dt| dt.timestamp()).unwrap_or(0),
+        recency_at: updated_at.map(|dt| dt.timestamp()),
         status: ThreadStatus::NotLoaded,
         path: (!path.as_os_str().is_empty()).then_some(path),
         cwd,

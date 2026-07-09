@@ -7,29 +7,27 @@ use chrono::Utc;
 use codex_git_utils::collect_git_info;
 use codex_git_utils::get_git_repo_root;
 use codex_protocol::ThreadId;
+use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::GitInfo;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::ThreadMemoryMode;
-use codex_protocol::protocol::USER_MESSAGE_BEGIN;
 use codex_protocol::protocol::UserMessageEvent;
+use codex_protocol::protocol::strip_user_message_prefix;
+use codex_protocol::protocol::user_message_preview;
 
 use crate::CreateThreadParams;
 use crate::GitInfoPatch;
 use crate::ResumeThreadParams;
 use crate::ThreadMetadataPatch;
 
-const IMAGE_ONLY_USER_MESSAGE_PLACEHOLDER: &str = "[Image]";
-#[cfg(not(test))]
 const THREAD_UPDATED_AT_TOUCH_INTERVAL: Duration = Duration::from_secs(5);
-#[cfg(test)]
-const THREAD_UPDATED_AT_TOUCH_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Live-thread helper that derives metadata updates from canonical rollout items.
+/// Live-thread helper that derives metadata updates from appended rollout items.
 ///
-/// Stores receive raw history plus explicit metadata patches. This helper keeps append-derived
-/// metadata observation in the live layer without owning persistence-policy filtering or making
-/// `append_items` infer metadata inside a `ThreadStore` implementation.
+/// Stores receive raw rollout items plus explicit metadata patches. This helper
+/// keeps append-derived metadata observation in the live layer without owning persistence-policy
+/// filtering or making `append_items` infer metadata inside a `ThreadStore` implementation.
 pub(crate) struct ThreadMetadataSync {
     thread_id: ThreadId,
     cwd_seen: bool,
@@ -108,11 +106,15 @@ impl ThreadMetadataSync {
             defer_resume_update_until_append: false,
         };
         if let Some(history) = params.history.as_deref() {
-            let update = sync.observe_resume_history(history);
-            sync.merge_pending_update(update);
-            sync.defer_resume_update_until_append = sync.pending_update.is_some();
+            sync.record_resume_history(history);
         }
         sync
+    }
+
+    pub(crate) fn record_resume_history(&mut self, history: &[RolloutItem]) {
+        let update = self.observe_resume_history(history);
+        self.merge_pending_update(update);
+        self.defer_resume_update_until_append = self.pending_update.is_some();
     }
 
     pub(crate) fn take_pending_update(&self) -> Option<PendingThreadMetadataPatch> {
@@ -154,11 +156,17 @@ impl ThreadMetadataSync {
         let affects_metadata = items
             .iter()
             .any(codex_state::rollout_item_affects_thread_metadata);
-        let update = if affects_metadata {
+        let advances_recency = items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(_))));
+        let mut update = if affects_metadata {
             self.observe_items(items)?
         } else {
             thread_updated_at_touch()
         };
+        if advances_recency {
+            update.advance_recency_at = Some(Utc::now());
+        }
         self.merge_pending_update(Some(update));
         if !affects_metadata
             && !self
@@ -227,9 +235,9 @@ impl ThreadMetadataSync {
                     }
                 }
                 RolloutItem::TurnContext(turn_ctx) => {
-                    if !self.cwd_seen && !turn_ctx.cwd.as_os_str().is_empty() {
+                    if !self.cwd_seen {
                         self.cwd_seen = true;
-                        update.cwd = Some(turn_ctx.cwd.clone());
+                        update.cwd = Some(turn_ctx.cwd.clone().into_path_buf());
                     }
                     update.model = Some(turn_ctx.model.clone());
                     update.reasoning_effort = turn_ctx.effort.clone();
@@ -237,22 +245,14 @@ impl ThreadMetadataSync {
                     update.permission_profile = Some(turn_ctx.permission_profile());
                 }
                 RolloutItem::EventMsg(EventMsg::UserMessage(user)) => {
-                    if let Some(preview) = user_message_preview(user) {
-                        if !self.first_user_message_seen {
-                            self.first_user_message_seen = true;
-                            update.first_user_message = Some(preview.clone());
-                        }
-                        if !self.preview_seen {
-                            self.preview_seen = true;
-                            update.preview = Some(preview);
-                        }
-                    }
-                    if !self.title_seen {
-                        let title = strip_user_message_prefix(user.message.as_str());
-                        if !title.is_empty() {
-                            self.title_seen = true;
-                            update.title = Some(title.to_string());
-                        }
+                    self.observe_user_message(user, &mut update);
+                }
+                RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) => {
+                    if let TurnItem::UserMessage(user) = &event.item {
+                        self.observe_user_message(
+                            &user.as_legacy_user_message_event(),
+                            &mut update,
+                        );
                     }
                 }
                 RolloutItem::EventMsg(EventMsg::TokenCount(token_count)) => {
@@ -273,10 +273,32 @@ impl ThreadMetadataSync {
                 | RolloutItem::EventMsg(_)
                 | RolloutItem::ResponseItem(_)
                 | RolloutItem::InterAgentCommunication(_)
-                | RolloutItem::Compacted(_) => {}
+                | RolloutItem::InterAgentCommunicationMetadata { .. }
+                | RolloutItem::Compacted(_)
+                | RolloutItem::WorldState(_) => {}
             }
         }
         Some(update)
+    }
+
+    fn observe_user_message(&mut self, user: &UserMessageEvent, update: &mut ThreadMetadataPatch) {
+        if let Some(preview) = user_message_preview(user) {
+            if !self.first_user_message_seen {
+                self.first_user_message_seen = true;
+                update.first_user_message = Some(preview.clone());
+            }
+            if !self.preview_seen {
+                self.preview_seen = true;
+                update.preview = Some(preview);
+            }
+        }
+        if !self.title_seen {
+            let title = strip_user_message_prefix(user.message.as_str());
+            if !title.is_empty() {
+                self.title_seen = true;
+                update.title = Some(title.to_string());
+            }
+        }
     }
 
     fn merge_pending_update(&mut self, update: Option<ThreadMetadataPatch>) {
@@ -309,29 +331,6 @@ fn parse_session_timestamp(value: &str) -> Option<DateTime<Utc>> {
         .ok()
 }
 
-fn strip_user_message_prefix(text: &str) -> &str {
-    match text.find(USER_MESSAGE_BEGIN) {
-        Some(idx) => text[idx + USER_MESSAGE_BEGIN.len()..].trim(),
-        None => text.trim(),
-    }
-}
-
-fn user_message_preview(user: &UserMessageEvent) -> Option<String> {
-    let message = strip_user_message_prefix(user.message.as_str());
-    if !message.is_empty() {
-        return Some(message.to_string());
-    }
-    if user
-        .images
-        .as_ref()
-        .is_some_and(|images| !images.is_empty())
-        || !user.local_images.is_empty()
-    {
-        return Some(IMAGE_ONLY_USER_MESSAGE_PLACEHOLDER.to_string());
-    }
-    None
-}
-
 fn thread_updated_at_touch() -> ThreadMetadataPatch {
     ThreadMetadataPatch {
         updated_at: Some(Utc::now()),
@@ -347,6 +346,7 @@ fn update_has_metadata_facts(update: &ThreadMetadataPatch) -> bool {
         || update.model.is_some()
         || update.reasoning_effort.is_some()
         || update.created_at.is_some()
+        || update.advance_recency_at.is_some()
         || update.source.is_some()
         || update.thread_source.is_some()
         || update.agent_nickname.is_some()
@@ -372,14 +372,20 @@ fn git_info_patch_from_observation(git_info: GitInfo) -> GitInfoPatch {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use codex_protocol::items::UserMessageItem;
     use codex_protocol::protocol::CompactedItem;
+    use codex_protocol::protocol::ItemCompletedEvent;
     use codex_protocol::protocol::SessionMeta;
     use codex_protocol::protocol::SessionMetaLine;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::ThreadGoal;
     use codex_protocol::protocol::ThreadGoalStatus;
     use codex_protocol::protocol::ThreadGoalUpdatedEvent;
+    use codex_protocol::protocol::TurnStartedEvent;
     use codex_protocol::protocol::UserMessageEvent;
+    use codex_protocol::user_input::UserInput;
     use pretty_assertions::assert_eq;
 
     use super::*;
@@ -469,12 +475,41 @@ mod tests {
     }
 
     #[test]
+    fn completed_user_message_items_emit_metadata_fields() {
+        let thread_id = ThreadId::new();
+        let mut sync = ThreadMetadataSync::for_resume(&resume_params(thread_id, Vec::new()));
+        let update = sync
+            .observe_appended_items(&[RolloutItem::EventMsg(EventMsg::ItemCompleted(
+                ItemCompletedEvent {
+                    thread_id,
+                    turn_id: "turn-1".to_string(),
+                    item: TurnItem::UserMessage(UserMessageItem::new(&[UserInput::Text {
+                        text: "first user text".to_string(),
+                        text_elements: Vec::new(),
+                    }])),
+                    completed_at_ms: 0,
+                },
+            ))])
+            .expect("completed user message metadata update");
+
+        assert_eq!(update.patch.preview.as_deref(), Some("first user text"));
+        assert_eq!(update.patch.title.as_deref(), Some("first user text"));
+        assert_eq!(
+            update.patch.first_user_message.as_deref(),
+            Some("first user text")
+        );
+    }
+
+    #[test]
     fn metadata_irrelevant_items_coalesce_updated_at_touches() {
         let thread_id = ThreadId::new();
         let mut sync = ThreadMetadataSync::for_resume(&resume_params(thread_id, Vec::new()));
         let item = RolloutItem::Compacted(CompactedItem {
             message: "compacted".to_string(),
             replacement_history: None,
+            window_number: None,
+            first_window_id: None,
+            previous_window_id: None,
             window_id: None,
         });
 
@@ -493,6 +528,27 @@ mod tests {
             sync.take_pending_update().is_some(),
             "coalesced touches still flush at the next barrier"
         );
+    }
+
+    #[test]
+    fn turn_start_advances_recency_at_without_changing_updated_at_behavior() {
+        let thread_id = ThreadId::new();
+        let mut sync = ThreadMetadataSync::for_resume(&resume_params(thread_id, Vec::new()));
+
+        let update = sync
+            .observe_appended_items(&[RolloutItem::EventMsg(EventMsg::TurnStarted(
+                TurnStartedEvent {
+                    turn_id: "turn-1".to_string(),
+                    trace_id: None,
+                    started_at: None,
+                    model_context_window: None,
+                    collaboration_mode_kind: Default::default(),
+                },
+            ))])
+            .expect("turn start metadata update");
+
+        assert!(update.patch.updated_at.is_some());
+        assert!(update.patch.advance_recency_at.is_some());
     }
 
     #[test]
@@ -523,7 +579,7 @@ mod tests {
         ResumeThreadParams {
             thread_id,
             rollout_path: None,
-            history: Some(history),
+            history: Some(Arc::new(history)),
             include_archived: false,
             metadata: ThreadPersistenceMetadata {
                 cwd: None,
@@ -547,6 +603,7 @@ mod tests {
     fn session_meta(thread_id: ThreadId) -> SessionMetaLine {
         SessionMetaLine {
             meta: SessionMeta {
+                session_id: thread_id.into(),
                 id: thread_id,
                 timestamp: "2025-01-03T12:00:00Z".to_string(),
                 source: SessionSource::Exec,

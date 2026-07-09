@@ -15,6 +15,7 @@ use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::is_persisted_rollout_item;
 use codex_thread_store::AppendThreadItemsParams;
@@ -26,6 +27,8 @@ use codex_thread_store::UpdateThreadMetadataParams;
 use futures::StreamExt;
 use tokio::sync::Semaphore;
 
+use crate::config::external_agent_config::ExternalAgentConfigImportItemResult;
+use crate::config::external_agent_config::record_import_error;
 use crate::config_manager::ConfigManager;
 
 const SESSION_IMPORT_CONCURRENCY: usize = 5;
@@ -58,12 +61,22 @@ impl ExternalAgentSessionImporter {
         }
     }
 
-    pub(super) async fn import_sessions(&self, sessions: Vec<ExternalAgentSessionMigration>) {
+    pub(super) async fn import_sessions(
+        &self,
+        sessions: Vec<ExternalAgentSessionMigration>,
+        mut item_result: ExternalAgentConfigImportItemResult,
+    ) -> ExternalAgentConfigImportItemResult {
         if sessions.is_empty() {
-            return;
+            return item_result;
         }
         let Ok(_permit) = self.permits.acquire().await else {
-            return;
+            record_import_error(
+                &mut item_result,
+                "session_permit",
+                "external agent session import permit could not be acquired",
+                /*source*/ None,
+            );
+            return item_result;
         };
         let import_results = futures::stream::iter(sessions)
             .map(|session| {
@@ -76,23 +89,33 @@ impl ExternalAgentSessionImporter {
         let mut completed_imports = Vec::new();
         while let Some(result) = import_results.next().await {
             match result {
-                Ok(Some(completed_import)) => completed_imports.push(completed_import),
+                Ok(Some(completed_import)) => {
+                    item_result.record_success(
+                        Some(completed_import.source_path.display().to_string()),
+                        Some(completed_import.imported_thread_id.to_string()),
+                    );
+                    completed_imports.push(completed_import);
+                }
                 Ok(None) => {}
                 Err(failure) => {
-                    tracing::warn!(
-                        error = %failure.message,
-                        path = %failure.source_path.display(),
-                        "external agent session import failed"
+                    record_import_error(
+                        &mut item_result,
+                        failure.stage,
+                        failure.message.clone(),
+                        Some(failure.source_path.display().to_string()),
                     );
                 }
             }
         }
         if let Err(err) = record_completed_session_imports(&self.codex_home, completed_imports) {
-            tracing::warn!(
-                error = %err,
-                "external agent session import ledger update failed"
+            record_import_error(
+                &mut item_result,
+                "session_ledger_update",
+                err.to_string(),
+                /*source*/ None,
             );
         }
+        item_result
     }
 
     async fn import_requested_session(
@@ -106,6 +129,7 @@ impl ExternalAgentSessionImporter {
                 .map_err(|message| SessionImportFailure {
                     source_path: source_path.clone(),
                     message,
+                    stage: "session_prepare",
                 })?
         else {
             return Ok(None);
@@ -116,6 +140,7 @@ impl ExternalAgentSessionImporter {
                 .map_err(|message| SessionImportFailure {
                     source_path: pending_import.source_path.clone(),
                     message,
+                    stage: "session_persist",
                 })?;
         Ok(Some(CompletedExternalAgentSessionImport {
             source_path: pending_import.source_path,
@@ -160,7 +185,12 @@ impl ExternalAgentSessionImporter {
             .map_err(|err| format!("failed to load imported session config: {err}"))?;
         let models_manager = self.thread_manager.get_models_manager();
         let model = models_manager
-            .get_default_model(&config.model, RefreshStrategy::Offline)
+            .get_default_model(
+                &config.model,
+                /*allow_provider_model_fallback*/ false,
+                RefreshStrategy::Offline,
+                config.http_client_factory(),
+            )
             .await;
         let model_info = models_manager
             .get_model_info(model.as_str(), &config.to_models_manager_config())
@@ -176,12 +206,14 @@ impl ExternalAgentSessionImporter {
         };
         let now = Utc::now();
         let create_params = CreateThreadParams {
+            session_id: thread_id.into(),
             thread_id,
             extra_config: None,
             forked_from_id: None,
             parent_thread_id: None,
             source: source.clone(),
             thread_source: None,
+            originator: codex_login::default_client::originator().value,
             base_instructions: BaseInstructions {
                 text: config
                     .base_instructions
@@ -189,14 +221,17 @@ impl ExternalAgentSessionImporter {
                     .unwrap_or_else(|| model_info.get_model_instructions(config.personality)),
             },
             dynamic_tools: Vec::new(),
+            selected_capability_roots: Vec::new(),
             multi_agent_version: Some(MultiAgentVersion::V1),
+            history_mode: ThreadHistoryMode::Legacy,
+            initial_window_id: uuid::Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(cwd.clone()),
                 model_provider: model_provider.clone(),
                 memory_mode,
             },
         };
-        rollout_items.retain(is_persisted_rollout_item);
+        rollout_items.retain(|item| is_persisted_rollout_item(item, ThreadHistoryMode::Legacy));
         let title = title
             .as_deref()
             .and_then(codex_core::util::normalize_thread_name);
@@ -258,4 +293,5 @@ impl ExternalAgentSessionImporter {
 struct SessionImportFailure {
     source_path: PathBuf,
     message: String,
+    stage: &'static str,
 }

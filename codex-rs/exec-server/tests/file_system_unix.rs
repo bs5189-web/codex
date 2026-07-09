@@ -1,4 +1,5 @@
 #![cfg(unix)]
+#![allow(clippy::expect_used)]
 
 mod common;
 
@@ -23,6 +24,10 @@ use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::Environment;
 use codex_exec_server::FileMetadata;
 use codex_exec_server::RemoveOptions;
+use codex_exec_server::WalkEntry;
+use codex_exec_server::WalkEntryKind;
+use codex_exec_server::WalkOptions;
+use codex_exec_server::WalkOutcome;
 use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
@@ -186,7 +191,7 @@ async fn sandboxed_file_system_helper_finds_bwrap_on_preserved_path() -> Result<
 
     file_system
         .write_file(
-            &PathUri::from_path(&file_path)?,
+            &PathUri::from_host_native_path(&file_path)?,
             b"written through fs helper".to_vec(),
             Some(&sandbox),
         )
@@ -220,7 +225,10 @@ async fn file_system_get_metadata_reports_symlink_targets(
     let symlink_path = tmp.path().join("note-link.txt");
     symlink(&file_path, &symlink_path)?;
     let symlink_metadata = file_system
-        .get_metadata(&PathUri::from_path(&symlink_path)?, /*sandbox*/ None)
+        .get_metadata(
+            &PathUri::from_host_native_path(&symlink_path)?,
+            /*sandbox*/ None,
+        )
         .await
         .with_context(|| format!("mode={implementation}"))?;
     assert_eq!(
@@ -242,7 +250,7 @@ async fn file_system_get_metadata_reports_symlink_targets(
     symlink(&dir_path, &dir_symlink_path)?;
     let dir_symlink_metadata = file_system
         .get_metadata(
-            &PathUri::from_path(&dir_symlink_path)?,
+            &PathUri::from_host_native_path(&dir_symlink_path)?,
             /*sandbox*/ None,
         )
         .await
@@ -265,6 +273,151 @@ async fn file_system_get_metadata_reports_symlink_targets(
 #[test_case(FileSystemImplementation::Local ; "local")]
 #[test_case(FileSystemImplementation::Remote ; "remote")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_system_walk_handles_directory_symlinks(
+    implementation: FileSystemImplementation,
+) -> Result<()> {
+    let context = create_file_system_context(implementation).await?;
+    let file_system = context.file_system;
+
+    let tmp = TempDir::new()?;
+    let root = tmp.path().join("root");
+    let target = tmp.path().join("target");
+    let target_file = target.join("note.txt");
+    let target_link = root.join("target-link");
+    let root_link = target.join("root-link");
+    std::fs::create_dir_all(&root)?;
+    std::fs::create_dir_all(&target)?;
+    std::fs::write(&target_file, "target")?;
+    symlink(&target, &target_link)?;
+    symlink(&root, &root_link)?;
+
+    let outcome = file_system
+        .walk(
+            &PathUri::from_host_native_path(&root)?,
+            WalkOptions {
+                max_depth: 2,
+                max_directories: 4,
+                max_entries: 8,
+                follow_directory_symlinks: false,
+                prune_hidden_directories: false,
+            },
+            /*sandbox*/ None,
+        )
+        .await
+        .with_context(|| format!("mode={implementation}"))?;
+    assert_eq!(
+        outcome,
+        WalkOutcome {
+            entries: Vec::new(),
+            errors: Vec::new(),
+            truncated: false,
+        }
+    );
+
+    let outcome = file_system
+        .walk(
+            &PathUri::from_host_native_path(&root)?,
+            WalkOptions {
+                max_depth: 2,
+                max_directories: 4,
+                max_entries: 8,
+                follow_directory_symlinks: true,
+                prune_hidden_directories: false,
+            },
+            /*sandbox*/ None,
+        )
+        .await
+        .with_context(|| format!("mode={implementation}"))?;
+    assert_eq!(
+        outcome,
+        WalkOutcome {
+            entries: vec![
+                WalkEntry {
+                    path: PathUri::from_host_native_path(&target_link)?,
+                    kind: WalkEntryKind::Directory,
+                },
+                WalkEntry {
+                    path: PathUri::from_host_native_path(target_link.join("note.txt"))?,
+                    kind: WalkEntryKind::File,
+                },
+                WalkEntry {
+                    path: PathUri::from_host_native_path(target_link.join("root-link"))?,
+                    kind: WalkEntryKind::Directory,
+                },
+            ],
+            errors: Vec::new(),
+            truncated: false,
+        }
+    );
+
+    Ok(())
+}
+
+#[test_case(FileSystemImplementation::Local ; "local")]
+#[test_case(FileSystemImplementation::Remote ; "remote")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_system_walk_prunes_hidden_directories_without_claiming_visible_aliases(
+    implementation: FileSystemImplementation,
+) -> Result<()> {
+    let context = create_file_system_context(implementation).await?;
+    let file_system = context.file_system;
+
+    let tmp = TempDir::new()?;
+    let root = tmp.path().join("root");
+    let hidden = root.join(".hidden");
+    let hidden_nested = hidden.join("nested");
+    let visible = root.join("visible");
+    std::fs::create_dir_all(&hidden_nested)?;
+    std::fs::write(hidden_nested.join("note.txt"), "visible through alias")?;
+    symlink(&hidden, &visible)?;
+
+    let outcome = file_system
+        .walk(
+            &PathUri::from_host_native_path(&root)?,
+            WalkOptions {
+                max_depth: 3,
+                max_directories: 3,
+                max_entries: 6,
+                follow_directory_symlinks: true,
+                prune_hidden_directories: true,
+            },
+            /*sandbox*/ None,
+        )
+        .await
+        .with_context(|| format!("mode={implementation}"))?;
+
+    assert_eq!(
+        outcome,
+        WalkOutcome {
+            entries: vec![
+                WalkEntry {
+                    path: PathUri::from_host_native_path(hidden)?,
+                    kind: WalkEntryKind::Directory,
+                },
+                WalkEntry {
+                    path: PathUri::from_host_native_path(&visible)?,
+                    kind: WalkEntryKind::Directory,
+                },
+                WalkEntry {
+                    path: PathUri::from_host_native_path(visible.join("nested"))?,
+                    kind: WalkEntryKind::Directory,
+                },
+                WalkEntry {
+                    path: PathUri::from_host_native_path(visible.join("nested/note.txt"))?,
+                    kind: WalkEntryKind::File,
+                },
+            ],
+            errors: Vec::new(),
+            truncated: false,
+        }
+    );
+
+    Ok(())
+}
+
+#[test_case(FileSystemImplementation::Local ; "local")]
+#[test_case(FileSystemImplementation::Remote ; "remote")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn file_system_sandboxed_write_rejects_unwritable_path(
     implementation: FileSystemImplementation,
 ) -> Result<()> {
@@ -277,7 +430,7 @@ async fn file_system_sandboxed_write_rejects_unwritable_path(
     let sandbox = read_only_sandbox(tmp.path().to_path_buf());
     let error = match file_system
         .write_file(
-            &PathUri::from_path(&blocked_path)?,
+            &PathUri::from_host_native_path(&blocked_path)?,
             b"nope".to_vec(),
             Some(&sandbox),
         )
@@ -313,7 +466,7 @@ async fn file_system_sandboxed_write_allows_explicit_alias_roots(
 
     file_system
         .write_file(
-            &PathUri::from_path(&file_path)?,
+            &PathUri::from_host_native_path(&file_path)?,
             b"created".to_vec(),
             Some(&sandbox),
         )
@@ -344,7 +497,10 @@ async fn file_system_sandboxed_read_rejects_symlink_escape(
     let requested_path = allowed_dir.join("link").join("secret.txt");
     let sandbox = read_only_sandbox(allowed_dir);
     let error = match file_system
-        .read_file(&PathUri::from_path(&requested_path)?, Some(&sandbox))
+        .read_file(
+            &PathUri::from_host_native_path(&requested_path)?,
+            Some(&sandbox),
+        )
         .await
     {
         Ok(_) => anyhow::bail!("read should be blocked"),
@@ -374,7 +530,7 @@ async fn file_system_sandboxed_read_rejects_symlink_parent_dotdot_escape(
     symlink(&outside_dir, allowed_dir.join("link"))?;
 
     let requested_path =
-        PathUri::from_path(allowed_dir.join("link").join("..").join("secret.txt"))?;
+        PathUri::from_host_native_path(allowed_dir.join("link").join("..").join("secret.txt"))?;
     let sandbox = read_only_sandbox(allowed_dir);
     let error = match file_system.read_file(&requested_path, Some(&sandbox)).await {
         Ok(_) => anyhow::bail!("read should fail after path normalization"),
@@ -410,7 +566,7 @@ async fn file_system_sandboxed_write_rejects_symlink_escape(
     let sandbox = workspace_write_sandbox(allowed_dir);
     let error = match file_system
         .write_file(
-            &PathUri::from_path(&requested_path)?,
+            &PathUri::from_host_native_path(&requested_path)?,
             b"nope".to_vec(),
             Some(&sandbox),
         )
@@ -448,7 +604,7 @@ async fn file_system_sandboxed_write_preserves_existing_hard_link(
     let sandbox = workspace_write_sandbox(allowed_dir);
     file_system
         .write_file(
-            &PathUri::from_path(&hard_link)?,
+            &PathUri::from_host_native_path(&hard_link)?,
             b"updated through existing hard link\n".to_vec(),
             Some(&sandbox),
         )
@@ -494,7 +650,7 @@ async fn file_system_create_directory_rejects_symlink_escape(
     let sandbox = workspace_write_sandbox(allowed_dir);
     let error = match file_system
         .create_directory(
-            &PathUri::from_path(&requested_path)?,
+            &PathUri::from_host_native_path(&requested_path)?,
             CreateDirectoryOptions { recursive: false },
             Some(&sandbox),
         )
@@ -529,7 +685,10 @@ async fn file_system_read_directory_rejects_symlink_escape(
     let requested_path = allowed_dir.join("link");
     let sandbox = read_only_sandbox(allowed_dir);
     let error = match file_system
-        .read_directory(&PathUri::from_path(&requested_path)?, Some(&sandbox))
+        .read_directory(
+            &PathUri::from_host_native_path(&requested_path)?,
+            Some(&sandbox),
+        )
         .await
     {
         Ok(_) => anyhow::bail!("read_directory should be blocked"),
@@ -561,8 +720,8 @@ async fn file_system_copy_rejects_symlink_escape_destination(
     let sandbox = workspace_write_sandbox(allowed_dir.clone());
     let error = match file_system
         .copy(
-            &PathUri::from_path(allowed_dir.join("source.txt"))?,
-            &PathUri::from_path(&requested_destination)?,
+            &PathUri::from_host_native_path(allowed_dir.join("source.txt"))?,
+            &PathUri::from_host_native_path(&requested_destination)?,
             CopyOptions { recursive: false },
             Some(&sandbox),
         )
@@ -599,7 +758,7 @@ async fn file_system_remove_removes_symlink_not_target(
     let sandbox = workspace_write_sandbox(allowed_dir);
     file_system
         .remove(
-            &PathUri::from_path(&symlink_path)?,
+            &PathUri::from_host_native_path(&symlink_path)?,
             RemoveOptions {
                 recursive: false,
                 force: false,
@@ -639,8 +798,8 @@ async fn file_system_copy_preserves_symlink_source(
     let sandbox = workspace_write_sandbox(allowed_dir.clone());
     file_system
         .copy(
-            &PathUri::from_path(&source_symlink)?,
-            &PathUri::from_path(&copied_symlink)?,
+            &PathUri::from_host_native_path(&source_symlink)?,
+            &PathUri::from_host_native_path(&copied_symlink)?,
             CopyOptions { recursive: false },
             Some(&sandbox),
         )
@@ -676,7 +835,7 @@ async fn file_system_remove_rejects_symlink_escape(
     let sandbox = workspace_write_sandbox(allowed_dir);
     let error = match file_system
         .remove(
-            &PathUri::from_path(&requested_path)?,
+            &PathUri::from_host_native_path(&requested_path)?,
             RemoveOptions {
                 recursive: false,
                 force: false,
@@ -717,8 +876,8 @@ async fn file_system_copy_rejects_symlink_escape_source(
     let sandbox = workspace_write_sandbox(allowed_dir);
     let error = match file_system
         .copy(
-            &PathUri::from_path(&requested_source)?,
-            &PathUri::from_path(&requested_destination)?,
+            &PathUri::from_host_native_path(&requested_source)?,
+            &PathUri::from_host_native_path(&requested_destination)?,
             CopyOptions { recursive: false },
             Some(&sandbox),
         )
@@ -751,8 +910,8 @@ async fn file_system_copy_preserves_symlinks_in_recursive_copy(
 
     file_system
         .copy(
-            &PathUri::from_path(&source_dir)?,
-            &PathUri::from_path(&copied_dir)?,
+            &PathUri::from_host_native_path(&source_dir)?,
+            &PathUri::from_host_native_path(&copied_dir)?,
             CopyOptions { recursive: true },
             /*sandbox*/ None,
         )
@@ -797,8 +956,8 @@ async fn file_system_copy_ignores_unknown_special_files_in_recursive_copy(
 
     file_system
         .copy(
-            &PathUri::from_path(&source_dir)?,
-            &PathUri::from_path(&copied_dir)?,
+            &PathUri::from_host_native_path(&source_dir)?,
+            &PathUri::from_host_native_path(&copied_dir)?,
             CopyOptions { recursive: true },
             /*sandbox*/ None,
         )
@@ -836,16 +995,13 @@ async fn file_system_copy_rejects_standalone_fifo_source(
 
     let error = file_system
         .copy(
-            &PathUri::from_path(&fifo_path)?,
-            &PathUri::from_path(tmp.path().join("copied"))?,
+            &PathUri::from_host_native_path(&fifo_path)?,
+            &PathUri::from_host_native_path(tmp.path().join("copied"))?,
             CopyOptions { recursive: false },
             /*sandbox*/ None,
         )
         .await;
-    let error = match error {
-        Ok(()) => panic!("copy should fail"),
-        Err(error) => error,
-    };
+    let error = error.expect_err("copying a FIFO should fail");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     assert_eq!(
         error.to_string(),

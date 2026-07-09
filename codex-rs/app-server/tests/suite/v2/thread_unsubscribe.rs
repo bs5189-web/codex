@@ -5,6 +5,7 @@ use app_test_support::to_response;
 use codex_app_server_protocol::DynamicToolCallOutputContentItem;
 use codex_app_server_protocol::DynamicToolCallParams;
 use codex_app_server_protocol::DynamicToolCallResponse;
+use codex_app_server_protocol::DynamicToolFunctionSpec;
 use codex_app_server_protocol::DynamicToolSpec;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCResponse;
@@ -41,10 +42,25 @@ async fn thread_unsubscribe_keeps_thread_loaded_until_idle_timeout() -> Result<(
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
-    let thread_id = start_thread(&mut mcp).await?;
+    let thread_req = mcp
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let thread_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
+    let thread_id = thread.id;
 
     let unsubscribe_id = mcp
         .send_thread_unsubscribe_request(ThreadUnsubscribeParams {
@@ -94,8 +110,6 @@ async fn thread_unsubscribe_during_turn_keeps_turn_running() -> Result<()> {
     let tmp = TempDir::new()?;
     let codex_home = tmp.path().join("codex_home");
     std::fs::create_dir(&codex_home)?;
-    let working_directory = tmp.path().join("workdir");
-    std::fs::create_dir(&working_directory)?;
 
     let (server, mut completions) = start_streaming_sse_server(vec![
         vec![StreamingSseChunk {
@@ -120,14 +134,16 @@ async fn thread_unsubscribe_during_turn_keeps_turn_running() -> Result<()> {
     let final_response_completed = completions.remove(0);
     create_config_toml(&codex_home, server.uri())?;
 
-    let mut mcp = TestAppServer::new(&codex_home).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(&codex_home)
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
-        .send_thread_start_request(ThreadStartParams {
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
-            dynamic_tools: Some(vec![DynamicToolSpec {
-                namespace: None,
+            dynamic_tools: Some(vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
                 name: tool_name.to_string(),
                 description: "Deterministic wait tool".to_string(),
                 input_schema: json!({
@@ -136,7 +152,7 @@ async fn thread_unsubscribe_during_turn_keeps_turn_running() -> Result<()> {
                     "additionalProperties": false,
                 }),
                 defer_loading: false,
-            }]),
+            })]),
             ..Default::default()
         })
         .await?;
@@ -156,7 +172,6 @@ async fn thread_unsubscribe_during_turn_keeps_turn_running() -> Result<()> {
                 text: "run deterministic tool".to_string(),
                 text_elements: Vec::new(),
             }],
-            cwd: Some(working_directory),
             ..Default::default()
         })
         .await?;
@@ -253,10 +268,25 @@ async fn thread_unsubscribe_preserves_cached_status_before_idle_unload() -> Resu
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
-    let thread_id = start_thread(&mut mcp).await?;
+    let thread_req = mcp
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let thread_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
+    let thread_id = thread.id;
 
     let turn_req = mcp
         .send_turn_start_request(TurnStartParams {
@@ -340,10 +370,25 @@ async fn thread_unsubscribe_reports_not_subscribed_before_idle_unload() -> Resul
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
-    let thread_id = start_thread(&mut mcp).await?;
+    let thread_req = mcp
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let thread_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
+    let thread_id = thread.id;
 
     let first_unsubscribe_id = mcp
         .send_thread_unsubscribe_request(ThreadUnsubscribeParams {
@@ -417,20 +462,4 @@ stream_max_retries = 0
 "#
         ),
     )
-}
-
-async fn start_thread(mcp: &mut TestAppServer) -> Result<String> {
-    let req_id = mcp
-        .send_thread_start_request(ThreadStartParams {
-            model: Some("mock-model".to_string()),
-            ..Default::default()
-        })
-        .await?;
-    let resp: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(req_id)),
-    )
-    .await??;
-    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(resp)?;
-    Ok(thread.id)
 }

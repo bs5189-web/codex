@@ -334,11 +334,13 @@ fn response_event_records_turn_ttft(event: &ResponseEvent) -> bool {
         }
         ResponseEvent::OutputTextDelta(_)
         | ResponseEvent::ReasoningSummaryDelta { .. }
+        | ResponseEvent::ReasoningSummaryDone { .. }
         | ResponseEvent::ReasoningContentDelta { .. } => true,
         ResponseEvent::Created
         | ResponseEvent::ServerModel(_)
         | ResponseEvent::ModelVerifications(_)
         | ResponseEvent::TurnModerationMetadata(_)
+        | ResponseEvent::SafetyBuffering(_)
         | ResponseEvent::ServerReasoningIncluded(_)
         | ResponseEvent::ToolCallInputDelta { .. }
         | ResponseEvent::Completed { .. }
@@ -378,8 +380,9 @@ fn response_item_records_turn_ttft(item: &ResponseItem) -> bool {
         | ResponseItem::ImageGenerationCall { .. }
         | ResponseItem::Compaction { .. }
         | ResponseItem::ContextCompaction { .. } => true,
-        ResponseItem::CompactionTrigger => false,
-        ResponseItem::FunctionCallOutput { .. }
+        ResponseItem::CompactionTrigger { .. } => false,
+        ResponseItem::AdditionalTools { .. }
+        | ResponseItem::FunctionCallOutput { .. }
         | ResponseItem::CustomToolCallOutput { .. }
         | ResponseItem::ToolSearchOutput { .. }
         | ResponseItem::Other => false,

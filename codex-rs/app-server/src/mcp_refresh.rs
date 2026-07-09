@@ -237,6 +237,7 @@ mod tests {
                         analytics_events_client: codex_analytics::AnalyticsEventsClient::disabled(),
                         thread_manager: thread_manager.clone(),
                         goal_service: Arc::new(codex_goal_extension::GoalService::new()),
+                        environment_manager: Arc::clone(&environment_manager),
                         executor_skill_provider: Arc::clone(&executor_skill_provider),
                         thread_store: Arc::clone(&thread_store),
                     },
@@ -246,9 +247,10 @@ mod tests {
                 )),
                 /*analytics_events_client*/ None,
                 Arc::clone(&thread_store),
-                Some(state_db.clone()),
+                codex_core::local_agent_graph_store_from_state_db(Some(&state_db)),
                 "11111111-1111-4111-8111-111111111111".to_string(),
                 /*attestation_provider*/ None,
+                /*external_time_provider*/ None,
             )
         });
         thread_manager.start_thread(good_config).await?;

@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used)]
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -7,10 +8,8 @@ use bytes::Bytes;
 use codex_api::ApiError;
 use codex_api::AuthError;
 use codex_api::AuthProvider;
-use codex_api::ChatCompletionsClient;
 use codex_api::Compression;
 use codex_api::Provider;
-use codex_api::ResponseEvent;
 use codex_api::ResponsesApiRequest;
 use codex_api::ResponsesClient;
 use codex_api::ResponsesOptions;
@@ -21,10 +20,6 @@ use codex_client::Response;
 use codex_client::StreamResponse;
 use codex_client::TransportError;
 use codex_protocol::models::ContentItem;
-use codex_protocol::models::FunctionCallOutputPayload;
-use codex_protocol::models::LocalShellAction;
-use codex_protocol::models::LocalShellExecAction;
-use codex_protocol::models::LocalShellStatus;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -42,31 +37,11 @@ fn assert_path_ends_with(requests: &[Request], suffix: &str) {
     );
 }
 
-fn json_body(request: &Request) -> Result<&serde_json::Value> {
-    request
-        .body
-        .as_ref()
-        .and_then(RequestBody::json)
-        .ok_or_else(|| anyhow::anyhow!("request should have a JSON body"))
-}
-
-fn responses_request() -> ResponsesApiRequest {
-    ResponsesApiRequest {
-        model: "gpt-test".into(),
-        instructions: "Say hi".into(),
-        input: Vec::new(),
-        tools: Vec::new(),
-        tool_choice: "auto".into(),
-        parallel_tool_calls: false,
-        reasoning: None,
-        store: false,
-        stream: true,
-        include: Vec::new(),
-        service_tier: None,
-        prompt_cache_key: None,
-        text: None,
-        client_metadata: None,
-    }
+fn request_body_bytes(request: &Request) -> &[u8] {
+    let Some(RequestBody::EncodedJson(body)) = request.body.as_ref() else {
+        panic!("expected a prepared request body");
+    };
+    body.as_bytes()
 }
 
 #[derive(Debug, Default, Clone)]
@@ -79,7 +54,7 @@ impl RecordingState {
         let mut guard = self
             .stream_requests
             .lock()
-            .unwrap_or_else(|err| panic!("mutex poisoned: {err}"));
+            .expect("stream requests mutex should not be poisoned");
         guard.push(req);
     }
 
@@ -87,7 +62,7 @@ impl RecordingState {
         let mut guard = self
             .stream_requests
             .lock()
-            .unwrap_or_else(|err| panic!("mutex poisoned: {err}"));
+            .expect("stream requests mutex should not be poisoned");
         std::mem::take(&mut *guard)
     }
 }
@@ -100,39 +75,6 @@ struct RecordingTransport {
 impl RecordingTransport {
     fn new(state: RecordingState) -> Self {
         Self { state }
-    }
-}
-
-#[derive(Clone)]
-struct StaticStreamTransport {
-    state: RecordingState,
-    chunks: Vec<&'static str>,
-}
-
-impl StaticStreamTransport {
-    fn new(state: RecordingState, chunks: Vec<&'static str>) -> Self {
-        Self { state, chunks }
-    }
-}
-
-impl HttpTransport for StaticStreamTransport {
-    async fn execute(&self, _req: Request) -> Result<Response, TransportError> {
-        Err(TransportError::Build("execute should not run".to_string()))
-    }
-
-    async fn stream(&self, req: Request) -> Result<StreamResponse, TransportError> {
-        self.state.record(req);
-
-        let chunks = self
-            .chunks
-            .iter()
-            .map(|chunk| Ok(Bytes::from_static(chunk.as_bytes())))
-            .collect::<Vec<_>>();
-        Ok(StreamResponse {
-            status: StatusCode::OK,
-            headers: HeaderMap::new(),
-            bytes: Box::pin(futures::stream::iter(chunks)),
-        })
     }
 }
 
@@ -204,77 +146,15 @@ fn provider(name: &str) -> Provider {
     }
 }
 
-async fn chat_completions_body_for_request(
-    request: ResponsesApiRequest,
-) -> Result<serde_json::Value> {
-    let state = RecordingState::default();
-    let transport = RecordingTransport::new(state.clone());
-    let client = ChatCompletionsClient::new(transport, provider("openai"), Arc::new(NoAuth));
-
-    let _stream = client
-        .stream_request(
-            request,
-            ResponsesOptions {
-                compression: Compression::None,
-                ..Default::default()
-            },
-        )
-        .await?;
-
-    let requests = state.take_stream_requests();
-    assert_eq!(requests.len(), 1);
-    Ok(json_body(&requests[0])?.clone())
-}
-
-fn text_message(role: &str, text: &str) -> ResponseItem {
-    ResponseItem::Message {
-        id: None,
-        role: role.to_string(),
-        content: vec![ContentItem::InputText {
-            text: text.to_string(),
-        }],
-        phase: None,
-    }
-}
-
-fn function_call(call_id: &str, name: &str, arguments: &str) -> ResponseItem {
-    ResponseItem::FunctionCall {
-        id: None,
-        name: name.to_string(),
-        namespace: None,
-        arguments: arguments.to_string(),
-        call_id: call_id.to_string(),
-    }
-}
-
-fn function_output(call_id: &str, output: &str) -> ResponseItem {
-    ResponseItem::FunctionCallOutput {
-        call_id: call_id.to_string(),
-        output: FunctionCallOutputPayload::from_text(output.to_string()),
-    }
-}
-
-fn custom_tool_call(call_id: &str, name: &str, input: &str) -> ResponseItem {
-    ResponseItem::CustomToolCall {
-        id: None,
-        status: None,
-        call_id: call_id.to_string(),
-        name: name.to_string(),
-        input: input.to_string(),
-    }
-}
-
-fn custom_tool_output(call_id: &str, output: &str) -> ResponseItem {
-    ResponseItem::CustomToolCallOutput {
-        call_id: call_id.to_string(),
-        name: None,
-        output: FunctionCallOutputPayload::from_text(output.to_string()),
-    }
+#[derive(Debug, Default)]
+struct FlakyTransportState {
+    attempts: i64,
+    requests: Vec<(RequestBody, HeaderMap, codex_client::RequestCompression)>,
 }
 
 #[derive(Clone)]
 struct FlakyTransport {
-    state: Arc<Mutex<i64>>,
+    state: Arc<Mutex<FlakyTransportState>>,
 }
 
 impl Default for FlakyTransport {
@@ -286,15 +166,23 @@ impl Default for FlakyTransport {
 impl FlakyTransport {
     fn new() -> Self {
         Self {
-            state: Arc::new(Mutex::new(0)),
+            state: Arc::new(Mutex::new(FlakyTransportState::default())),
         }
     }
 
     fn attempts(&self) -> i64 {
-        *self
-            .state
+        self.state
             .lock()
-            .unwrap_or_else(|err| panic!("mutex poisoned: {err}"))
+            .expect("flaky transport state mutex should not be poisoned")
+            .attempts
+    }
+
+    fn requests(&self) -> Vec<(RequestBody, HeaderMap, codex_client::RequestCompression)> {
+        self.state
+            .lock()
+            .expect("flaky transport state mutex should not be poisoned")
+            .requests
+            .clone()
     }
 }
 
@@ -325,14 +213,14 @@ impl FailsOnceAuth {
         *self
             .attempts
             .lock()
-            .unwrap_or_else(|err| panic!("mutex poisoned: {err}"))
+            .expect("auth attempts mutex should not be poisoned")
     }
 
     async fn apply_auth(&self, request: Request) -> Result<Request, AuthError> {
         let mut attempts = self
             .attempts
             .lock()
-            .unwrap_or_else(|err| panic!("mutex poisoned: {err}"));
+            .expect("auth attempts mutex should not be poisoned");
         *attempts += 1;
 
         if *attempts == 1 {
@@ -359,14 +247,20 @@ impl HttpTransport for FlakyTransport {
         Err(TransportError::Build("execute should not run".to_string()))
     }
 
-    async fn stream(&self, _req: Request) -> Result<StreamResponse, TransportError> {
-        let mut attempts = self
+    async fn stream(&self, req: Request) -> Result<StreamResponse, TransportError> {
+        let Some(body) = req.body.clone() else {
+            panic!("request should have a body");
+        };
+        let mut state = self
             .state
             .lock()
-            .unwrap_or_else(|err| panic!("mutex poisoned: {err}"));
-        *attempts += 1;
+            .expect("flaky transport state mutex should not be poisoned");
+        state.attempts += 1;
+        state
+            .requests
+            .push((body, req.headers.clone(), req.compression));
 
-        if *attempts == 1 {
+        if state.attempts == 1 {
             return Err(TransportError::Network("first attempt fails".to_string()));
         }
 
@@ -407,315 +301,52 @@ async fn responses_client_uses_responses_path() -> Result<()> {
 }
 
 #[tokio::test]
-async fn chat_completions_client_uses_chat_path() -> Result<()> {
+async fn responses_client_stream_request_preserves_item_ids() -> Result<()> {
     let state = RecordingState::default();
     let transport = RecordingTransport::new(state.clone());
-    let client = ChatCompletionsClient::new(transport, provider("openai"), Arc::new(NoAuth));
+    let client = ResponsesClient::new(transport, provider("openai"), Arc::new(NoAuth));
+    let request = ResponsesApiRequest {
+        model: "gpt-test".into(),
+        instructions: "Say hi".into(),
+        input: vec![ResponseItem::Message {
+            id: Some("msg_1".into()),
+            role: "user".into(),
+            content: vec![ContentItem::InputText { text: "hi".into() }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        tools: Some(Vec::new()),
+        tool_choice: "auto".into(),
+        parallel_tool_calls: false,
+        reasoning: None,
+        store: false,
+        stream: true,
+        stream_options: None,
+        include: Vec::new(),
+        service_tier: None,
+        prompt_cache_key: None,
+        text: None,
+        client_metadata: None,
+    };
+    let expected = serde_json::to_value(&request)?;
 
     let _stream = client
-        .stream_request(
-            responses_request(),
-            ResponsesOptions {
-                compression: Compression::None,
-                ..Default::default()
-            },
-        )
+        .stream_request(request, ResponsesOptions::default())
         .await?;
 
     let requests = state.take_stream_requests();
-    assert_path_ends_with(&requests, "/chat/completions");
-    Ok(())
-}
-
-#[tokio::test]
-async fn chat_completions_client_converts_responses_request() -> Result<()> {
-    let mut request = responses_request();
-    request.input = vec![
-        text_message("developer", "be concise"),
-        text_message("user", "run pwd"),
-        function_call("call-1", "exec_command", "{\"cmd\":\"pwd\"}"),
-        function_output("call-1", "/tmp"),
-    ];
-    request.tools = vec![serde_json::json!({
-        "type": "function",
-        "name": "exec_command",
-        "description": "Runs a command",
-        "parameters": {"type": "object"}
-    })];
-
-    let body = chat_completions_body_for_request(request).await?;
+    assert_eq!(requests.len(), 1);
+    let prepared = requests[0]
+        .prepare_body_for_send()
+        .expect("body should prepare");
+    let body: serde_json::Value =
+        serde_json::from_slice(prepared.body.as_deref().expect("body should be JSON"))?;
+    assert_eq!(body, expected);
+    assert_eq!(body["input"][0]["id"], "msg_1");
     assert_eq!(
-        body,
-        serde_json::json!({
-            "model": "gpt-test",
-            "messages": [
-                {"role": "system", "content": "Say hi"},
-                {"role": "system", "content": "be concise"},
-                {"role": "user", "content": "run pwd"},
-                {
-                    "role": "assistant",
-                    "tool_calls": [{
-                        "id": "call-1",
-                        "type": "function",
-                        "function": {
-                            "name": "exec_command",
-                            "arguments": "{\"cmd\":\"pwd\"}"
-                        }
-                    }]
-                },
-                {"role": "tool", "content": "/tmp", "tool_call_id": "call-1"}
-            ],
-            "tools": [{
-                "type": "function",
-                "function": {
-                    "name": "exec_command",
-                    "description": "Runs a command",
-                    "parameters": {"type": "object"}
-                }
-            }],
-            "tool_choice": "auto",
-            "stream": true
-        })
+        prepared.headers.get(http::header::CONTENT_TYPE),
+        Some(&HeaderValue::from_static("application/json"))
     );
-    Ok(())
-}
-
-#[tokio::test]
-async fn chat_completions_client_batches_parallel_tool_calls() -> Result<()> {
-    let mut request = responses_request();
-    request.input = vec![
-        text_message("user", "run both"),
-        function_call("call-1", "first_tool", "{\"value\":1}"),
-        function_call("call-2", "second_tool", "{\"value\":2}"),
-        function_output("call-1", "first output"),
-        function_output("call-2", "second output"),
-    ];
-
-    let body = chat_completions_body_for_request(request).await?;
-    assert_eq!(
-        body["messages"],
-        serde_json::json!([
-            {"role": "system", "content": "Say hi"},
-            {"role": "user", "content": "run both"},
-            {
-                "role": "assistant",
-                "tool_calls": [
-                    {
-                        "id": "call-1",
-                        "type": "function",
-                        "function": {
-                            "name": "first_tool",
-                            "arguments": "{\"value\":1}"
-                        }
-                    },
-                    {
-                        "id": "call-2",
-                        "type": "function",
-                        "function": {
-                            "name": "second_tool",
-                            "arguments": "{\"value\":2}"
-                        }
-                    }
-                ]
-            },
-            {"role": "tool", "content": "first output", "tool_call_id": "call-1"},
-            {"role": "tool", "content": "second output", "tool_call_id": "call-2"}
-        ])
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn chat_completions_client_drops_incomplete_tool_call_batch() -> Result<()> {
-    let mut request = responses_request();
-    request.input = vec![
-        text_message("user", "run both"),
-        function_call("call-1", "first_tool", "{}"),
-        function_call("call-2", "second_tool", "{}"),
-        function_output("call-1", "first output"),
-        text_message("user", "continue"),
-    ];
-
-    let body = chat_completions_body_for_request(request).await?;
-    assert_eq!(
-        body["messages"],
-        serde_json::json!([
-            {"role": "system", "content": "Say hi"},
-            {"role": "user", "content": "run both"},
-            {"role": "user", "content": "continue"}
-        ])
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn chat_completions_client_drops_orphan_tool_output() -> Result<()> {
-    let mut request = responses_request();
-    request.input = vec![
-        text_message("user", "run pwd"),
-        function_output("call-1", "/tmp"),
-    ];
-
-    let body = chat_completions_body_for_request(request).await?;
-    assert_eq!(
-        body["messages"],
-        serde_json::json!([
-            {"role": "system", "content": "Say hi"},
-            {"role": "user", "content": "run pwd"}
-        ])
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn chat_completions_client_drops_tool_call_interrupted_by_message() -> Result<()> {
-    let mut request = responses_request();
-    request.input = vec![
-        text_message("user", "run pwd"),
-        function_call("call-1", "exec_command", "{}"),
-        text_message("user", "never mind"),
-        function_output("call-1", "/tmp"),
-    ];
-
-    let body = chat_completions_body_for_request(request).await?;
-    assert_eq!(
-        body["messages"],
-        serde_json::json!([
-            {"role": "system", "content": "Say hi"},
-            {"role": "user", "content": "run pwd"},
-            {"role": "user", "content": "never mind"}
-        ])
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn chat_completions_client_converts_custom_tool_call_batch() -> Result<()> {
-    let mut request = responses_request();
-    request.input = vec![
-        text_message("user", "use custom tool"),
-        custom_tool_call("call-1", "custom_tool", "{\"value\":1}"),
-        custom_tool_output("call-1", "custom output"),
-    ];
-
-    let body = chat_completions_body_for_request(request).await?;
-    assert_eq!(
-        body["messages"],
-        serde_json::json!([
-            {"role": "system", "content": "Say hi"},
-            {"role": "user", "content": "use custom tool"},
-            {
-                "role": "assistant",
-                "tool_calls": [{
-                    "id": "call-1",
-                    "type": "function",
-                    "function": {
-                        "name": "custom_tool",
-                        "arguments": "{\"value\":1}"
-                    }
-                }]
-            },
-            {"role": "tool", "content": "custom output", "tool_call_id": "call-1"}
-        ])
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn chat_completions_client_drops_local_shell_output_without_chat_tool_call() -> Result<()> {
-    let mut request = responses_request();
-    request.input = vec![
-        text_message("user", "run pwd"),
-        ResponseItem::LocalShellCall {
-            id: None,
-            call_id: Some("call-1".to_string()),
-            status: LocalShellStatus::Completed,
-            action: LocalShellAction::Exec(LocalShellExecAction {
-                command: vec!["pwd".to_string()],
-                timeout_ms: None,
-                working_directory: None,
-                env: None,
-                user: None,
-            }),
-        },
-        function_output("call-1", "/tmp"),
-    ];
-
-    let body = chat_completions_body_for_request(request).await?;
-    assert_eq!(
-        body["messages"],
-        serde_json::json!([
-            {"role": "system", "content": "Say hi"},
-            {"role": "user", "content": "run pwd"}
-        ])
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn chat_completions_stream_wraps_text_deltas_in_message_item() -> Result<()> {
-    let state = RecordingState::default();
-    let transport = StaticStreamTransport::new(
-        state,
-        vec![
-            "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"\"},\"finish_reason\":null}]}\n\n",
-            "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"\\n\\n\"},\"finish_reason\":null}]}\n\n",
-            "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"he\"},\"finish_reason\":null}]}\n\n",
-            "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"llo\"},\"finish_reason\":\"stop\"}]}\n\n",
-            "data: [DONE]\n\n",
-        ],
-    );
-    let client = ChatCompletionsClient::new(transport, provider("openai"), Arc::new(NoAuth));
-
-    let mut stream = client
-        .stream_request(
-            responses_request(),
-            ResponsesOptions {
-                compression: Compression::None,
-                ..Default::default()
-            },
-        )
-        .await?;
-
-    let mut events = Vec::new();
-    while let Some(event) = stream.rx_event.recv().await {
-        events.push(event?);
-    }
-
-    assert_eq!(events.len(), 6);
-    assert!(matches!(events[0], ResponseEvent::Created));
-    assert!(matches!(
-        &events[1],
-        ResponseEvent::OutputItemAdded(ResponseItem::Message {
-            id,
-            role,
-            content,
-            ..
-        }) if id.as_deref() == Some("chatcmpl-1-message")
-            && role == "assistant"
-            && content.is_empty()
-    ));
-    assert!(matches!(
-        &events[2],
-        ResponseEvent::OutputTextDelta(delta) if delta == "he"
-    ));
-    assert!(matches!(
-        &events[3],
-        ResponseEvent::OutputTextDelta(delta) if delta == "llo"
-    ));
-    assert!(matches!(
-        &events[4],
-        ResponseEvent::OutputItemDone(ResponseItem::Message { id, role, content, .. })
-            if id.as_deref() == Some("chatcmpl-1-message")
-                && role == "assistant"
-                && content == &vec![ContentItem::OutputText {
-                    text: "hello".to_string(),
-                }]
-    ));
-    assert!(matches!(
-        &events[5],
-        ResponseEvent::Completed { response_id, .. } if response_id == "chatcmpl-1"
-    ));
     Ok(())
 }
 
@@ -767,19 +398,53 @@ async fn streaming_client_retries_on_transport_error() -> Result<()> {
     let mut provider = provider("openai");
     provider.retry.max_attempts = 2;
 
-    let request = responses_request();
+    let request = ResponsesApiRequest {
+        model: "gpt-test".into(),
+        instructions: "Say hi".into(),
+        input: Vec::new(),
+        tools: Some(Vec::new()),
+        tool_choice: "auto".into(),
+        parallel_tool_calls: false,
+        reasoning: None,
+        store: false,
+        stream: true,
+        stream_options: None,
+        include: Vec::new(),
+        service_tier: None,
+        prompt_cache_key: None,
+        text: None,
+        client_metadata: None,
+    };
     let client = ResponsesClient::new(transport.clone(), provider, Arc::new(NoAuth));
 
     let _stream = client
         .stream_request(
             request,
             ResponsesOptions {
-                compression: Compression::None,
+                compression: Compression::Zstd,
                 ..Default::default()
             },
         )
         .await?;
     assert_eq!(transport.attempts(), 2);
+    let requests = transport.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0], requests[1]);
+    let RequestBody::EncodedJson(first_body) = &requests[0].0 else {
+        panic!("expected an encoded JSON body");
+    };
+    let RequestBody::EncodedJson(second_body) = &requests[1].0 else {
+        panic!("expected an encoded JSON body");
+    };
+    assert_eq!(
+        first_body.as_bytes().as_ptr(),
+        second_body.as_bytes().as_ptr()
+    );
+    assert_eq!(
+        requests[0].1.get(http::header::CONTENT_ENCODING),
+        Some(&HeaderValue::from_static("zstd"))
+    );
+    assert_eq!(requests[0].2, codex_client::RequestCompression::None);
     Ok(())
 }
 
@@ -827,10 +492,9 @@ async fn streaming_client_does_not_retry_auth_build_error() -> Result<()> {
             /*turn_state*/ None,
         )
         .await;
-    let err = match result {
-        Ok(_) => panic!("auth build errors should fail without retry"),
-        Err(err) => err,
-    };
+    let err = result
+        .err()
+        .expect("auth build errors should fail without retry");
 
     assert!(matches!(
         err,
@@ -843,7 +507,7 @@ async fn streaming_client_does_not_retry_auth_build_error() -> Result<()> {
 }
 
 #[tokio::test]
-async fn azure_default_store_attaches_ids_and_headers() -> Result<()> {
+async fn azure_store_sends_ids_and_headers() -> Result<()> {
     let state = RecordingState::default();
     let transport = RecordingTransport::new(state.clone());
     let client = ResponsesClient::new(transport, provider("azure"), Arc::new(NoAuth));
@@ -856,13 +520,15 @@ async fn azure_default_store_attaches_ids_and_headers() -> Result<()> {
             role: "user".into(),
             content: vec![ContentItem::InputText { text: "hi".into() }],
             phase: None,
+            internal_chat_message_metadata_passthrough: None,
         }],
-        tools: Vec::new(),
+        tools: Some(Vec::new()),
         tool_choice: "auto".into(),
         parallel_tool_calls: false,
         reasoning: None,
         store: true,
         stream: true,
+        stream_options: None,
         include: Vec::new(),
         service_tier: None,
         prompt_cache_key: None,
@@ -917,11 +583,9 @@ async fn azure_default_store_attaches_ids_and_headers() -> Result<()> {
         Some("present")
     );
 
-    let input_id = req
-        .body
-        .as_ref()
-        .and_then(RequestBody::json)
-        .and_then(|body| body.get("input"))
+    let body: serde_json::Value = serde_json::from_slice(request_body_bytes(req))?;
+    let input_id = body
+        .get("input")
         .and_then(|input| input.get(0))
         .and_then(|item| item.get("id"))
         .and_then(|id| id.as_str());
