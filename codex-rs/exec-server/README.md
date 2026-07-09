@@ -16,8 +16,8 @@ filesystem operations and `codex-linux-sandbox`.
 
 ## Transport
 
-The server speaks the shared `codex-app-server-protocol` message envelope on
-the wire.
+The server speaks the exec-specific `codex-exec-server-protocol` message
+envelope on the wire.
 
 The CLI entrypoint supports:
 
@@ -26,6 +26,8 @@ The CLI entrypoint supports:
 
 Remote mode registers the local exec-server with the environment registry,
 then reconnects to the service-provided rendezvous websocket as the environment.
+Remote communication uses the Noise relay contract; the registry and harness
+must support it.
 It uses the standard Codex ChatGPT sign-in state; run `codex login` first when
 remote registration needs authentication. Containerized callers that receive an
 Agent Identity JWT in `CODEX_ACCESS_TOKEN` can opt into that auth path with
@@ -45,7 +47,7 @@ codex exec-server \
 Wire framing:
 
 - local websocket: one JSON-RPC message per websocket frame
-- remote websocket: binary protobuf relay frames carrying JSON-RPC payloads
+- Noise remote websocket: binary protobuf relay frames carrying encrypted payloads
 
 ## Remote Relay Message Format
 
@@ -57,13 +59,13 @@ identity plus endpoint-owned reliability metadata:
 ```text
 version
 stream_id
-body              // data | ack_frame | resume | reset | heartbeat
+body              // handshake | data | ack_frame | resume | reset | heartbeat
 ack               // highest contiguous peer segment seq received
 ack_bits          // bitset for peer segment seqs after ack
 seq               // data only: segment sequence number
 segment_index     // data only: 0-based index within message
 segment_count     // data only: number of segments in message
-payload           // data only: JSON-RPC message bytes or segment bytes
+payload           // handshake bytes or encrypted data record
 next_seq          // resume only: next sender seq
 reason            // reset only: reset reason
 ```
@@ -319,9 +321,14 @@ Params:
 {
   "processId": "proc-1",
   "seq": 2,
-  "exitCode": 0
+  "exitCode": 0,
+  "sandboxDenied": false
 }
 ```
+
+`sandboxDenied` lets streaming clients preserve executor-side sandbox denial
+detection without issuing a final `process/read` request. Clients recover it
+with `process/read` when an older server omits the field.
 
 ### `process/closed`
 
@@ -332,17 +339,20 @@ Params:
 
 ```json
 {
-  "processId": "proc-1"
+  "processId": "proc-1",
+  "seq": 3
 }
 ```
 
 ## Filesystem RPCs
 
-Filesystem methods use canonical `file:` URIs and return JSON-RPC errors for
-invalid or unavailable paths. For compatibility, requests also accept native
-absolute path strings and normalize them to `file:` URIs:
+Filesystem methods require valid `file:` URI strings and return JSON-RPC errors
+for invalid or unavailable paths. Native absolute path strings are rejected;
+callers must convert them to `file:` URIs before sending requests:
 
 - `fs/readFile`
+- `fs/open`, `fs/readBlock`, and `fs/close` (internal transport for
+  `ExecutorFileSystem::read_file_stream`)
 - `fs/writeFile`
 - `fs/createDirectory`
 - `fs/getMetadata`
@@ -427,6 +437,6 @@ Terminate it:
 ```json
 {"id":4,"method":"process/terminate","params":{"processId":"proc-1"}}
 {"id":4,"result":{"running":true}}
-{"method":"process/exited","params":{"processId":"proc-1","seq":3,"exitCode":0}}
-{"method":"process/closed","params":{"processId":"proc-1"}}
+{"method":"process/exited","params":{"processId":"proc-1","seq":3,"exitCode":0,"sandboxDenied":false}}
+{"method":"process/closed","params":{"processId":"proc-1","seq":4}}
 ```

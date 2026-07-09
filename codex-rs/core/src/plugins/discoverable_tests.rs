@@ -69,7 +69,6 @@ async fn list_tool_suggest_discoverable_plugins_includes_cached_remote_global_pl
         &codex_home.path().join(crate::config::CONFIG_TOML_FILE),
         r#"[features]
 plugins = true
-remote_plugin = true
 "#,
     );
 
@@ -244,7 +243,7 @@ remote_plugin = true
             .all(|plugin| plugin.id != "github@openai-curated-remote")
     );
 
-    for scope in ["GLOBAL", "WORKSPACE"] {
+    for scope in ["GLOBAL", "USER", "WORKSPACE"] {
         Mock::given(method("GET"))
             .and(path("/backend-api/ps/plugins/installed"))
             .and(query_param("scope", scope))
@@ -306,7 +305,6 @@ remote_plugin = true
         &codex_home.path().join(crate::config::CONFIG_TOML_FILE),
         r#"[features]
 plugins = true
-remote_plugin = true
 
 [tool_suggest]
 disabled_tools = [

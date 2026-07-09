@@ -32,8 +32,7 @@ fn default_enabled_features_are_stable() {
     for spec in crate::FEATURES {
         if spec.default_enabled {
             assert!(
-                matches!(spec.stage, Stage::Stable | Stage::Removed)
-                    || spec.id == Feature::TerminalResizeReflow,
+                matches!(spec.stage, Stage::Stable | Stage::Removed),
                 "feature `{}` is enabled by default but is not stable/removed ({:?})",
                 spec.key,
                 spec.stage
@@ -125,6 +124,16 @@ fn code_mode_only_requires_code_mode() {
 }
 
 #[test]
+fn code_mode_host_is_stable_and_enabled_by_default() {
+    assert_eq!(Feature::CodeModeHost.stage(), Stage::Stable);
+    assert_eq!(Feature::CodeModeHost.default_enabled(), true);
+    assert_eq!(
+        feature_for_key("code_mode_host"),
+        Some(Feature::CodeModeHost)
+    );
+}
+
+#[test]
 fn guardian_approval_is_stable_and_enabled_by_default() {
     let spec = Feature::GuardianApproval.info();
 
@@ -151,16 +160,33 @@ fn request_permissions_tool_is_under_development() {
 }
 
 #[test]
-fn terminal_resize_reflow_is_experimental_and_enabled_by_default() {
+fn terminal_resize_reflow_is_removed_and_enabled_by_default() {
     assert_eq!(
         feature_for_key("terminal_resize_reflow"),
         Some(Feature::TerminalResizeReflow)
     );
-    assert!(matches!(
-        Feature::TerminalResizeReflow.stage(),
-        Stage::Experimental { .. }
-    ));
+    assert_eq!(Feature::TerminalResizeReflow.stage(), Stage::Removed);
     assert_eq!(Feature::TerminalResizeReflow.default_enabled(), true);
+}
+
+#[test]
+fn from_sources_ignores_removed_terminal_resize_reflow_feature_key() {
+    let features_toml = FeaturesToml::from(BTreeMap::from([(
+        "terminal_resize_reflow".to_string(),
+        false,
+    )]));
+
+    let features = Features::from_sources(
+        FeatureConfigSource {
+            features: Some(&features_toml),
+            ..Default::default()
+        },
+        FeatureConfigSource::default(),
+        FeatureOverrides::default(),
+    );
+
+    assert_eq!(features, Features::with_defaults());
+    assert_eq!(features.enabled(Feature::TerminalResizeReflow), true);
 }
 
 #[test]
@@ -237,16 +263,44 @@ fn use_linux_sandbox_bwrap_is_a_removed_feature_key() {
 }
 
 #[test]
-fn image_generation_is_stable_and_enabled_by_default() {
+fn image_generation_is_stable_and_extension_alias_is_supported() {
     assert_eq!(Feature::ImageGeneration.stage(), Stage::Stable);
     assert_eq!(Feature::ImageGeneration.default_enabled(), true);
+    assert_eq!(
+        feature_for_key("image_generation"),
+        Some(Feature::ImageGeneration)
+    );
+    assert_eq!(
+        feature_for_key("imagegenext"),
+        Some(Feature::ImageGeneration)
+    );
 }
 
 #[test]
-fn image_generation_extension_is_under_development_and_disabled_by_default() {
-    assert_eq!(Feature::ImageGenExt.stage(), Stage::UnderDevelopment);
-    assert_eq!(Feature::ImageGenExt.default_enabled(), false);
-    assert_eq!(feature_for_key("imagegenext"), Some(Feature::ImageGenExt));
+fn image_generation_toggle_controls_extension_backed_generation() {
+    let mut entries = BTreeMap::new();
+    entries.insert("image_generation".to_string(), false);
+    let mut features = Features::with_defaults();
+    features.apply_map(&entries);
+    assert!(!features.enabled(Feature::ImageGeneration));
+
+    entries.insert("image_generation".to_string(), true);
+    features.disable(Feature::ImageGeneration);
+    features.apply_map(&entries);
+    assert!(features.enabled(Feature::ImageGeneration));
+}
+
+#[test]
+fn canonical_image_generation_toggle_wins_over_extension_alias() {
+    for (canonical, alias) in [(false, true), (true, false)] {
+        let entries = BTreeMap::from([
+            ("image_generation".to_string(), canonical),
+            ("imagegenext".to_string(), alias),
+        ]);
+        let mut features = Features::with_defaults();
+        features.apply_map(&entries);
+        assert_eq!(features.enabled(Feature::ImageGeneration), canonical);
+    }
 }
 
 #[test]
@@ -300,9 +354,9 @@ fn tool_call_mcp_elicitation_is_stable_and_enabled_by_default() {
 }
 
 #[test]
-fn auth_elicitation_is_under_development() {
-    assert_eq!(Feature::AuthElicitation.stage(), Stage::UnderDevelopment);
-    assert_eq!(Feature::AuthElicitation.default_enabled(), false);
+fn auth_elicitation_is_stable_and_enabled_by_default() {
+    assert_eq!(Feature::AuthElicitation.stage(), Stage::Stable);
+    assert_eq!(Feature::AuthElicitation.default_enabled(), true);
     assert_eq!(
         feature_for_key("auth_elicitation"),
         Some(Feature::AuthElicitation)
@@ -461,6 +515,23 @@ fn from_sources_ignores_removed_image_detail_original_feature_key() {
 }
 
 #[test]
+fn from_sources_ignores_removed_resize_all_images_feature_key() {
+    let features_toml =
+        FeaturesToml::from(BTreeMap::from([("resize_all_images".to_string(), false)]));
+
+    let features = Features::from_sources(
+        FeatureConfigSource {
+            features: Some(&features_toml),
+            ..Default::default()
+        },
+        FeatureConfigSource::default(),
+        FeatureOverrides::default(),
+    );
+
+    assert_eq!(features, Features::with_defaults());
+}
+
+#[test]
 fn from_sources_ignores_removed_undo_feature_key() {
     let features_toml = FeaturesToml::from(BTreeMap::from([("undo".to_string(), true)]));
 
@@ -529,6 +600,25 @@ fn from_sources_ignores_removed_plugin_hooks_feature_key() {
 }
 
 #[test]
+fn from_sources_ignores_removed_tool_search_always_defer_mcp_tools_feature_key() {
+    let features_toml = FeaturesToml::from(BTreeMap::from([(
+        "tool_search_always_defer_mcp_tools".to_string(),
+        false,
+    )]));
+
+    let features = Features::from_sources(
+        FeatureConfigSource {
+            features: Some(&features_toml),
+            ..Default::default()
+        },
+        FeatureConfigSource::default(),
+        FeatureOverrides::default(),
+    );
+
+    assert_eq!(features, Features::with_defaults());
+}
+
+#[test]
 fn multi_agent_v2_feature_config_deserializes_boolean_toggle() {
     let features: FeaturesToml = toml::from_str(
         r#"
@@ -558,6 +648,7 @@ usage_hint_enabled = false
 usage_hint_text = "Custom delegation guidance."
 root_agent_usage_hint_text = "Root guidance."
 subagent_usage_hint_text = "Subagent guidance."
+multi_agent_mode_hint_text = "Custom mode guidance."
 tool_namespace = "agents"
 hide_spawn_agent_metadata = true
 non_code_mode_only = true
@@ -581,48 +672,10 @@ non_code_mode_only = true
             usage_hint_text: Some("Custom delegation guidance.".to_string()),
             root_agent_usage_hint_text: Some("Root guidance.".to_string()),
             subagent_usage_hint_text: Some("Subagent guidance.".to_string()),
+            multi_agent_mode_hint_text: Some("Custom mode guidance.".to_string()),
             tool_namespace: Some("agents".to_string()),
             hide_spawn_agent_metadata: Some(true),
             non_code_mode_only: Some(true),
-        }))
-    );
-}
-
-#[test]
-fn multi_agent_v2_feature_config_usage_hint_enabled_does_not_enable_feature() {
-    let features_toml: FeaturesToml = toml::from_str(
-        r#"
-[multi_agent_v2]
-usage_hint_enabled = false
-"#,
-    )
-    .expect("features table should deserialize");
-    let features = Features::from_sources(
-        FeatureConfigSource {
-            features: Some(&features_toml),
-            ..Default::default()
-        },
-        FeatureConfigSource::default(),
-        FeatureOverrides::default(),
-    );
-
-    assert_eq!(features.enabled(Feature::MultiAgentV2), false);
-    assert_eq!(features_toml.entries(), BTreeMap::new());
-    assert_eq!(
-        features_toml.multi_agent_v2,
-        Some(crate::FeatureToml::Config(crate::MultiAgentV2ConfigToml {
-            enabled: None,
-            max_concurrent_threads_per_session: None,
-            min_wait_timeout_ms: None,
-            max_wait_timeout_ms: None,
-            default_wait_timeout_ms: None,
-            usage_hint_enabled: Some(false),
-            usage_hint_text: None,
-            root_agent_usage_hint_text: None,
-            subagent_usage_hint_text: None,
-            tool_namespace: None,
-            hide_spawn_agent_metadata: None,
-            non_code_mode_only: None,
         }))
     );
 }
@@ -633,6 +686,7 @@ fn materialize_resolved_enabled_writes_all_features_and_preserves_custom_config(
     features.enable(Feature::CodeMode);
     features.enable(Feature::MultiAgentV2);
     features.enable(Feature::NetworkProxy);
+    features.enable(Feature::RespectSystemProxy);
 
     let mut features_toml = FeaturesToml {
         multi_agent_v2: Some(FeatureToml::Config(crate::MultiAgentV2ConfigToml {
@@ -690,12 +744,15 @@ fn materialize_resolved_enabled_writes_all_features_and_preserves_custom_config(
 #[test]
 fn unstable_warning_event_only_mentions_enabled_under_development_features() {
     let mut configured_features = Table::new();
-    configured_features.insert("child_agents_md".to_string(), TomlValue::Boolean(true));
+    configured_features.insert(
+        "apply_patch_streaming_events".to_string(),
+        TomlValue::Boolean(true),
+    );
     configured_features.insert("personality".to_string(), TomlValue::Boolean(true));
     configured_features.insert("unknown".to_string(), TomlValue::Boolean(true));
 
     let mut features = Features::with_defaults();
-    features.enable(Feature::ChildAgentsMd);
+    features.enable(Feature::ApplyPatchStreamingEvents);
 
     let warning = unstable_features_warning_event(
         Some(&configured_features),
@@ -708,7 +765,7 @@ fn unstable_warning_event_only_mentions_enabled_under_development_features() {
     let EventMsg::Warning(WarningEvent { message }) = warning.msg else {
         panic!("expected warning event");
     };
-    assert!(message.contains("child_agents_md"));
+    assert!(message.contains("apply_patch_streaming_events"));
     assert!(!message.contains("personality"));
     assert!(message.contains("/tmp/config.toml"));
 }

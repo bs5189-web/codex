@@ -1,5 +1,6 @@
 use crate::protocol::common::AuthMode;
 use codex_experimental_api_macros::ExperimentalApi;
+use codex_protocol::account::AmazonBedrockCredentialSource;
 use codex_protocol::account::PlanType;
 use codex_protocol::account::ProviderAccount;
 use codex_protocol::protocol::CreditsSnapshot as CoreCreditsSnapshot;
@@ -24,11 +25,28 @@ pub enum Account {
 
     #[serde(rename = "chatgpt", rename_all = "camelCase")]
     #[ts(rename = "chatgpt", rename_all = "camelCase")]
-    Chatgpt { email: String, plan_type: PlanType },
+    Chatgpt {
+        #[schemars(required, schema_with = "nullable_string_schema")]
+        email: Option<String>,
+        plan_type: PlanType,
+    },
 
     #[serde(rename = "amazonBedrock", rename_all = "camelCase")]
     #[ts(rename = "amazonBedrock", rename_all = "camelCase")]
-    AmazonBedrock {},
+    AmazonBedrock {
+        #[serde(default = "default_bedrock_credential_source")]
+        credential_source: AmazonBedrockCredentialSource,
+    },
+}
+
+fn nullable_string_schema(
+    generator: &mut schemars::r#gen::SchemaGenerator,
+) -> schemars::schema::Schema {
+    generator.subschema_for::<Option<String>>()
+}
+
+fn default_bedrock_credential_source() -> AmazonBedrockCredentialSource {
+    AmazonBedrockCredentialSource::AwsManaged
 }
 
 impl From<ProviderAccount> for Account {
@@ -36,7 +54,9 @@ impl From<ProviderAccount> for Account {
         match account {
             ProviderAccount::ApiKey => Self::ApiKey {},
             ProviderAccount::Chatgpt { email, plan_type } => Self::Chatgpt { email, plan_type },
-            ProviderAccount::AmazonBedrock => Self::AmazonBedrock {},
+            ProviderAccount::AmazonBedrock { credential_source } => {
+                Self::AmazonBedrock { credential_source }
+            }
         }
     }
 }
@@ -58,6 +78,11 @@ pub enum LoginAccountParams {
     Chatgpt {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         codex_streamlined_login: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        use_hosted_login_success_page: bool,
+        #[serde(default)]
+        #[ts(optional = nullable)]
+        app_brand: Option<LoginAppBrand>,
     },
     #[serde(rename = "chatgptDeviceCode")]
     #[ts(rename = "chatgptDeviceCode")]
@@ -80,6 +105,16 @@ pub enum LoginAccountParams {
         #[ts(optional = nullable)]
         chatgpt_plan_type: Option<String>,
     },
+}
+
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(rename_all = "lowercase")]
+#[ts(export_to = "v2/")]
+pub enum LoginAppBrand {
+    #[default]
+    Codex,
+    Chatgpt,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -256,6 +291,94 @@ pub struct GetAccountRateLimitsResponse {
     pub rate_limits: RateLimitSnapshot,
     /// Multi-bucket view keyed by metered `limit_id` (for example, `codex`).
     pub rate_limits_by_limit_id: Option<HashMap<String, RateLimitSnapshot>>,
+    pub rate_limit_reset_credits: Option<RateLimitResetCreditsSummary>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct RateLimitResetCreditsSummary {
+    pub available_count: i64,
+    /// Detail rows for available reset credits, when the backend provides them.
+    ///
+    /// `null` means only `availableCount` is known, while an empty array means details were fetched
+    /// and no available credits were returned. The backend may cap this list, so its length can be
+    /// less than `availableCount`.
+    pub credits: Option<Vec<RateLimitResetCredit>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct RateLimitResetCredit {
+    /// Opaque backend identifier for this reset credit.
+    pub id: String,
+    pub reset_type: RateLimitResetType,
+    pub status: RateLimitResetCreditStatus,
+    /// Unix timestamp in seconds when the credit was granted.
+    #[ts(type = "number")]
+    pub granted_at: i64,
+    /// Unix timestamp in seconds when the credit expires, or `null` if it does not expire.
+    #[ts(type = "number | null")]
+    pub expires_at: Option<i64>,
+    /// Backend-provided display title for this credit, or `null` when unavailable.
+    pub title: Option<String>,
+    /// Backend-provided display description for this credit, or `null` when unavailable.
+    pub description: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/", rename_all = "camelCase")]
+pub enum RateLimitResetType {
+    CodexRateLimits,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/", rename_all = "camelCase")]
+pub enum RateLimitResetCreditStatus {
+    Available,
+    Redeeming,
+    Redeemed,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ConsumeAccountRateLimitResetCreditParams {
+    /// Identifies one logical reset attempt. A UUID is recommended; reuse the same value when
+    /// retrying that attempt.
+    pub idempotency_key: String,
+    /// Opaque reset-credit identifier to redeem. When omitted, the backend selects the next
+    /// available credit.
+    #[ts(optional = nullable)]
+    pub credit_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ConsumeAccountRateLimitResetCreditResponse {
+    pub outcome: ConsumeAccountRateLimitResetCreditOutcome,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/", rename_all = "camelCase")]
+pub enum ConsumeAccountRateLimitResetCreditOutcome {
+    /// A reset credit was consumed and the eligible rate-limit windows were reset.
+    Reset,
+    /// No current rate-limit window is eligible for a reset.
+    NothingToReset,
+    /// The account has no earned reset credits available.
+    NoCredit,
+    /// The same idempotency key already completed a reset successfully.
+    AlreadyRedeemed,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -264,6 +387,41 @@ pub struct GetAccountRateLimitsResponse {
 pub struct GetAccountTokenUsageResponse {
     pub summary: AccountTokenUsageSummary,
     pub daily_usage_buckets: Option<Vec<AccountTokenUsageDailyBucket>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct GetWorkspaceMessagesResponse {
+    /// Whether the workspace-message backend route is available for this client.
+    pub feature_enabled: bool,
+    /// Active workspace messages returned by the backend.
+    pub messages: Vec<WorkspaceMessage>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct WorkspaceMessage {
+    pub message_id: String,
+    pub message_type: WorkspaceMessageType,
+    pub message_body: String,
+    /// Unix timestamp (in seconds) when the message was created.
+    #[ts(type = "number | null")]
+    pub created_at: Option<i64>,
+    /// Unix timestamp (in seconds) when the message was archived.
+    #[ts(type = "number | null")]
+    pub archived_at: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "v2/", rename_all = "snake_case")]
+pub enum WorkspaceMessageType {
+    Headline,
+    Announcement,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

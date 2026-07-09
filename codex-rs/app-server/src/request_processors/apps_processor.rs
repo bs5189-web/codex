@@ -1,4 +1,5 @@
 use super::*;
+use crate::app_info::app_info_to_api;
 
 pub(crate) struct AppsRequestProcessor {
     auth_manager: Arc<AuthManager>,
@@ -46,6 +47,8 @@ impl AppsRequestProcessor {
         request_id: &ConnectionRequestId,
         params: AppsListParams,
     ) -> Result<Option<AppsListResponse>, JSONRPCErrorError> {
+        let installed_start = Instant::now();
+        let reload = params.force_refetch;
         let thread = if let Some(thread_id) = params.thread_id.as_deref() {
             let (_, loaded_thread) = self.load_thread(thread_id).await?;
             Some(loaded_thread)
@@ -69,26 +72,31 @@ impl AppsRequestProcessor {
             .features
             .apps_enabled_for_auth(auth.as_ref().is_some_and(CodexAuth::uses_codex_backend))
         {
-            return Ok(Some(AppsListResponse {
+            let response = AppsListResponse {
                 data: Vec::new(),
                 next_cursor: None,
-            }));
+            };
+            record_legacy_apps_installed_duration(installed_start, reload);
+            return Ok(Some(response));
         }
 
         if !self
             .workspace_codex_plugins_enabled(&config, auth.as_ref())
             .await
         {
-            return Ok(Some(AppsListResponse {
+            let response = AppsListResponse {
                 data: Vec::new(),
                 next_cursor: None,
-            }));
+            };
+            record_legacy_apps_installed_duration(installed_start, reload);
+            return Ok(Some(response));
         }
 
         let request = request_id.clone();
         let outgoing = Arc::clone(&self.outgoing);
         let environment_manager = self.thread_manager.environment_manager();
         let mcp_manager = self.thread_manager.mcp_manager();
+        let plugins_manager = self.thread_manager.plugins_manager();
         let shutdown_token = self.shutdown_token.child_token();
         tokio::spawn(async move {
             tokio::select! {
@@ -100,6 +108,8 @@ impl AppsRequestProcessor {
                     config,
                     environment_manager,
                     mcp_manager,
+                    plugins_manager,
+                    installed_start,
                 ) => {}
             }
         });
@@ -110,6 +120,7 @@ impl AppsRequestProcessor {
         self.shutdown_token.cancel();
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn apps_list_task(
         outgoing: Arc<OutgoingMessageSender>,
         request_id: ConnectionRequestId,
@@ -117,14 +128,27 @@ impl AppsRequestProcessor {
         config: Config,
         environment_manager: Arc<EnvironmentManager>,
         mcp_manager: Arc<McpManager>,
+        plugins_manager: Arc<PluginsManager>,
+        installed_start: Instant,
     ) {
+        let reload = params.force_refetch;
         let retry_params = params.clone();
         let retry_config = config.clone();
         let retry_environment_manager = Arc::clone(&environment_manager);
         let retry_mcp_manager = Arc::clone(&mcp_manager);
-        let result =
-            Self::apps_list_response(&outgoing, params, config, environment_manager, mcp_manager)
-                .await;
+        let retry_plugins_manager = Arc::clone(&plugins_manager);
+        let result = Self::apps_list_response(
+            &outgoing,
+            params,
+            config,
+            environment_manager,
+            mcp_manager,
+            plugins_manager,
+        )
+        .await;
+        if result.is_ok() {
+            record_legacy_apps_installed_duration(installed_start, reload);
+        }
         let should_retry = result
             .as_ref()
             .is_ok_and(|(_, codex_apps_ready)| !codex_apps_ready);
@@ -141,6 +165,7 @@ impl AppsRequestProcessor {
                 retry_config,
                 retry_environment_manager,
                 retry_mcp_manager,
+                retry_plugins_manager,
             )
             .await
             {
@@ -155,6 +180,7 @@ impl AppsRequestProcessor {
         config: Config,
         environment_manager: Arc<EnvironmentManager>,
         mcp_manager: Arc<McpManager>,
+        plugins_manager: Arc<PluginsManager>,
     ) -> Result<(AppsListResponse, bool), JSONRPCErrorError> {
         let AppsListParams {
             cursor,
@@ -170,9 +196,17 @@ impl AppsRequestProcessor {
             None => 0,
         };
 
+        let loaded_plugins = plugins_manager
+            .plugins_for_config(&config.plugins_config_input())
+            .await;
+        let connector_snapshot =
+            codex_connectors::ConnectorSnapshot::from_plugin_capability_summaries(
+                loaded_plugins.capability_summaries(),
+            );
+        let plugin_apps = connector_snapshot.connector_ids().to_vec();
         let (mut accessible_connectors, mut all_connectors) = tokio::join!(
             connectors::list_cached_accessible_connectors_from_mcp_tools(&config),
-            connectors::list_cached_all_connectors(&config)
+            connectors::list_cached_all_connectors(&config, &plugin_apps)
         );
         let cached_all_connectors = all_connectors.clone();
 
@@ -193,10 +227,15 @@ impl AppsRequestProcessor {
         });
 
         let all_config = config.clone();
+        let all_plugin_apps = plugin_apps.clone();
         tokio::spawn(async move {
-            let result = connectors::list_all_connectors_with_options(&all_config, force_refetch)
-                .await
-                .map_err(|err| format!("failed to list apps: {err}"));
+            let result = connectors::list_all_connectors_with_options(
+                &all_config,
+                force_refetch,
+                &all_plugin_apps,
+            )
+            .await
+            .map_err(|err| format!("failed to list apps: {err}"));
             let _ = tx.send(AppListLoadResult::Directory(result));
         });
 
@@ -337,6 +376,20 @@ impl AppsRequestProcessor {
 }
 
 const APP_LIST_LOAD_TIMEOUT: Duration = Duration::from_secs(90);
+// `app/list` is the legacy request-path baseline for the future `app/installed` endpoint;
+// `path=legacy` keeps it separate from the new snapshot-backed implementation in dashboards.
+const APPS_INSTALLED_DURATION_METRIC: &str = "codex.apps.installed.duration_ms";
+
+fn record_legacy_apps_installed_duration(started_at: Instant, reload: bool) {
+    let reload = if reload { "true" } else { "false" };
+    if let Some(metrics) = codex_otel::global() {
+        let _ = metrics.record_duration(
+            APPS_INSTALLED_DURATION_METRIC,
+            started_at.elapsed(),
+            &[("path", "legacy"), ("reload", reload)],
+        );
+    }
+}
 
 enum AppListLoadResult {
     Accessible(Result<AccessibleConnectorsStatus, String>),
@@ -375,7 +428,11 @@ fn paginate_apps(
 
     let effective_limit = limit.unwrap_or(total as u32).max(1) as usize;
     let end = start.saturating_add(effective_limit).min(total);
-    let data = connectors[start..end].to_vec();
+    let data = connectors[start..end]
+        .iter()
+        .cloned()
+        .map(app_info_to_api)
+        .collect();
     let next_cursor = if end < total {
         Some(end.to_string())
     } else {
@@ -389,6 +446,7 @@ async fn send_app_list_updated_notification(
     outgoing: &Arc<OutgoingMessageSender>,
     data: Vec<AppInfo>,
 ) {
+    let data = data.into_iter().map(app_info_to_api).collect();
     outgoing
         .send_server_notification(ServerNotification::AppListUpdated(
             AppListUpdatedNotification { data },

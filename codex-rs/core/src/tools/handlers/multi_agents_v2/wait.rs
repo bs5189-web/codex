@@ -1,7 +1,7 @@
 use super::*;
+use crate::session::InputQueueActivity;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::create_wait_agent_tool_v2;
-use crate::turn_timing::now_unix_timestamp_ms;
 use codex_tools::ToolSpec;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -65,37 +65,52 @@ impl Handler {
             None => default_timeout_ms,
         };
 
-        let mut mailbox_rx = session.input_queue.subscribe_mailbox().await;
+        let turn_state = session
+            .input_queue
+            .turn_state_for_sub_id(&session.active_turn, &turn.sub_id)
+            .await;
+        let (mut activity_rx, pending_activity) = session
+            .input_queue
+            .subscribe_activity(turn_state.as_deref())
+            .await;
 
         session
-            .send_event(
+            .emit_turn_item_started(
                 &turn,
-                CollabWaitingBeginEvent {
-                    started_at_ms: now_unix_timestamp_ms(),
+                &TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
+                    id: call_id.clone(),
+                    tool: CollabAgentTool::Wait,
+                    status: CollabAgentToolCallStatus::InProgress,
                     sender_thread_id: session.thread_id,
                     receiver_thread_ids: Vec::new(),
                     receiver_agents: Vec::new(),
-                    call_id: call_id.clone(),
-                }
-                .into(),
+                    prompt: None,
+                    model: None,
+                    reasoning_effort: None,
+                    agents_states: Default::default(),
+                }),
             )
             .await;
 
         let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-        let timed_out = !wait_for_mailbox_change(&mut mailbox_rx, deadline).await;
-        let result = WaitAgentResult::from_timed_out(timed_out);
+        let outcome = wait_for_activity(&mut activity_rx, pending_activity, deadline).await;
+        let result = WaitAgentResult::from_outcome(outcome);
 
         session
-            .send_event(
+            .emit_turn_item_completed(
                 &turn,
-                CollabWaitingEndEvent {
+                TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
+                    id: call_id,
+                    tool: CollabAgentTool::Wait,
+                    status: CollabAgentToolCallStatus::Completed,
                     sender_thread_id: session.thread_id,
-                    call_id,
-                    completed_at_ms: now_unix_timestamp_ms(),
-                    agent_statuses: Vec::new(),
-                    statuses: HashMap::new(),
-                }
-                .into(),
+                    receiver_thread_ids: Vec::new(),
+                    receiver_agents: Vec::new(),
+                    prompt: None,
+                    model: None,
+                    reasoning_effort: None,
+                    agents_states: HashMap::new(),
+                }),
             )
             .await;
 
@@ -122,15 +137,15 @@ pub(crate) struct WaitAgentResult {
 }
 
 impl WaitAgentResult {
-    fn from_timed_out(timed_out: bool) -> Self {
-        let message = if timed_out {
-            "Wait timed out."
-        } else {
-            "Wait completed."
+    fn from_outcome(outcome: WaitOutcome) -> Self {
+        let message = match outcome {
+            WaitOutcome::MailboxActivity => "Wait completed.",
+            WaitOutcome::Steered => "Wait interrupted by new input.",
+            WaitOutcome::TimedOut => "Wait timed out.",
         };
         Self {
             message: message.to_string(),
-            timed_out,
+            timed_out: outcome == WaitOutcome::TimedOut,
         }
     }
 }
@@ -153,12 +168,29 @@ impl ToolOutput for WaitAgentResult {
     }
 }
 
-async fn wait_for_mailbox_change(
-    mailbox_rx: &mut tokio::sync::watch::Receiver<()>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WaitOutcome {
+    MailboxActivity,
+    Steered,
+    TimedOut,
+}
+
+async fn wait_for_activity(
+    activity_rx: &mut tokio::sync::watch::Receiver<InputQueueActivity>,
+    pending_activity: Option<InputQueueActivity>,
     deadline: Instant,
-) -> bool {
-    match timeout_at(deadline, mailbox_rx.changed()).await {
-        Ok(Ok(())) => true,
-        Ok(Err(_)) | Err(_) => false,
+) -> WaitOutcome {
+    if let Some(activity) = pending_activity {
+        return match activity {
+            InputQueueActivity::Mailbox => WaitOutcome::MailboxActivity,
+            InputQueueActivity::Steer => WaitOutcome::Steered,
+        };
+    }
+    match timeout_at(deadline, activity_rx.changed()).await {
+        Ok(Ok(())) => match *activity_rx.borrow_and_update() {
+            InputQueueActivity::Mailbox => WaitOutcome::MailboxActivity,
+            InputQueueActivity::Steer => WaitOutcome::Steered,
+        },
+        Ok(Err(_)) | Err(_) => WaitOutcome::TimedOut,
     }
 }

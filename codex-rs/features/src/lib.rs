@@ -17,12 +17,17 @@ use toml::Table;
 mod feature_configs;
 mod legacy;
 pub use feature_configs::CodeModeConfigToml;
+pub use feature_configs::CurrentTimeReminderConfigToml;
+pub use feature_configs::CurrentTimeReminderDeliveryMode;
+pub use feature_configs::CurrentTimeSource;
 pub use feature_configs::MultiAgentV2ConfigToml;
 pub use feature_configs::NetworkProxyConfigToml;
 pub use feature_configs::NetworkProxyDomainPermissionToml;
 pub use feature_configs::NetworkProxyModeToml;
 pub use feature_configs::NetworkProxyUnixSocketPermissionToml;
 use feature_configs::RemovedAppsMcpPathOverrideConfigToml;
+pub use feature_configs::RolloutBudgetConfigToml;
+pub use feature_configs::TokenBudgetConfigToml;
 use legacy::LegacyFeatureToggles;
 pub use legacy::legacy_feature_keys;
 
@@ -87,6 +92,8 @@ pub enum Feature {
     // Experimental
     /// Enable JavaScript code mode backed by the in-process V8 runtime.
     CodeMode,
+    /// Run JavaScript code mode in the standalone host process.
+    CodeModeHost,
     /// Restrict model-visible tools to code mode entrypoints (`exec`, `wait`).
     CodeModeOnly,
     /// Use the single unified PTY-backed exec tool.
@@ -99,7 +106,7 @@ pub enum Feature {
     /// on either `unified_exec` or `shell_zsh_fork` because those features have
     /// separate rollout and enterprise controls.
     UnifiedExecZshFork,
-    /// Reflow transcript scrollback when the terminal is resized.
+    /// Removed compatibility flag. Transcript scrollback reflow on terminal resize is always on.
     TerminalResizeReflow,
     /// Add terminal-specific visualization guidance to TUI developer instructions.
     TerminalVisualizationInstructions,
@@ -121,6 +128,8 @@ pub enum Feature {
     UseLegacyLandlock,
     /// Experimental shell snapshotting.
     ShellSnapshot,
+    /// Allow turns to start while selected executors are still starting.
+    DeferredExecutor,
     /// Enable runtime metrics snapshots via a manual reader.
     RuntimeMetrics,
     /// Enable startup memory extraction and file-backed memory consolidation.
@@ -129,16 +138,18 @@ pub enum Feature {
     LocalThreadStoreCompression,
     /// Enable the Chronicle sidecar for passive screen-context memories.
     Chronicle,
-    /// Append additional AGENTS.md guidance to user instructions.
-    ChildAgentsMd,
     /// Compress request bodies (zstd) when sending streaming requests to codex-backend.
     EnableRequestCompression,
     /// Start the managed network proxy for sandboxed sessions.
     NetworkProxy,
+    /// Respect host system proxy settings for Codex-owned network clients.
+    RespectSystemProxy,
     /// Enable collab tools.
     Collab,
     /// Enable task-path-based multi-agent routing.
     MultiAgentV2,
+    /// Removed compatibility flag retained as a no-op.
+    MultiAgentMode,
     /// Enable CSV-backed agent job tools.
     SpawnCsv,
     /// Enable apps.
@@ -149,7 +160,7 @@ pub enum Feature {
     AppsMcpPathOverride,
     /// Removed compatibility flag retained as a no-op now that tool_search is always enabled.
     ToolSearch,
-    /// Always defer MCP tools behind tool_search instead of exposing small sets directly.
+    /// Removed compatibility flag. MCP tools are always deferred when tool_search is available.
     ToolSearchAlwaysDeferMcpTools,
     /// Expose MCP model-visible namespaces without the legacy `mcp__` prefix.
     NonPrefixedMcpToolNames,
@@ -167,6 +178,10 @@ pub enum Feature {
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
     BrowserUse,
+    /// Allow Browser Use integration to access the full Chrome DevTools Protocol surface.
+    ///
+    /// Requirements-only gate: this should be set from requirements, not user config.
+    BrowserUseFullCdpAccess,
     /// Allow Browser Use integration with external browsers.
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
@@ -175,18 +190,20 @@ pub enum Feature {
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
     ComputerUse,
-    /// Temporary internal-only flag for PS-backed remote plugin catalog development.
+    /// Enable the PS-backed remote plugin catalog.
     RemotePlugin,
     /// Enable remote plugin sharing flows.
     PluginSharing,
     /// Removed compatibility flag retained as a no-op.
     ExternalMigration,
-    /// Allow the model to invoke the built-in image generation tool.
+    /// Enable extension-backed image generation.
     ImageGeneration,
-    /// Replace hosted image generation with the standalone image-generation extension.
-    ImageGenExt,
-    /// Resize all inline data-URL images before recording them in history.
+    /// Removed compatibility flag for always-on centralized image preparation.
     ResizeAllImages,
+    /// Generate Responses API item IDs for client-created history items.
+    ItemIds,
+    /// Request sequential cutoff reasoning summary delivery.
+    ConcurrentReasoningSummaries,
     /// Allow prompting and installing missing MCP dependencies.
     SkillMcpDependencyInstall,
     /// Removed compatibility flag for deleted skill env var dependency prompting.
@@ -201,6 +218,10 @@ pub enum Feature {
     Goals,
     /// Add current context-window metadata to model-visible context.
     TokenBudget,
+    /// Track and report a shared token budget across a session's agent threads.
+    RolloutBudget,
+    /// Add current-time reminders to model-visible context.
+    CurrentTimeReminder,
     /// Route MCP tool approval prompts through the MCP elicitation request path.
     ToolCallMcpElicitation,
     /// Prompt Codex Apps connector auth failures through MCP URL elicitations.
@@ -217,6 +238,8 @@ pub enum Feature {
     PreventIdleSleep,
     /// Enable remote compaction v2 over the normal Responses API.
     RemoteCompactionV2,
+    /// Use Agent Identity for ChatGPT-authenticated sessions.
+    UseAgentIdentity,
     /// Enable workspace dependency support.
     WorkspaceDependencies,
 
@@ -449,16 +472,19 @@ impl Features {
                 "apply_patch_freeform" => {
                     continue;
                 }
-                "tool_search" | "apps_mcp_path_override" => {
+                "tool_search" | "tool_search_always_defer_mcp_tools" | "apps_mcp_path_override" => {
                     continue;
                 }
-                "image_detail_original" => {
+                "image_detail_original" | "resize_all_images" => {
                     continue;
                 }
                 "plugin_hooks" => {
                     continue;
                 }
                 "skill_env_var_dependency_prompt" => {
+                    continue;
+                }
+                "terminal_resize_reflow" => {
                     continue;
                 }
                 "use_legacy_landlock" => {
@@ -468,6 +494,10 @@ impl Features {
                     );
                 }
                 _ => {}
+            }
+            if k == "imagegenext" && m.contains_key(Feature::ImageGeneration.key()) {
+                self.record_legacy_usage(k, Feature::ImageGeneration);
+                continue;
             }
             match feature_for_key(k) {
                 Some(feat) => {
@@ -579,7 +609,7 @@ fn legacy_usage_notice(alias: &str, feature: Feature) -> (String, Option<String>
 }
 
 fn web_search_details() -> &'static str {
-    "Set `web_search` to `\"live\"`, `\"cached\"`, or `\"disabled\"` at the top level (or under a profile) in config.toml if you want to override it."
+    "Set `web_search` to `\"live\"`, `\"indexed\"`, `\"cached\"`, or `\"disabled\"` at the top level (or under a profile) in config.toml if you want to override it."
 }
 
 /// Keys accepted in `[features]` tables.
@@ -611,6 +641,12 @@ pub struct FeaturesToml {
     pub code_mode: Option<FeatureToml<CodeModeConfigToml>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_agent_v2: Option<FeatureToml<MultiAgentV2ConfigToml>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<FeatureToml<TokenBudgetConfigToml>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout_budget: Option<FeatureToml<RolloutBudgetConfigToml>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_time_reminder: Option<FeatureToml<CurrentTimeReminderConfigToml>>,
     #[serde(default, rename = "apps_mcp_path_override", skip_serializing)]
     #[schemars(skip)]
     removed_apps_mcp_path_override: Option<FeatureToml<RemovedAppsMcpPathOverrideConfigToml>>,
@@ -643,6 +679,19 @@ impl FeaturesToml {
         if let Some(enabled) = self.multi_agent_v2.as_ref().and_then(FeatureToml::enabled) {
             entries.insert(Feature::MultiAgentV2.key().to_string(), enabled);
         }
+        if let Some(enabled) = self.token_budget.as_ref().and_then(FeatureToml::enabled) {
+            entries.insert(Feature::TokenBudget.key().to_string(), enabled);
+        }
+        if let Some(enabled) = self.rollout_budget.as_ref().and_then(FeatureToml::enabled) {
+            entries.insert(Feature::RolloutBudget.key().to_string(), enabled);
+        }
+        if let Some(enabled) = self
+            .current_time_reminder
+            .as_ref()
+            .and_then(FeatureToml::enabled)
+        {
+            entries.insert(Feature::CurrentTimeReminder.key().to_string(), enabled);
+        }
         if let Some(enabled) = self.network_proxy.as_ref().and_then(FeatureToml::enabled) {
             entries.insert(Feature::NetworkProxy.key().to_string(), enabled);
         }
@@ -654,6 +703,9 @@ impl FeaturesToml {
         let Self {
             code_mode,
             multi_agent_v2,
+            token_budget,
+            rollout_budget,
+            current_time_reminder,
             removed_apps_mcp_path_override: _,
             network_proxy,
             entries,
@@ -667,6 +719,12 @@ impl FeaturesToml {
                 materialize_resolved_feature_enabled(code_mode, enabled);
             } else if spec.id == Feature::MultiAgentV2 {
                 materialize_resolved_feature_enabled(multi_agent_v2, enabled);
+            } else if spec.id == Feature::TokenBudget {
+                materialize_resolved_feature_enabled(token_budget, enabled);
+            } else if spec.id == Feature::RolloutBudget {
+                materialize_resolved_feature_enabled(rollout_budget, enabled);
+            } else if spec.id == Feature::CurrentTimeReminder {
+                materialize_resolved_feature_enabled(current_time_reminder, enabled);
             } else if spec.id == Feature::NetworkProxy {
                 materialize_resolved_feature_enabled(network_proxy, enabled);
             } else {
@@ -781,6 +839,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::DeferredExecutor,
+        key: "deferred_executor",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::JsRepl,
         key: "js_repl",
         stage: Stage::Removed,
@@ -791,6 +855,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "code_mode",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::CodeModeHost,
+        key: "code_mode_host",
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::CodeModeOnly,
@@ -807,11 +877,7 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::TerminalResizeReflow,
         key: "terminal_resize_reflow",
-        stage: Stage::Experimental {
-            name: "Terminal resize reflow",
-            menu_description: "Rebuild Codex-owned transcript scrollback when the terminal width changes.",
-            announcement: "",
-        },
+        stage: Stage::Removed,
         default_enabled: true,
     },
     FeatureSpec {
@@ -875,12 +941,6 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::Chronicle,
         key: "chronicle",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
-    },
-    FeatureSpec {
-        id: Feature::ChildAgentsMd,
-        key: "child_agents_md",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -967,6 +1027,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
+        id: Feature::RespectSystemProxy,
+        key: "respect_system_proxy",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::Collab,
         key: "multi_agent",
         stage: Stage::Stable,
@@ -976,6 +1042,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::MultiAgentV2,
         key: "multi_agent_v2",
         stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::MultiAgentMode,
+        key: "multi_agent_mode",
+        stage: Stage::Removed,
         default_enabled: false,
     },
     FeatureSpec {
@@ -1011,8 +1083,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::ToolSearchAlwaysDeferMcpTools,
         key: "tool_search_always_defer_mcp_tools",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        stage: Stage::Removed,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::NonPrefixedMcpToolNames,
@@ -1057,6 +1129,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::BrowserUseFullCdpAccess,
+        key: "browser_use_full_cdp_access",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
         id: Feature::BrowserUseExternal,
         key: "browser_use_external",
         stage: Stage::Stable,
@@ -1071,8 +1149,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::RemotePlugin,
         key: "remote_plugin",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::PluginSharing,
@@ -1093,14 +1171,20 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
-        id: Feature::ImageGenExt,
-        key: "imagegenext",
+        id: Feature::ResizeAllImages,
+        key: "resize_all_images",
+        stage: Stage::Removed,
+        default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::ItemIds,
+        key: "item_ids",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
     FeatureSpec {
-        id: Feature::ResizeAllImages,
-        key: "resize_all_images",
+        id: Feature::ConcurrentReasoningSummaries,
+        key: "concurrent_reasoning_summaries",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1159,6 +1243,18 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
+        id: Feature::RolloutBudget,
+        key: "rollout_budget",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::CurrentTimeReminder,
+        key: "current_time_reminder",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::CollaborationModes,
         key: "collaboration_modes",
         stage: Stage::Removed,
@@ -1173,8 +1269,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::AuthElicitation,
         key: "auth_elicitation",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::Personality,
@@ -1259,6 +1355,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "remote_compaction_v2",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::UseAgentIdentity,
+        key: "use_agent_identity",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::WorkspaceDependencies,

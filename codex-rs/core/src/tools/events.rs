@@ -3,17 +3,16 @@ use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::sandboxing::ToolError;
-use crate::turn_timing::now_unix_timestamp_ms;
 use codex_apply_patch::AppliedPatchDelta;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::SandboxErr;
 use codex_protocol::exec_output::ExecToolCallOutput;
+use codex_protocol::items::CommandExecutionItem;
+use codex_protocol::items::CommandExecutionStatus;
 use codex_protocol::items::FileChangeItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::ExecCommandBeginEvent;
-use codex_protocol::protocol::ExecCommandEndEvent;
 use codex_protocol::protocol::ExecCommandSource;
 use codex_protocol::protocol::ExecCommandStatus;
 use codex_protocol::protocol::FileChange;
@@ -21,6 +20,7 @@ use codex_protocol::protocol::PatchApplyStatus;
 use codex_protocol::protocol::TurnDiffEvent;
 use codex_shell_command::parse_command::parse_command;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -95,25 +95,30 @@ fn tracker_update_for_known_delta<'a>(
 pub(crate) async fn emit_exec_command_begin(
     ctx: ToolEventCtx<'_>,
     command: &[String],
-    cwd: &AbsolutePathBuf,
+    cwd: &PathUri,
     parsed_cmd: &[ParsedCommand],
     source: ExecCommandSource,
     interaction_input: Option<String>,
     process_id: Option<&str>,
 ) {
     ctx.session
-        .send_event(
+        .emit_turn_item_started(
             ctx.turn,
-            EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
-                call_id: ctx.call_id.to_string(),
+            &TurnItem::CommandExecution(CommandExecutionItem {
+                id: ctx.call_id.to_string(),
                 process_id: process_id.map(str::to_owned),
-                turn_id: ctx.turn.sub_id.clone(),
-                started_at_ms: now_unix_timestamp_ms(),
                 command: command.to_vec(),
                 cwd: cwd.clone(),
                 parsed_cmd: parsed_cmd.to_vec(),
                 source,
                 interaction_input,
+                status: CommandExecutionStatus::InProgress,
+                stdout: None,
+                stderr: None,
+                aggregated_output: None,
+                exit_code: None,
+                duration: None,
+                formatted_output: None,
             }),
         )
         .await;
@@ -122,7 +127,7 @@ pub(crate) async fn emit_exec_command_begin(
 pub(crate) enum ToolEmitter {
     Shell {
         command: Vec<String>,
-        cwd: AbsolutePathBuf,
+        cwd: PathUri,
         source: ExecCommandSource,
         parsed_cmd: Vec<ParsedCommand>,
     },
@@ -133,7 +138,7 @@ pub(crate) enum ToolEmitter {
     },
     UnifiedExec {
         command: Vec<String>,
-        cwd: AbsolutePathBuf,
+        cwd: PathUri,
         source: ExecCommandSource,
         parsed_cmd: Vec<ParsedCommand>,
         process_id: Option<String>,
@@ -145,7 +150,7 @@ impl ToolEmitter {
         let parsed_cmd = parse_command(&command);
         Self::Shell {
             command,
-            cwd,
+            cwd: PathUri::from_abs_path(&cwd),
             source,
             parsed_cmd,
         }
@@ -165,7 +170,7 @@ impl ToolEmitter {
 
     pub fn unified_exec(
         command: &[String],
-        cwd: AbsolutePathBuf,
+        cwd: PathUri,
         source: ExecCommandSource,
         process_id: Option<String>,
     ) -> Self {
@@ -346,7 +351,7 @@ impl ToolEmitter {
         output: &ExecToolCallOutput,
         ctx: ToolEventCtx<'_>,
     ) -> String {
-        super::format_exec_output_for_model(output, ctx.turn.truncation_policy)
+        super::format_exec_output_for_model(output, ctx.turn.model_info.truncation_policy.into())
     }
 
     pub async fn finish(
@@ -432,7 +437,7 @@ impl ToolEmitter {
 
 struct ExecCommandInput<'a> {
     command: &'a [String],
-    cwd: &'a AbsolutePathBuf,
+    cwd: &'a PathUri,
     parsed_cmd: &'a [ParsedCommand],
     source: ExecCommandSource,
     interaction_input: Option<&'a str>,
@@ -442,7 +447,7 @@ struct ExecCommandInput<'a> {
 impl<'a> ExecCommandInput<'a> {
     fn new(
         command: &'a [String],
-        cwd: &'a AbsolutePathBuf,
+        cwd: &'a PathUri,
         parsed_cmd: &'a [ParsedCommand],
         source: ExecCommandSource,
         interaction_input: Option<&'a str>,
@@ -495,7 +500,10 @@ async fn emit_exec_stage(
                 aggregated_output: output.aggregated_output.text.clone(),
                 exit_code: output.exit_code,
                 duration: output.duration,
-                formatted_output: format_exec_output_str(&output, ctx.turn.truncation_policy),
+                formatted_output: format_exec_output_str(
+                    &output,
+                    ctx.turn.model_info.truncation_policy.into(),
+                ),
                 status: if output.exit_code == 0 {
                     ExecCommandStatus::Completed
                 } else {
@@ -539,25 +547,23 @@ async fn emit_exec_end(
     exec_result: ExecCommandResult,
 ) {
     ctx.session
-        .send_event(
+        .emit_turn_item_completed(
             ctx.turn,
-            EventMsg::ExecCommandEnd(ExecCommandEndEvent {
-                call_id: ctx.call_id.to_string(),
+            TurnItem::CommandExecution(CommandExecutionItem {
+                id: ctx.call_id.to_string(),
                 process_id: exec_input.process_id.map(str::to_owned),
-                turn_id: ctx.turn.sub_id.clone(),
-                completed_at_ms: now_unix_timestamp_ms(),
                 command: exec_input.command.to_vec(),
                 cwd: exec_input.cwd.clone(),
                 parsed_cmd: exec_input.parsed_cmd.to_vec(),
                 source: exec_input.source,
                 interaction_input: exec_input.interaction_input.map(str::to_owned),
-                stdout: exec_result.stdout,
-                stderr: exec_result.stderr,
-                aggregated_output: exec_result.aggregated_output,
-                exit_code: exec_result.exit_code,
-                duration: exec_result.duration,
-                formatted_output: exec_result.formatted_output,
-                status: exec_result.status,
+                status: exec_result.status.into(),
+                stdout: Some(exec_result.stdout),
+                stderr: Some(exec_result.stderr),
+                aggregated_output: Some(exec_result.aggregated_output),
+                exit_code: Some(exec_result.exit_code),
+                duration: Some(exec_result.duration),
+                formatted_output: Some(exec_result.formatted_output),
             }),
         )
         .await;
@@ -628,7 +634,7 @@ mod tests {
     use codex_protocol::exec_output::ExecToolCallOutput;
     use codex_protocol::items::TurnItem;
     use codex_protocol::protocol::PatchApplyStatus;
-    use codex_utils_absolute_path::AbsolutePathBuf;
+    use codex_utils_path_uri::PathUri;
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::sync::Mutex;
@@ -641,7 +647,7 @@ mod tests {
             make_session_and_context_with_dynamic_tools_and_rx(Vec::new()).await;
         let tracker = Arc::new(Mutex::new(TurnDiffTracker::new()));
         let dir = tempdir().expect("tempdir");
-        let cwd = AbsolutePathBuf::from_absolute_path(dir.path()).expect("absolute cwd");
+        let cwd = PathUri::from_host_native_path(dir.path()).expect("absolute cwd");
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let delta = codex_apply_patch::apply_patch(
@@ -725,7 +731,7 @@ mod tests {
             make_session_and_context_with_dynamic_tools_and_rx(Vec::new()).await;
         let tracker = Arc::new(Mutex::new(TurnDiffTracker::new()));
         let dir = tempdir().expect("tempdir");
-        let cwd = AbsolutePathBuf::from_absolute_path(dir.path()).expect("absolute cwd");
+        let cwd = PathUri::from_host_native_path(dir.path()).expect("absolute cwd");
 
         for patch in [
             "*** Begin Patch\n*** Add File: a.txt\n+one\n*** End Patch",
@@ -778,7 +784,7 @@ mod tests {
             make_session_and_context_with_dynamic_tools_and_rx(Vec::new()).await;
         let tracker = Arc::new(Mutex::new(TurnDiffTracker::new()));
         let dir = tempdir().expect("tempdir");
-        let cwd = AbsolutePathBuf::from_absolute_path(dir.path()).expect("absolute cwd");
+        let cwd = PathUri::from_host_native_path(dir.path()).expect("absolute cwd");
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let delta = codex_apply_patch::apply_patch(

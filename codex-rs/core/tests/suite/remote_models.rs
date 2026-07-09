@@ -1,5 +1,4 @@
 #![cfg(not(target_os = "windows"))]
-#![allow(clippy::expect_used)]
 use anyhow::Result;
 use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
@@ -104,7 +103,12 @@ async fn remote_models_get_model_info_uses_longest_matching_prefix() -> Result<(
         provider,
     );
 
-    manager.list_models(RefreshStrategy::OnlineIfUncached).await;
+    manager
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        )
+        .await;
 
     let model_info = manager
         .get_model_info("gpt-5.3-codex-test", &config.to_models_manager_config())
@@ -330,7 +334,7 @@ async fn remote_models_long_model_slug_is_sent_with_custom_reasoning() -> Result
         /*priority*/ 1_000,
         TruncationPolicyConfig::bytes(/*limit*/ 10_000),
     );
-    let custom_reasoning_effort = ReasoningEffort::Custom("max".to_string());
+    let custom_reasoning_effort = ReasoningEffort::Custom("future".to_string());
     remote_model.default_reasoning_level = Some(custom_reasoning_effort.clone());
     remote_model.supported_reasoning_levels = vec![
         ReasoningEffortPreset {
@@ -392,7 +396,7 @@ async fn remote_models_long_model_slug_is_sent_with_custom_reasoning() -> Result
         .and_then(|reasoning| reasoning.get("summary"))
         .and_then(|value| value.as_str());
     assert_eq!(body["model"].as_str(), Some(requested_model));
-    assert_eq!(reasoning_effort, Some("max"));
+    assert_eq!(reasoning_effort, Some("future"));
     assert_eq!(reasoning_summary, Some("detailed"));
 
     Ok(())
@@ -486,6 +490,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
         upgrade: None,
         base_instructions: "base instructions".to_string(),
         model_messages: None,
+        include_skills_usage_instructions: false,
         supports_reasoning_summaries: false,
         default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: false,
@@ -739,6 +744,7 @@ async fn remote_models_apply_remote_base_instructions() -> Result<()> {
         upgrade: None,
         base_instructions: remote_base.to_string(),
         model_messages: None,
+        include_skills_usage_instructions: false,
         supports_reasoning_summaries: false,
         default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: false,
@@ -863,7 +869,12 @@ async fn remote_models_do_not_append_removed_builtin_presets() -> Result<()> {
         provider,
     );
 
-    let available = manager.list_models(RefreshStrategy::OnlineIfUncached).await;
+    let available = manager
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        )
+        .await;
     let remote = available
         .iter()
         .find(|model| model.model == "remote-alpha")
@@ -924,7 +935,12 @@ async fn remote_models_merge_adds_new_high_priority_first() -> Result<()> {
         provider,
     );
 
-    let available = manager.list_models(RefreshStrategy::OnlineIfUncached).await;
+    let available = manager
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        )
+        .await;
     assert_eq!(
         available.first().map(|model| model.model.as_str()),
         Some("remote-top")
@@ -971,7 +987,12 @@ async fn remote_models_merge_replaces_overlapping_model() -> Result<()> {
         provider,
     );
 
-    let available = manager.list_models(RefreshStrategy::OnlineIfUncached).await;
+    let available = manager
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        )
+        .await;
     let overridden = available
         .iter()
         .find(|model| model.model == slug)
@@ -1015,7 +1036,12 @@ async fn remote_models_merge_preserves_bundled_models_on_empty_response() -> Res
         provider,
     );
 
-    let available = manager.list_models(RefreshStrategy::OnlineIfUncached).await;
+    let available = manager
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        )
+        .await;
     let bundled_slug = bundled_model_slug();
     assert!(
         available.iter().any(|model| model.model == bundled_slug),
@@ -1060,7 +1086,12 @@ async fn remote_models_request_times_out_after_5s() -> Result<()> {
     let start = Instant::now();
     let model = timeout(
         Duration::from_secs(7),
-        manager.get_default_model(&None, RefreshStrategy::OnlineIfUncached),
+        manager.get_default_model(
+            &None,
+            /*allow_provider_model_fallback*/ false,
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        ),
     )
     .await;
     let elapsed = start.elapsed();
@@ -1128,11 +1159,21 @@ async fn remote_models_hide_picker_only_models() -> Result<()> {
     );
 
     let selected = manager
-        .get_default_model(&None, RefreshStrategy::OnlineIfUncached)
+        .get_default_model(
+            &None,
+            /*allow_provider_model_fallback*/ false,
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        )
         .await;
     assert_eq!(selected, bundled_default_model_slug());
 
-    let available = manager.list_models(RefreshStrategy::OnlineIfUncached).await;
+    let available = manager
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        )
+        .await;
     let hidden = available
         .iter()
         .find(|model| model.model == "codex-auto-balanced")
@@ -1153,7 +1194,12 @@ async fn wait_for_model_available(manager: &SharedModelsManager, slug: &str) -> 
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         if let Some(model) = {
-            let guard = manager.list_models(RefreshStrategy::OnlineIfUncached).await;
+            let guard = manager
+                .list_models(
+                    RefreshStrategy::OnlineIfUncached,
+                    codex_core::test_support::default_http_client_factory(),
+                )
+                .await;
             guard.iter().find(|model| model.model == slug).cloned()
         } {
             return model;
@@ -1166,8 +1212,7 @@ async fn wait_for_model_available(manager: &SharedModelsManager, slug: &str) -> 
 }
 
 fn bundled_model_slug() -> String {
-    let response = bundled_models_response()
-        .unwrap_or_else(|err| panic!("bundled models.json should parse: {err}"));
+    let response = bundled_models_response().expect("bundled models.json should parse");
     response
         .models
         .first()
@@ -1226,6 +1271,7 @@ fn test_remote_model_with_policy(
         upgrade: None,
         base_instructions: "base instructions".to_string(),
         model_messages: None,
+        include_skills_usage_instructions: false,
         supports_reasoning_summaries: false,
         default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: false,
