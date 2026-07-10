@@ -39,6 +39,7 @@ use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_retry::ResponsesStreamRequest;
 use crate::responses_retry::handle_retryable_response_stream_error;
+use crate::responses_retry::should_fallback_to_chat;
 use crate::session::PreviousTurnSettings;
 use crate::session::TurnInput;
 use crate::session::session::Session;
@@ -1186,6 +1187,25 @@ async fn run_sampling_request(
 
         if original_input.is_none() {
             original_input = Some(prompt.input);
+        }
+
+        // Detect errors that warrant an immediate fallback from the Responses
+        // API to the Chat Completions API: the gateway rejected Responses API
+        // access for this model (code 400005). Switch at most once; if already
+        // on Chat, fall through to the normal retry / error path below.
+        if should_fallback_to_chat(&err) && client_session.try_switch_to_chat_api() {
+            sess.send_event(
+                &turn_context,
+                EventMsg::Warning(WarningEvent {
+                    message: format!(
+                        "Responses API unavailable, falling back to Chat Completions API. {err:#}"
+                    ),
+                }),
+            )
+            .await;
+            retries = 0;
+            turn_context.turn_timing_state.record_sampling_retry();
+            continue;
         }
 
         if !err.is_retryable() {

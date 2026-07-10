@@ -285,6 +285,12 @@ pub struct ModelClientSession {
     /// keep sending it unchanged between turn requests (e.g., for retries, incremental
     /// appends, or continuation requests), and must not send it between different turns.
     turn_state: Arc<OnceLock<String>>,
+    /// When set, overrides the provider's `wire_api` selection so subsequent `stream`
+    /// calls use the Chat Completions API instead of the Responses API.
+    ///
+    /// Activated by [`ModelClientSession::try_switch_to_chat_api`] as a fallback when
+    /// the gateway rejects Responses API access for the requested model.
+    wire_api_override: Option<WireApi>,
 }
 
 #[derive(Debug, Clone)]
@@ -483,6 +489,7 @@ impl ModelClient {
             client: self.clone(),
             websocket_session: self.take_cached_websocket_session(),
             turn_state: Arc::new(OnceLock::new()),
+            wire_api_override: None,
         }
     }
 
@@ -1913,12 +1920,13 @@ impl ModelClientSession {
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
-        let wire_api = self
-            .client
-            .state
-            .provider
-            .info()
-            .wire_api_for_model(&model_info.slug);
+        let wire_api = self.wire_api_override.unwrap_or_else(|| {
+            self.client
+                .state
+                .provider
+                .info()
+                .wire_api_for_model(&model_info.slug)
+        });
         match wire_api {
             WireApi::Responses => {
                 if self.client.responses_websocket_enabled() {
@@ -1989,6 +1997,25 @@ impl ModelClientSession {
             .force_http_fallback(session_telemetry, model_info);
         self.websocket_session = WebsocketSession::default();
         activated
+    }
+
+    /// Switches this session to use the Chat Completions API for all subsequent
+    /// requests, as a fallback when the Responses API is unavailable.
+    ///
+    /// Triggers:
+    /// - The gateway rejected Responses API access for the model (e.g. code `400005`).
+    ///
+    /// Returns `true` if this call activated the switch, or `false` if the session
+    /// was already using the Chat Completions API.
+    pub(crate) fn try_switch_to_chat_api(&mut self) -> bool {
+        if matches!(self.wire_api_override, Some(WireApi::Chat)) {
+            return false;
+        }
+        self.wire_api_override = Some(WireApi::Chat);
+        // WebSockets are Responses-only; clear any pending session so the next
+        // request goes through the HTTP Chat Completions transport.
+        self.websocket_session = WebsocketSession::default();
+        true
     }
 }
 
