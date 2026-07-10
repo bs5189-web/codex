@@ -233,7 +233,7 @@ async fn write_models_cache_for_tests(
 ) {
     manager
         .cache_manager
-        .persist_cache_for_test(
+        .persist_cache(
             models,
             /*etag*/ None,
             crate::client_version_to_whole(),
@@ -721,8 +721,12 @@ async fn refresh_available_models_uses_cache_when_fresh() {
 }
 
 #[tokio::test]
-async fn refresh_available_models_does_not_write_models_cache() {
-    let remote_models = vec![remote_model("uncached", "Uncached", /*priority*/ 5)];
+async fn refresh_available_models_writes_models_cache() {
+    let remote_models = vec![remote_model(
+        "cached-from-fetch",
+        "Cached",
+        /*priority*/ 5,
+    )];
     let codex_home = tempdir().expect("temp dir");
     let endpoint = TestModelsEndpoint::new(vec![remote_models.clone()]);
     let manager = openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint.clone());
@@ -737,9 +741,23 @@ async fn refresh_available_models_does_not_write_models_cache() {
 
     assert_models_contain(&manager.get_remote_models().await, &remote_models);
     assert_eq!(endpoint.fetch_count(), 1, "expected a single model fetch");
-    assert!(
-        !codex_home.path().join(MODEL_CACHE_FILE).exists(),
-        "remote refresh should not write models_cache.json"
+
+    let cached_endpoint = TestModelsEndpoint::new(Vec::new());
+    let cached_manager =
+        openai_manager_for_tests(codex_home.path().to_path_buf(), cached_endpoint.clone());
+    cached_manager
+        .refresh_available_models(
+            RefreshStrategy::OnlineIfUncached,
+            &DEFAULT_HTTP_CLIENT_FACTORY,
+        )
+        .await
+        .expect("cached refresh succeeds");
+
+    assert_models_contain(&cached_manager.get_remote_models().await, &remote_models);
+    assert_eq!(
+        cached_endpoint.fetch_count(),
+        0,
+        "fresh cache should avoid a model fetch"
     );
 }
 
@@ -827,7 +845,7 @@ async fn refresh_available_models_refetches_when_version_mismatch() {
     let client_version = crate::client_version_to_whole();
     manager
         .cache_manager
-        .persist_cache_for_test(
+        .persist_cache(
             initial_models,
             /*etag*/ None,
             format!("{client_version}-mismatch"),

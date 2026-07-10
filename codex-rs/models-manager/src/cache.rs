@@ -73,9 +73,8 @@ impl ModelsCacheManager {
         Some(cache)
     }
 
-    #[cfg(test)]
     /// Persist the cache to disk, creating parent directories as needed.
-    pub(crate) async fn persist_cache_for_test(
+    pub(crate) async fn persist_cache(
         &self,
         models: Vec<ModelInfo>,
         etag: Option<String>,
@@ -105,7 +104,6 @@ impl ModelsCacheManager {
         }
     }
 
-    #[cfg(test)]
     async fn save_internal(&self, cache: &ModelsCache) -> io::Result<()> {
         if let Some(parent) = self.cache_path.parent() {
             fs::create_dir_all(parent).await?;

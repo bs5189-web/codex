@@ -15,7 +15,7 @@ use owo_colors::OwoColorize;
 #[command(name = "codex-state-logs")]
 #[command(about = "Tail Codex logs from the dedicated logs SQLite DB with simple filters")]
 struct Args {
-    /// Path to CODEX_HOME. Defaults to $CODEX_HOME or ~/.codex.
+    /// Path to CODEX_HOME. Defaults to $CODEX_HOME or ~/.ruizhi.
     #[arg(long, env = "CODEX_HOME")]
     codex_home: Option<PathBuf>,
 
@@ -141,9 +141,9 @@ fn resolve_db_path(args: &Args) -> anyhow::Result<PathBuf> {
 
 fn default_codex_home() -> PathBuf {
     if let Some(home) = home_dir() {
-        return home.join(".codex");
+        return home.join(".ruizhi");
     }
-    PathBuf::from(".codex")
+    PathBuf::from(".ruizhi")
 }
 
 fn build_filter(args: &Args) -> anyhow::Result<LogFilter> {

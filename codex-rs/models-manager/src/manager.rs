@@ -384,8 +384,22 @@ impl OpenAiModelsManager {
             .endpoint_client
             .list_models(&client_version, http_client_factory.clone())
             .await?;
+        let provider_cache_key = self.endpoint_client.provider_cache_key();
         self.apply_remote_models(models.clone()).await;
         *self.etag.write().await = etag.clone();
+        if let Err(err) = self
+            .cache_manager
+            .persist_cache(
+                models,
+                etag,
+                client_version,
+                provider_cache_key,
+                chrono::Utc::now(),
+            )
+            .await
+        {
+            error!("failed to persist models cache: {err}");
+        }
         Ok(())
     }
 
