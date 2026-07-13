@@ -622,8 +622,8 @@ pub(crate) struct ChatWidget {
     interrupts: InterruptManager,
     // Accumulates the current reasoning block text to extract a header
     reasoning_buffer: String,
-    // Accumulates full reasoning content for transcript-only recording
-    full_reasoning_buffer: String,
+    // Preserves reasoning-summary part boundaries for transcript-only recording.
+    reasoning_summary_parts: Vec<String>,
     status_state: StatusState,
     review: ReviewState,
     // Active hook runs render in a dedicated live cell so they can run alongside tools.
@@ -2013,8 +2013,8 @@ fn has_websocket_timing_metrics(summary: RuntimeMetricsSummary) -> bool {
         || summary.responses_api_inference_time_ms > 0
         || summary.responses_api_engine_iapi_ttft_ms > 0
         || summary.responses_api_engine_service_ttft_ms > 0
-        || summary.responses_api_engine_iapi_tbt_ms > 0
-        || summary.responses_api_engine_service_tbt_ms > 0
+        || summary.responses_api_engine_iapi_tbt_ms > 0.0
+        || summary.responses_api_engine_service_tbt_ms > 0.0
 }
 
 impl Drop for ChatWidget {

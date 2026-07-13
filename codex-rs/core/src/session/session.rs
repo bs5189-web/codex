@@ -672,6 +672,7 @@ impl Session {
         let mcp_manager_for_mcp = Arc::clone(&mcp_manager);
         let mcp_thread_init_for_startup = &mcp_thread_init;
         let thread_extension_data_for_mcp = &thread_extension_data;
+        let mcp_originator = session_configuration.originator.clone();
         let mcp_runtime_cwd = session_configuration
             .environment_selections()
             .first()
@@ -688,6 +689,7 @@ impl Session {
                     &config_for_mcp,
                     mcp_thread_init_for_startup,
                     thread_extension_data_for_mcp,
+                    &mcp_originator,
                     /*available_environment_ids*/ &[],
                 )
                 .await;
@@ -905,10 +907,7 @@ impl Session {
             turn_environments.update_selections(session_configuration.environment_selections());
             let resolved_environments = turn_environments.snapshot().await;
             let agents_md_manager = Arc::new(AgentsMdManager::new(user_instructions));
-            agents_md_manager
-                .refresh(config.as_ref(), &resolved_environments)
-                .await;
-            let plugin_skill_errors = warm_plugins_and_skills_for_session_init(
+            let plugin_skill_warmup = warm_plugins_and_skills_for_session_init(
                 Arc::clone(&config),
                 Arc::clone(&plugins_manager),
                 Arc::clone(&skills_service),
@@ -917,8 +916,11 @@ impl Session {
             .instrument(info_span!(
                 "session_init.plugin_skill_warmup",
                 otel.name = "session_init.plugin_skill_warmup",
-            ))
-            .await;
+            ));
+            let ((), plugin_skill_errors) = tokio::join!(
+                agents_md_manager.refresh(config.as_ref(), &resolved_environments),
+                plugin_skill_warmup,
+            );
             for err in &plugin_skill_errors {
                 error!(
                     "failed to load skill {}: {}",
@@ -1219,7 +1221,7 @@ impl Session {
                 mcp_runtime_context.clone(),
                 config.codex_home.to_path_buf(),
                 sess.services.mcp_manager.codex_apps_tools_cache(),
-                codex_apps_tools_cache_key(auth),
+                connector_runtime_context_key(auth),
                 config.prefix_mcp_tool_names(),
                 mcp_projection
                     .config

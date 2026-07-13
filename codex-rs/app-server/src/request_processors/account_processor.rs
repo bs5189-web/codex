@@ -215,7 +215,7 @@ impl AccountRequestProcessor {
                     .maybe_start_remote_plugin_caches_refresh(
                         &config.plugins_config_input(),
                         auth,
-                        Some(Arc::new(move || {
+                        Some(Arc::new(move |_change| {
                             Self::spawn_effective_plugins_changed_task(
                                 Arc::clone(&refresh_thread_manager),
                                 refresh_config_manager.clone(),
@@ -292,6 +292,9 @@ impl AccountRequestProcessor {
                     chatgpt_plan_type,
                 )
                 .await;
+            }
+            LoginAccountParams::AmazonBedrock { .. } => {
+                return Err(invalid_request("Amazon Bedrock login is not implemented"));
             }
         }
         Ok(())

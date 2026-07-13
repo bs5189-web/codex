@@ -215,7 +215,7 @@ Example with notification opt-out:
 - `marketplace/upgrade` — upgrade all configured Git plugin marketplaces, or one named marketplace when `marketplaceName` is provided. Returns selected marketplace names, upgraded roots, and per-marketplace errors.
 - `plugin/list` — list discovered plugin marketplaces and plugin state, including effective marketplace install/auth policy metadata, nullable remote install-policy provenance in `installPolicySource` (`WORKSPACE_SETTING` or `IMPLICIT_CANONICAL_APP`), the remote marketplace `version` and locally materialized `localVersion` when available, plugin `availability` (`AVAILABLE` by default or `DISABLED_BY_ADMIN` for remote plugins blocked upstream), fail-open `marketplaceLoadErrors` entries for marketplace files that could not be parsed or loaded, and best-effort `featuredPluginIds` for the official curated marketplace. Clients can explicitly request the remote `workspace-directory`, `shared-with-me`, or `created-by-me-remote` marketplace kinds. `interface.category` uses the marketplace category when present; otherwise it falls back to the plugin manifest category (**under development; do not call from production clients yet**).
 - `plugin/installed` — list installed plugin rows plus any explicitly requested local install-suggestion plugin names, without fetching the broader remote catalog. Remote rows include nullable `installPolicySource`; local rows return `null`. Mention surfaces can use this narrower view when they need plugin mention payloads rather than plugin-page discovery data (**under development; do not call from production clients yet**).
-- `plugin/read` — read one plugin by `marketplacePath` plus `pluginName`, returning marketplace info, a list-style `summary`, manifest descriptions/interface metadata, and bundled skills/hooks/apps/MCP server names. Remote plugin details expose the canonical `shareUrl` supplied by the remote catalog when available; it is `null` for local plugins or when the catalog omits it. This field is separate from `summary.shareContext`, which continues to describe user and workspace sharing state. Returned plugin skills include their current `enabled` state after local config filtering; bundled hooks are returned as lightweight declaration summaries keyed for correlation with `hooks/list`. Use `plugin/install`'s `appsNeedingAuth` to drive post-install authentication and `app/list`'s `isAccessible` to determine current connector accessibility (**under development; do not call from production clients yet**).
+- `plugin/read` — read one plugin by `marketplacePath` plus `pluginName`, returning marketplace info, a list-style `summary`, manifest descriptions/interface metadata, and bundled skills/hooks/apps/MCP server names. Remote plugin details can include scheduled task summaries from the catalog; `scheduledTasks: null` means the metadata is unavailable, while an empty array means the catalog found no scheduled tasks. Remote plugin details expose the canonical `shareUrl` supplied by the remote catalog when available; it is `null` for local plugins or when the catalog omits it. This field is separate from `summary.shareContext`, which continues to describe user and workspace sharing state. Returned plugin skills include their current `enabled` state after local config filtering; bundled hooks are returned as lightweight declaration summaries keyed for correlation with `hooks/list`. Use `plugin/install`'s `appsNeedingAuth` to drive post-install authentication and `app/list`'s `isAccessible` to determine current connector accessibility (**under development; do not call from production clients yet**).
 - `plugin/skill/read` — read remote plugin skill markdown on demand by `remoteMarketplaceName`, `remotePluginId`, and `skillName`. This lets clients preview uninstalled remote plugin skills without downloading the plugin bundle.
 - `skills/changed` — notification emitted when watched local skill files change.
 - `app/list` — list available apps.
@@ -1921,16 +1921,17 @@ Codex supports these authentication modes. The current mode is surfaced in `acco
 
 - **API key (`apiKey`)**: Caller supplies an OpenAI API key via `account/login/start` with `type: "apiKey"`. The API key is saved and used for API requests.
 - **ChatGPT managed (`chatgpt`)** (recommended): Codex owns the ChatGPT OAuth flow and refresh tokens. Start via `account/login/start` with `type: "chatgpt"` for the browser flow or `type: "chatgptDeviceCode"` for device code; Codex persists tokens to disk and refreshes them automatically.
+- **Codex managed Amazon Bedrock auth (`amazonBedrock`, experimental)**: Caller supplies an Amazon Bedrock API key and region via `account/login/start` with `type: "amazonBedrock"`. The client must enable the `experimentalApi` initialization capability for Codex-managed Amazon Bedrock login. Codex replaces the current primary auth with the Bedrock credential and writes `model_provider = "amazon-bedrock"` to the user config.
 - **Personal access token (`personalAccessToken`)**: Codex uses a ChatGPT-backed personal access token loaded outside the app-server login RPCs, such as with `codex login --with-access-token` or `CODEX_ACCESS_TOKEN`.
 
 ### API Overview
 
 - `account/read` — fetch current account info; optionally refresh tokens.
-- `account/login/start` — begin login (`apiKey`, `chatgpt`, `chatgptDeviceCode`).
+- `account/login/start` — begin login (`apiKey`, `chatgpt`, `chatgptDeviceCode`, `amazonBedrock`).
 - `account/login/completed` (notify) — emitted when a login attempt finishes (success or error).
 - `account/login/cancel` — cancel a pending managed ChatGPT login by `loginId`.
 - `account/logout` — sign out; triggers `account/updated`.
-- `account/updated` (notify) — emitted whenever auth mode changes (`authMode`: `apikey`, `chatgpt`, `personalAccessToken`, or `null`) and includes the current ChatGPT `planType` when available.
+- `account/updated` (notify) — emitted whenever auth mode changes (`authMode`: `apikey`, `bedrockApiKey`, `chatgpt`, `personalAccessToken`, or `null`) and includes the current ChatGPT `planType` when available.
 - `account/rateLimits/read` — fetch ChatGPT rate limits, an optional effective monthly credit limit, and the earned rate-limit resets currently available, including expiry details when provided by the backend. Rate-limit updates arrive via `account/rateLimits/updated` (notify); reset-credit data is snapshot-only.
 - `account/rateLimitResetCredit/consume` — consume one earned reset using a caller-provided idempotency key, optionally selecting a reset-credit ID returned by `account/rateLimits/read`.
 - `account/usage/read` — fetch ChatGPT account token-activity summary and daily buckets.
@@ -2005,6 +2006,30 @@ Field notes:
    { "method": "account/login/completed", "params": { "loginId": "<uuid>", "success": true, "error": null } }
    { "method": "account/updated", "params": { "authMode": "chatgpt", "planType": "plus" } }
    ```
+
+### 3) Log in with an Amazon Bedrock API key
+
+This experimental flow requires the client to initialize with `experimentalApi: true`.
+
+1. Send:
+   ```json
+   {
+     "method": "account/login/start",
+     "id": 3,
+     "params": { "type": "amazonBedrock", "apiKey": "…", "region": "us-west-2" }
+   }
+   ```
+2. Expect:
+   ```json
+   { "id": 3, "result": { "type": "amazonBedrock" } }
+   ```
+3. Notifications:
+   ```json
+   { "method": "account/login/completed", "params": { "loginId": null, "success": true, "error": null } }
+   { "method": "account/updated", "params": { "authMode": "bedrockApiKey", "planType": null } }
+   ```
+
+Codex stores the key and region as the primary Codex auth, replacing any previously stored login, and writes `model_provider = "amazon-bedrock"` to the active user config. Existing loaded sessions keep their current provider selection, so clients should restart the app-server before sending more model requests. This limitation will be addressed in a follow-up.
 
 ### 4) Log in with ChatGPT (device code flow)
 

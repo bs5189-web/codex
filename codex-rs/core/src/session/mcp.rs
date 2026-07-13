@@ -78,6 +78,7 @@ impl ElicitationReviewer for GuardianMcpElicitationReviewer {
 
 impl Session {
     pub(crate) async fn runtime_mcp_config(&self, config: &Config) -> McpConfig {
+        let originator = self.originator().await;
         let environments = self.services.turn_environments.snapshot().await;
         let selected_capability_roots = self
             .resolve_selected_capability_roots_for_step(&environments)
@@ -90,6 +91,7 @@ impl Session {
                 config,
                 &self.services.mcp_thread_init,
                 &self.services.thread_extension_data,
+                &originator,
                 &available_environment_ids,
             )
             .await
@@ -132,6 +134,7 @@ impl Session {
                 &turn_context.config,
                 &self.services.mcp_thread_init,
                 &self.services.thread_extension_data,
+                &turn_context.originator,
                 &available_environment_ids,
             )
             .await;
@@ -377,7 +380,7 @@ impl Session {
             mcp_runtime_context.clone(),
             mcp_config.codex_home.clone(),
             self.services.mcp_manager.codex_apps_tools_cache(),
-            codex_apps_tools_cache_key(auth.as_ref()),
+            connector_runtime_context_key(auth.as_ref()),
             mcp_config.prefix_mcp_tool_names,
             mcp_config.client_elicitation_capability.clone(),
             self.services
@@ -475,6 +478,7 @@ impl Session {
                 &refresh_config,
                 &self.services.mcp_thread_init,
                 &self.services.thread_extension_data,
+                &turn_context.originator,
                 &available_environment_ids,
             )
             .await;
@@ -543,6 +547,7 @@ impl Session {
                 refresh_config,
                 &self.services.mcp_thread_init,
                 &self.services.thread_extension_data,
+                &turn_context.originator,
                 &available_environment_ids,
             )
             .await;

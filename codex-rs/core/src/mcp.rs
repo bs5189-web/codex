@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::config::Config;
 use codex_config::McpServerConfig;
+use codex_connectors::ConnectorRuntimeManager;
 use codex_connectors::ConnectorSnapshot;
 use codex_connectors::PluginConnectorSource;
 use codex_core_plugins::PluginsManager;
@@ -13,11 +14,11 @@ use codex_extension_api::McpServerContribution;
 use codex_extension_api::McpServerContributionContext;
 use codex_login::CodexAuth;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
-use codex_mcp::CodexAppsToolsCache;
 use codex_mcp::EffectiveMcpServer;
 use codex_mcp::McpConfig;
 use codex_mcp::McpPluginAttribution;
 use codex_mcp::McpServerRegistration;
+use codex_mcp::ToolInfo;
 use codex_mcp::codex_apps_mcp_server_config;
 use codex_mcp::configured_mcp_servers;
 use codex_mcp::effective_mcp_servers;
@@ -49,7 +50,7 @@ enum OrderedMcpOverlay {
 pub struct McpManager {
     plugins_manager: Arc<PluginsManager>,
     extensions: Arc<ExtensionRegistry<Config>>,
-    codex_apps_tools_cache: CodexAppsToolsCache,
+    codex_apps_tools_cache: ConnectorRuntimeManager<ToolInfo>,
 }
 
 impl McpManager {
@@ -68,20 +69,26 @@ impl McpManager {
         Self {
             plugins_manager,
             extensions,
-            codex_apps_tools_cache: CodexAppsToolsCache::default(),
+            codex_apps_tools_cache: ConnectorRuntimeManager::default(),
         }
     }
 
-    pub fn codex_apps_tools_cache(&self) -> CodexAppsToolsCache {
+    pub fn codex_apps_tools_cache(&self) -> ConnectorRuntimeManager<ToolInfo> {
         self.codex_apps_tools_cache.clone()
     }
 
     /// Returns the MCP config after applying compatibility built-ins and
     /// runtime-only extension overlays.
     pub async fn runtime_config(&self, config: &Config) -> McpConfig {
-        self.runtime_config_with_context(McpServerContributionContext::global(config))
-            .await
-            .config
+        self.runtime_config_with_context(
+            McpServerContributionContext::global(config),
+            // Threadless discovery and control-plane paths have no effective thread
+            // originator; active-thread tool calls use runtime_config_for_step below.
+            /*originator*/
+            None,
+        )
+        .await
+        .config
     }
 
     pub(crate) async fn runtime_config_for_step(
@@ -89,20 +96,26 @@ impl McpManager {
         config: &Config,
         thread_init: &ExtensionDataInit,
         thread_store: &ExtensionData,
+        originator: &str,
         available_environment_ids: &[String],
     ) -> McpRuntimeProjection {
-        self.runtime_config_with_context(McpServerContributionContext::for_step(
-            config,
-            thread_init,
-            thread_store,
-            available_environment_ids,
-        ))
+        self.runtime_config_with_context(
+            McpServerContributionContext::for_step(
+                config,
+                thread_init,
+                thread_store,
+                originator,
+                available_environment_ids,
+            ),
+            Some(originator),
+        )
         .await
     }
 
     async fn runtime_config_with_context(
         &self,
         context: McpServerContributionContext<'_, Config>,
+        originator: Option<&str>,
     ) -> McpRuntimeProjection {
         let config = context.config();
         let mut selected_plugin_available = false;
@@ -181,6 +194,7 @@ impl McpManager {
                 codex_apps_mcp_server_config(
                     &mcp_config.chatgpt_base_url,
                     mcp_config.apps_mcp_product_sku.as_deref(),
+                    originator,
                 ),
             ));
         } else {
