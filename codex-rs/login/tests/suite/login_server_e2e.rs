@@ -30,7 +30,7 @@ const RUIJIE_UNIAPI_PROVIDER: &str = r#"model_provider = "ruijie-uniapi"
 [model_providers.ruijie-uniapi]
 name = "ruijie-uniapi"
 env_key = "RUIJIE_UNIAPI_KEY"
-base_url = "https://uniapi.ruijie.com.cn/v1"
+base_url = "https://gptauth.ruijie.com.cn/v1"
 wire_api = "responses"
 requires_openai_auth = true
 "#;
@@ -39,7 +39,7 @@ const RUIJIE_UNIAPI_PROVIDER_WITH_API_KEY: &str = r#"model_provider = "ruijie-un
 [model_providers.ruijie-uniapi]
 name = "ruijie-uniapi"
 env_key = "RUIJIE_UNIAPI_KEY"
-base_url = "https://uniapi.ruijie.com.cn/v1"
+base_url = "https://gptauth.ruijie.com.cn/v1"
 wire_api = "responses"
 requires_openai_auth = true
 api_key = "ruijie-token-123"
@@ -339,7 +339,7 @@ async fn callback_with_codex_token_initializes_ruijie_uniapi_config() -> Result<
     );
     assert_eq!(
         read_config_provider_base_url(&config_path)?,
-        Some("https://uniapi.ruijie.com.cn/v1".to_string())
+        Some("https://gptauth.ruijie.com.cn/v1".to_string())
     );
     assert_eq!(
         read_config_provider_api_key(&config_path)?,

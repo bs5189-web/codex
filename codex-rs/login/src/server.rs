@@ -65,7 +65,7 @@ const RUIJIE_UNIAPI_PROVIDER_SECTION: &str = "[model_providers.ruijie-uniapi]";
 const RUIJIE_UNIAPI_CONFIG_BLOCK: &str = r#"[model_providers.ruijie-uniapi]
 name = "ruijie-uniapi"
 env_key = "RUIJIE_UNIAPI_KEY"
-base_url = "https://uniapi.ruijie.com.cn/v1"
+base_url = "https://gptauth.ruijie.com.cn/v1"
 wire_api = "responses"
 requires_openai_auth = true
 "#;

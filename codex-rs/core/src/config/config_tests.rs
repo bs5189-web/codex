@@ -898,7 +898,7 @@ model_provider = "ruijie-uniapi"
 [model_providers.ruijie-uniapi]
 name = "ruijie-uniapi"
 env_key = "CUSTOM_RUIJIE_UNIAPI_KEY"
-base_url = "https://uniapi.ruijie.com.cn/v1"
+base_url = "https://gptauth.ruijie.com.cn/v1"
 wire_api = "responses"
 requires_openai_auth = true
 api_key = "configured-token"
