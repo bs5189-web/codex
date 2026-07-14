@@ -343,6 +343,9 @@ async fn response_item_ids_persist_across_resume_and_preserve_server_ids() -> an
 
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert_eq!(request.body_json()["store"].as_bool(), Some(true));
+    }
     let user_id = response_message_item_id(&requests[0], "user", "before resume");
     let user_uuid = user_id
         .strip_prefix("msg_")
@@ -505,6 +508,7 @@ async fn response_item_ids_are_sent_for_all_remote_v2_compaction_requests() -> a
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 3);
     for (request_index, request) in requests.iter().enumerate() {
+        assert_eq!(request.body_json()["store"].as_bool(), Some(true));
         let input = request.input();
         assert!(!input.is_empty(), "request {request_index} input is empty");
         for item in input {

@@ -911,7 +911,7 @@ impl ModelClient {
             tool_choice: "auto".to_string(),
             parallel_tool_calls: prompt.parallel_tool_calls && !model_info.use_responses_lite,
             reasoning,
-            store: provider.is_azure_responses_endpoint(),
+            store: provider.is_azure_responses_endpoint() || self.state.item_ids_enabled,
             stream: true,
             stream_options,
             include,
@@ -1234,6 +1234,10 @@ impl ModelClientSession {
         payload: ResponseCreateWsRequest,
         request: &ResponsesApiRequest,
     ) -> (ResponsesWsRequest, bool) {
+        if !request.store {
+            return (ResponsesWsRequest::ResponseCreate(payload), false);
+        }
+
         let Some(last_response) = self.get_last_response() else {
             return (ResponsesWsRequest::ResponseCreate(payload), false);
         };
