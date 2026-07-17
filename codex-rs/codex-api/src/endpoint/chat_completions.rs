@@ -16,6 +16,7 @@ use codex_client::HttpTransport;
 use codex_client::RequestCompression;
 use codex_client::RequestTelemetry;
 use codex_client::StreamResponse;
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
@@ -513,7 +514,7 @@ async fn process_chat_sse(
     let mut pending_tool_calls: Vec<PendingToolCall> = Vec::new();
     let mut usage: Option<TokenUsage> = None;
     let mut assistant_message_started = false;
-    let mut assistant_message_id: Option<String> = None;
+    let mut assistant_message_id: Option<ResponseItemId> = None;
     let mut assistant_message_text = String::new();
 
     while let Some(next) = stream.next().await {
@@ -542,6 +543,7 @@ async fn process_chat_sse(
             usage = Some(TokenUsage {
                 input_tokens: chunk_usage.prompt_tokens,
                 cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
                 output_tokens: chunk_usage.completion_tokens,
                 reasoning_output_tokens: 0,
                 total_tokens: chunk_usage.total_tokens,
@@ -620,7 +622,7 @@ async fn process_chat_sse(
 async fn ensure_assistant_message_started(
     tx_event: &mpsc::Sender<Result<ResponseEvent, ApiError>>,
     assistant_message_started: &mut bool,
-    assistant_message_id: &mut Option<String>,
+    assistant_message_id: &mut Option<ResponseItemId>,
     response_id: Option<&String>,
 ) {
     if *assistant_message_started {
@@ -643,11 +645,11 @@ async fn ensure_assistant_message_started(
         .await;
 }
 
-fn chat_assistant_message_id(response_id: Option<&String>) -> String {
+fn chat_assistant_message_id(response_id: Option<&String>) -> ResponseItemId {
     let response_id = response_id
         .map(String::as_str)
         .unwrap_or("chatcmpl-adapter");
-    format!("{response_id}-message")
+    ResponseItemId::from_server(format!("{response_id}-message"))
 }
 
 async fn flush_tool_calls(
