@@ -130,7 +130,11 @@ fn tool_plugin_provenance_collects_app_and_mcp_sources() {
         "alpha".to_string(),
         McpPluginAttribution::new("alpha@test".to_string(), "alpha-plugin".to_string()),
         /*plugin_order*/ 0,
-        codex_apps_mcp_server_config("https://alpha.example", /*apps_mcp_product_sku*/ None),
+        codex_apps_mcp_server_config(
+            "https://alpha.example",
+            /*apps_mcp_product_sku*/ None,
+            /*originator*/ None,
+        ),
     ));
     config.mcp_server_catalog = catalog.build();
     config.connector_snapshot =
@@ -197,7 +201,11 @@ fn selected_mcp_attribution_does_not_join_an_unrelated_local_summary() {
             "Executor GitHub".to_string(),
         ),
         /*selection_order*/ 0,
-        codex_apps_mcp_server_config("https://github.example", /*apps_mcp_product_sku*/ None),
+        codex_apps_mcp_server_config(
+            "https://github.example",
+            /*apps_mcp_product_sku*/ None,
+            /*originator*/ None,
+        ),
     ));
     config.mcp_server_catalog = catalog.build();
     config.connector_snapshot =
@@ -259,6 +267,7 @@ fn codex_apps_server_config_uses_legacy_codex_apps_path() {
     let config = codex_apps_mcp_server_config(
         "https://gptauth.ruijie.com.cn",
         /*apps_mcp_product_sku*/ None,
+        /*originator*/ None,
     );
     let url = match &config.transport {
         McpServerTransportConfig::StreamableHttp { url, .. } => url,
@@ -270,7 +279,8 @@ fn codex_apps_server_config_uses_legacy_codex_apps_path() {
 
 #[test]
 fn codex_apps_server_config_forwards_configured_product_sku_header() {
-    let config = codex_apps_mcp_server_config("https://chatgpt.com", Some("tpp"));
+    let config =
+        codex_apps_mcp_server_config("https://chatgpt.com", Some("tpp"), /*originator*/ None);
 
     match &config.transport {
         McpServerTransportConfig::StreamableHttp {
@@ -356,6 +366,7 @@ async fn effective_mcp_servers_preserve_runtime_servers() {
         codex_apps_mcp_server_config(
             &config.chatgpt_base_url,
             config.apps_mcp_product_sku.as_deref(),
+            config.originator.as_deref(),
         ),
     ));
     config.mcp_server_catalog = catalog.build();

@@ -186,23 +186,23 @@ async fn raw_selected_plugin_contributions(
         Arc::new(EnvironmentManager::default_for_tests()),
     );
     let registry = builder.build();
-    let mut thread_init = ExtensionDataInit::new();
-    thread_init.insert(vec![SelectedCapabilityRoot {
+    let thread_init = ExtensionDataInit::new();
+    let selected_capability_roots = vec![SelectedCapabilityRoot {
         id: "selected-root".to_string(),
         location: CapabilityRootLocation::Environment {
             environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
             path: PathUri::from_host_native_path(plugin_root)?,
         },
-    }]);
+    }];
     let thread_store = ExtensionData::new_with_init("test-thread", thread_init.clone());
-    let available_environment_ids = vec![LOCAL_ENVIRONMENT_ID.to_string()];
 
     Ok(registry.mcp_server_contributors()[0]
         .contribute(McpServerContributionContext::for_step(
             config,
             &thread_init,
             &thread_store,
-            &available_environment_ids,
+            "test_originator",
+            &selected_capability_roots,
         ))
         .await)
 }
