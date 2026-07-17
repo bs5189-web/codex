@@ -356,28 +356,6 @@ impl ModelProvider for ConfiguredModelProvider {
             }
         }
     }
-
-    fn models_manager_without_cache(
-        &self,
-        config_model_catalog: Option<ModelsResponse>,
-    ) -> SharedModelsManager {
-        match config_model_catalog {
-            Some(model_catalog) => Arc::new(StaticModelsManager::new(
-                self.auth_manager.clone(),
-                model_catalog,
-            )),
-            None => {
-                let endpoint = Arc::new(OpenAiModelsEndpoint::new(
-                    self.info.clone(),
-                    self.auth_manager.clone(),
-                ));
-                Arc::new(OpenAiModelsManager::new_without_cache(
-                    endpoint,
-                    self.auth_manager.clone(),
-                ))
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -905,7 +883,12 @@ mod tests {
             create_model_provider(provider_for(server.uri()), /*auth_manager*/ None);
         let manager =
             provider.models_manager(test_codex_home(), /*config_model_catalog*/ None);
-        let catalog = manager.raw_model_catalog(RefreshStrategy::Online).await;
+        let catalog = manager
+            .raw_model_catalog(
+                RefreshStrategy::Online,
+                HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+            )
+            .await;
 
         assert_eq!(
             catalog
