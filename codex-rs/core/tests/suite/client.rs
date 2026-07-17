@@ -14,6 +14,7 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_login::default_client::originator;
+use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::built_in_model_providers;
@@ -1224,7 +1225,7 @@ async fn includes_session_id_thread_id_and_model_headers_in_request() {
     assert_eq!(request_authorization, "Bearer Test API Key");
     assert_eq!(
         request_body["prompt_cache_key"].as_str(),
-        Some(thread_id_string.as_str())
+        Some(session_id_string.as_str())
     );
     assert_codex_client_metadata(
         &request_body,
@@ -1282,11 +1283,49 @@ async fn provider_auth_command_refreshes_after_401() {
     send_provider_auth_request(&server, auth_fixture.auth()).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn amazon_bedrock_proxy_uses_command_auth_and_custom_headers() {
+    skip_if_no_network!();
+
+    let server = MockServer::start().await;
+    let response = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+    )
+    .await;
+    let auth_fixture = ProviderAuthCommandFixture::new(&["command-token"]).unwrap();
+    let mut provider = built_in_model_providers(/*openai_base_url*/ None)
+        .remove(AMAZON_BEDROCK_PROVIDER_ID)
+        .expect("Amazon Bedrock provider should be built in");
+    provider.base_url = Some(format!("{}/v1", server.uri()));
+    provider.auth = Some(auth_fixture.auth());
+    provider.aws = None;
+    provider
+        .http_headers
+        .get_or_insert_default()
+        .insert("x-some-header".to_string(), "foo".to_string());
+
+    send_request_with_provider(provider).await;
+
+    let request = response.single_request();
+    assert_eq!(request.path(), "/v1/responses");
+    assert_eq!(
+        request.header("authorization"),
+        Some("Bearer command-token".to_string())
+    );
+    assert_eq!(request.header("x-amz-date"), None);
+    assert_eq!(request.header("x-some-header"), Some("foo".to_string()));
+    assert_eq!(
+        request.header("x-amzn-mantle-client-agent"),
+        Some("codex".to_string())
+    );
+    assert_eq!(request.body_json()["store"], false);
+}
+
 /// Issues one streamed Responses request through a provider configured with command-backed auth.
 ///
 /// The caller owns the server-side assertions, so this helper only validates that the request
 /// reaches `Completed` without surfacing an auth or transport error to the client.
-#[expect(clippy::unwrap_used)]
 async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuthInfo) {
     let provider = ModelProviderInfo {
         name: "corp".into(),
@@ -1308,6 +1347,11 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
         supports_websockets: false,
     };
 
+    send_request_with_provider(provider).await;
+}
+
+#[expect(clippy::unwrap_used)]
+async fn send_request_with_provider(provider: ModelProviderInfo) {
     let codex_home = TempDir::new().unwrap();
     let mut config = load_default_config_for_test(&codex_home).await;
     config.model_provider_id = provider.name.clone();
@@ -1579,7 +1623,9 @@ async fn prefers_apikey_when_config_prefers_apikey_even_with_chatgpt_tokens() {
         .expect("resolve installation id");
     let thread_manager = ThreadManager::new(
         &config,
-        auth_manager,
+        auth_manager.clone(),
+        codex_core::build_models_manager(&config, auth_manager),
+        codex_core::CodexAppsToolsCache::default(),
         SessionSource::Exec,
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
         empty_extension_registry(),
@@ -3293,6 +3339,7 @@ async fn token_count_includes_rate_limits_snapshot() {
                 "total_token_usage": {
                     "input_tokens": 123,
                     "cached_input_tokens": 0,
+                    "cache_write_input_tokens": 0,
                     "output_tokens": 0,
                     "reasoning_output_tokens": 0,
                     "total_tokens": 123
@@ -3300,6 +3347,7 @@ async fn token_count_includes_rate_limits_snapshot() {
                 "last_token_usage": {
                     "input_tokens": 123,
                     "cached_input_tokens": 0,
+                    "cache_write_input_tokens": 0,
                     "output_tokens": 0,
                     "reasoning_output_tokens": 0,
                     "total_tokens": 123
@@ -3322,6 +3370,7 @@ async fn token_count_includes_rate_limits_snapshot() {
                 },
                 "credits": null,
                 "individual_limit": null,
+                "spend_control_reached": null,
                 "plan_type": null,
                 "rate_limit_reached_type": null
             }
@@ -3363,6 +3412,13 @@ async fn usage_limit_error_emits_rate_limit_event() -> anyhow::Result<()> {
         .insert_header("x-codex-primary-over-secondary-limit-percent", "95.0")
         .insert_header("x-codex-primary-window-minutes", "15")
         .insert_header("x-codex-secondary-window-minutes", "60")
+        .insert_header("x-codex-credits-has-credits", "true")
+        .insert_header("x-codex-credits-unlimited", "false")
+        .insert_header("x-codex-credits-balance", "")
+        .insert_header(
+            "x-codex-rate-limit-reached-type",
+            "workspace_member_usage_limit_reached",
+        )
         .set_body_json(json!({
             "error": {
                 "type": "usage_limit_reached",
@@ -3396,10 +3452,15 @@ async fn usage_limit_error_emits_rate_limit_event() -> anyhow::Result<()> {
             "window_minutes": 60,
             "resets_at": null
         },
-        "credits": null,
+        "credits": {
+            "has_credits": true,
+            "unlimited": false,
+            "balance": null
+        },
         "individual_limit": null,
+        "spend_control_reached": null,
         "plan_type": null,
-        "rate_limit_reached_type": null
+        "rate_limit_reached_type": "workspace_member_usage_limit_reached"
     });
 
     let submission_id = codex
@@ -3435,7 +3496,7 @@ async fn usage_limit_error_emits_rate_limit_event() -> anyhow::Result<()> {
         unreachable!();
     };
     assert!(
-        error_event.message.to_lowercase().contains("usage limit"),
+        error_event.message.contains("spend cap set by the owner"),
         "unexpected error message for submission {submission_id}: {}",
         error_event.message
     );
