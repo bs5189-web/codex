@@ -1,3 +1,5 @@
+pub use binding::McpBinding;
+pub use binding::PreparedMcpCall;
 pub use connection_manager::McpConnectionManager;
 pub use connection_manager::tool_is_model_visible;
 pub use elicitation::ElicitationLifecycle;
@@ -10,6 +12,7 @@ pub use resource_client::McpResourceClientCacheKey;
 pub use resource_client::McpResourcePage;
 pub use resource_client::McpResourceReadResult;
 pub use rmcp_client::MCP_SANDBOX_STATE_META_CAPABILITY;
+pub use runtime::McpRuntime;
 pub use runtime::McpRuntimeContext;
 pub use runtime::SandboxState;
 pub use tool_catalog_cache::McpToolCatalogCache;
@@ -81,6 +84,8 @@ pub use mcp::mcp_permission_prompt_is_auto_approved;
 pub use mcp::qualified_mcp_tool_name_prefix;
 
 pub(crate) mod auth_elicitation;
+mod binding;
+pub(crate) mod binding_clients;
 mod catalog;
 pub(crate) mod codex_apps;
 pub(crate) mod connection_manager;

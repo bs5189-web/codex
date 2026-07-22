@@ -18,6 +18,18 @@ use crate::image_url::is_remote_image_url;
 const DIRECT_INPUT_TO_MULTI_AGENT_V2_SUBAGENT_ERROR: &str =
     "direct app-server input is not allowed for multi-agent v2 sub-agents";
 
+/// Mirrors the direct-input policy in both request validation and thread capability responses.
+pub(super) fn can_accept_direct_input(
+    multi_agent_version: Option<MultiAgentVersion>,
+    session_source: &SessionSource,
+) -> bool {
+    multi_agent_version != Some(MultiAgentVersion::V2)
+        || !matches!(
+            session_source,
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+        )
+}
+
 fn validate_user_input_image_urls(input: &[V2UserInput]) -> Result<(), JSONRPCErrorError> {
     if input.iter().any(|item| {
         matches!(
@@ -326,12 +338,11 @@ impl TurnRequestProcessor {
         request_id: &ConnectionRequestId,
         thread: &CodexThread,
     ) -> Result<(), JSONRPCErrorError> {
-        if thread.multi_agent_version() == Some(MultiAgentVersion::V2)
-            && matches!(
-                thread.config_snapshot().await.session_source,
-                SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
-            )
-        {
+        let config_snapshot = thread.config_snapshot().await;
+        if !can_accept_direct_input(
+            thread.multi_agent_version(),
+            &config_snapshot.session_source,
+        ) {
             let error = invalid_request(DIRECT_INPUT_TO_MULTI_AGENT_V2_SUBAGENT_ERROR);
             self.track_error_response(request_id, &error, /*error_type*/ None);
             return Err(error);
@@ -1066,10 +1077,19 @@ impl TurnRequestProcessor {
                     .unwrap_or(false),
                 codex_responses_as_items: params.codex_responses_as_items.unwrap_or(false),
                 codex_response_item_prefix: params.codex_response_item_prefix,
-                codex_response_handoff_prefix: params.codex_response_handoff_prefix,
+                codex_response_handoff_mode: params.codex_response_handoff_mode.unwrap_or_default(),
                 model: params.model,
                 output_modality: params.output_modality,
                 include_startup_context: params.include_startup_context.unwrap_or(true),
+                initial_items: params
+                    .initial_items
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|item| ConversationTextParams {
+                        text: item.text,
+                        role: item.role,
+                    })
+                    .collect(),
                 prompt: params.prompt,
                 realtime_session_id: params.realtime_session_id,
                 transport: params.transport.map(|transport| match transport {
@@ -1312,7 +1332,7 @@ impl TurnRequestProcessor {
         if let Some(mut thread) = stored_thread {
             thread.session_id = review_thread.session_configured().session_id.to_string();
             self.thread_watch_manager
-                .upsert_thread_silently(thread.clone())
+                .upsert_thread_silently(&thread.id)
                 .await;
             thread.status = resolve_thread_status(
                 self.thread_watch_manager

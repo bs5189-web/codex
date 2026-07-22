@@ -2,6 +2,8 @@ use super::*;
 use crate::app_info::app_info_to_api;
 use crate::app_info::connector_metadata_to_api;
 
+mod installed;
+
 pub(crate) struct AppsRequestProcessor {
     auth_manager: Arc<AuthManager>,
     thread_manager: Arc<ThreadManager>,
@@ -79,9 +81,28 @@ impl AppsRequestProcessor {
         } = connectors::read_connector_metadata(&config, auth, &app_ids, include_tools)
             .await
             .map_err(|err| internal_error(format!("failed to read app metadata: {err}")))?;
+        let loaded_plugins = self
+            .thread_manager
+            .plugins_manager()
+            .plugins_for_config(&config.plugins_config_input())
+            .await;
+        let connector_snapshot =
+            codex_connectors::ConnectorSnapshot::from_plugin_capability_summaries(
+                loaded_plugins.capability_summaries(),
+            );
+        let apps = apps
+            .into_iter()
+            .map(|metadata| {
+                let mut app = connector_metadata_to_api(metadata);
+                app.plugin_display_names = connector_snapshot
+                    .plugin_display_names_for_connector_id(app.id.as_str())
+                    .to_vec();
+                app
+            })
+            .collect();
         Ok(Some(
             AppsReadResponse {
-                apps: apps.into_iter().map(connector_metadata_to_api).collect(),
+                apps,
                 missing_app_ids,
             }
             .into(),
@@ -442,7 +463,7 @@ impl AppsRequestProcessor {
 }
 
 const APP_LIST_LOAD_TIMEOUT: Duration = Duration::from_secs(90);
-// `app/list` is the legacy request-path baseline for the future `app/installed` endpoint;
+// `app/list` is the legacy request-path baseline for the `app/installed` endpoint;
 // `path=legacy` keeps it separate from the new snapshot-backed implementation in dashboards.
 const APPS_INSTALLED_DURATION_METRIC: &str = "codex.apps.installed.duration_ms";
 

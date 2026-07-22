@@ -1,5 +1,7 @@
 use super::*;
 use crate::mcp::McpRuntimeProjection;
+use codex_exec_server::ExecutorCapabilityDiscoveryCache;
+use codex_exec_server::ExecutorCapabilityDiscoverySnapshot;
 use codex_exec_server::MAX_SELECTED_CAPABILITY_ROOTS;
 use codex_exec_server::ResolvedSelectedCapabilityRoot;
 use codex_mcp::ElicitationReviewRequest;
@@ -87,6 +89,9 @@ impl Session {
             .await;
         let ready_selected_capability_roots =
             Self::ready_selected_capability_roots(&selected_capability_roots);
+        let executor_capability_discovery = self
+            .executor_capability_discovery_for_step(config, &ready_selected_capability_roots)
+            .await;
         self.services
             .mcp_manager
             .runtime_config_for_step(
@@ -95,6 +100,7 @@ impl Session {
                 &self.services.thread_extension_data,
                 &originator,
                 &ready_selected_capability_roots,
+                executor_capability_discovery.as_deref(),
             )
             .await
             .config
@@ -117,6 +123,7 @@ impl Session {
         turn_context: &TurnContext,
         environments: &TurnEnvironmentSnapshot,
         selected_capability_roots: &[ResolvedSelectedCapabilityRoot],
+        executor_capability_discovery: Option<&ExecutorCapabilityDiscoverySnapshot>,
     ) -> Arc<McpRuntimeSnapshot> {
         let ready_selected_capability_roots =
             Self::ready_selected_capability_roots(selected_capability_roots);
@@ -141,6 +148,7 @@ impl Session {
                 &self.services.thread_extension_data,
                 &turn_context.originator,
                 &ready_selected_capability_roots,
+                executor_capability_discovery,
             )
             .await;
         let mcp_config = &mcp_projection.config;
@@ -177,7 +185,9 @@ impl Session {
                 current.runtime_context().clone(),
                 ready_selected_capability_roots,
             ));
-            self.services.mcp_runtime.store(Some(Arc::clone(&runtime)));
+            self.services
+                .mcp_runtime_snapshot
+                .store(Some(Arc::clone(&runtime)));
             return runtime;
         }
         self.refresh_mcp_servers_inner(
@@ -188,6 +198,32 @@ impl Session {
             Some(self.mcp_elicitation_reviewer()),
         )
         .await
+    }
+
+    #[tracing::instrument(
+        name = "capability_roots.snapshot_for_step",
+        skip_all,
+        fields(root_count = ready_selected_capability_roots.len())
+    )]
+    pub(crate) async fn executor_capability_discovery_for_step(
+        &self,
+        config: &Config,
+        ready_selected_capability_roots: &[SelectedCapabilityRoot],
+    ) -> Option<Arc<ExecutorCapabilityDiscoverySnapshot>> {
+        if !config
+            .features
+            .enabled(Feature::ExecutorCapabilityDiscovery)
+        {
+            return None;
+        }
+        let environment_manager = self.services.turn_environments.environment_manager();
+        let cache = self
+            .services
+            .thread_extension_data
+            .get_or_init(|| ExecutorCapabilityDiscoveryCache::new(environment_manager));
+        Some(Arc::new(
+            cache.snapshot(ready_selected_capability_roots).await,
+        ))
     }
 
     pub(crate) async fn resolve_selected_capability_roots_for_step(
@@ -415,7 +451,7 @@ impl Session {
             mcp_config.auth_keyring_backend_kind,
             &turn_context.approval_policy,
             turn_context.sub_id.clone(),
-            self.get_tx_event(),
+            Some(self.get_tx_event()),
             mcp_startup_cancellation_token,
             turn_context.permission_profile(),
             mcp_runtime_context.clone(),
@@ -511,6 +547,12 @@ impl Session {
         let current_runtime = self.services.latest_mcp_runtime();
         let ready_selected_capability_roots =
             current_runtime.ready_selected_capability_roots().to_vec();
+        let executor_capability_discovery = self
+            .executor_capability_discovery_for_step(
+                &refresh_config,
+                &ready_selected_capability_roots,
+            )
+            .await;
         let mut mcp_projection = self
             .services
             .mcp_manager
@@ -520,6 +562,7 @@ impl Session {
                 &self.services.thread_extension_data,
                 &turn_context.originator,
                 &ready_selected_capability_roots,
+                executor_capability_discovery.as_deref(),
             )
             .await;
         mcp_projection.config.mcp_server_catalog = mcp_projection
@@ -578,6 +621,12 @@ impl Session {
         let current_runtime = self.services.latest_mcp_runtime();
         let ready_selected_capability_roots =
             current_runtime.ready_selected_capability_roots().to_vec();
+        let executor_capability_discovery = self
+            .executor_capability_discovery_for_step(
+                refresh_config,
+                &ready_selected_capability_roots,
+            )
+            .await;
         let mcp_projection = self
             .services
             .mcp_manager
@@ -587,6 +636,7 @@ impl Session {
                 &self.services.thread_extension_data,
                 &turn_context.originator,
                 &ready_selected_capability_roots,
+                executor_capability_discovery.as_deref(),
             )
             .await;
         self.refresh_mcp_servers_inner(
@@ -613,7 +663,7 @@ impl Session {
         available
     }
 
-    fn ready_selected_capability_roots(
+    pub(crate) fn ready_selected_capability_roots(
         selected_capability_roots: &[ResolvedSelectedCapabilityRoot],
     ) -> Vec<SelectedCapabilityRoot> {
         selected_capability_roots
@@ -685,10 +735,9 @@ async fn review_guardian_mcp_elicitation(
         /*retry_reason*/ None,
     )
     .await;
-    Ok(Some(
-        mcp_elicitation_response_from_guardian_decision(session.as_ref(), &review_id, decision)
-            .await,
-    ))
+    Ok(Some(mcp_elicitation_response_from_guardian_decision(
+        decision,
+    )))
 }
 
 fn guardian_elicitation_review_request(
@@ -832,23 +881,8 @@ fn mcp_elicitation_request_id(id: &RequestId) -> String {
     }
 }
 
-async fn mcp_elicitation_response_from_guardian_decision(
-    session: &Session,
-    review_id: &str,
+fn mcp_elicitation_response_from_guardian_decision(
     decision: ReviewDecision,
-) -> ElicitationResponse {
-    let denial_message = match decision {
-        ReviewDecision::Denied => {
-            Some(crate::guardian::guardian_rejection_message(session, review_id).await)
-        }
-        _ => None,
-    };
-    mcp_elicitation_response_from_guardian_decision_parts(decision, denial_message)
-}
-
-fn mcp_elicitation_response_from_guardian_decision_parts(
-    decision: ReviewDecision,
-    denial_message: Option<String>,
 ) -> ElicitationResponse {
     match decision {
         ReviewDecision::Approved
@@ -859,9 +893,7 @@ fn mcp_elicitation_response_from_guardian_decision_parts(
             content: Some(serde_json::json!({})),
             meta: Some(mcp_elicitation_auto_meta()),
         },
-        ReviewDecision::Denied => mcp_elicitation_decline_with_message(
-            denial_message.unwrap_or_else(|| "Guardian denied this request.".to_string()),
-        ),
+        ReviewDecision::Denied { rejection } => mcp_elicitation_decline_with_message(rejection),
         ReviewDecision::TimedOut => {
             mcp_elicitation_decline_with_message(crate::guardian::guardian_timeout_message())
         }

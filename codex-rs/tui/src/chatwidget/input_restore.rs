@@ -19,6 +19,12 @@ impl ChatWidget {
         if self.elevated_windows_sandbox_setup_required() {
             return;
         }
+        if self.blocks_direct_input {
+            if let Some(user_message) = self.initial_user_message.take() {
+                self.restore_user_message_to_composer(user_message);
+            }
+            return;
+        }
         if let Some(user_message) = self.initial_user_message.take() {
             self.submit_user_message(user_message);
         }
@@ -446,6 +452,9 @@ impl ChatWidget {
             self.input_queue.clear();
             self.restore_composer_state(Default::default());
         }
+        let effort = self.effective_reasoning_effort();
+        self.bottom_pane
+            .set_active_reasoning_effort_baseline(effort.as_ref());
         self.turn_lifecycle
             .restore_running(self.turn_lifecycle.agent_turn_running, Instant::now());
         self.update_task_running_state();

@@ -80,6 +80,23 @@
 //! Slash commands with arguments (like `/plan` and `/review`) reuse the same preparation path so
 //! pasted content and text elements are preserved when extracting args.
 //!
+//! # Parent-Owned Thread Mode
+//!
+//! Parent-owned subagent threads keep the draft editable while blocking agent-directed submission.
+//! On the `Enter` and `Tab` submission paths, normal prompts, disallowed slash commands, and `!`
+//! shell commands return `ParentOwnedInputBlocked` without clearing the draft. Bare local and
+//! navigation slash commands remain available so users can leave or manage the view.
+//!
+//! # Reasoning Effort Animations
+//!
+//! The composer observes the effective reasoning tier whenever model-dependent surfaces refresh.
+//! The first observation, session configuration, and restored threads establish a baseline;
+//! genuine changes to Max/Ultra can then queue composer and status-line transitions when motion
+//! and color support allow them.
+//! Repeated selections do not restart either effect, dropping below Max clears them, and
+//! restoration clears any transition queued while replaying the saved session. Rendering advances
+//! active transitions through the frame requester until they finish.
+//!
 //! # Large Paste Placeholders
 //!
 //! Large pastes insert an element placeholder in the buffer and store the full text in
@@ -157,6 +174,7 @@ use crate::key_hint::KeyBinding;
 use crate::key_hint::has_ctrl_or_alt;
 use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
 use crate::ui_consts::FOOTER_INDENT_COLS;
+use codex_message_history::HistoryBatchCursor;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -176,10 +194,19 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::StatefulWidgetRef;
 use ratatui::widgets::WidgetRef;
 
+use codex_protocol::openai_models::ReasoningEffort;
+
 use super::chat_composer_history::ChatComposerHistory;
 use super::chat_composer_history::HistoryEntry;
 use super::chat_composer_history::HistoryEntryResponse;
+use super::chat_composer_history::HistorySearchResult;
 use super::command_popup::CommandItem;
+use super::effort_ignition::EffortIgnition;
+use super::effort_ignition::EffortTier;
+use super::effort_ignition::IGNITION_FRAME_TICK;
+use super::effort_ignition::IgnitionStyle;
+use super::effort_status_line::EFFORT_STATUS_LINE_FRAME_TICK;
+use super::effort_status_line::EffortStatusLineTransition;
 use super::file_search_popup::FileSearchPopup;
 use super::footer::CollaborationModeIndicator;
 use super::footer::FooterKeyHints;
@@ -265,10 +292,10 @@ use crate::history_cell;
 use crate::skills_helpers::skill_display_name;
 use crate::tui::FrameRequester;
 use crate::ui_consts::LIVE_PREFIX_COLS;
-use codex_connectors::AppInfo;
 #[cfg(test)]
-use codex_core_skills::model::SkillInterface;
-use codex_core_skills::model::SkillMetadata;
+use codex_app_server_protocol::SkillInterface;
+use codex_app_server_protocol::SkillMetadata;
+use codex_connectors::AppInfo;
 use codex_file_search::FileMatch;
 #[cfg(test)]
 use codex_plugin::AppConnectorId;
@@ -320,7 +347,57 @@ pub enum InputResult {
     /// command-history entry still represents the original command invocation that should be
     /// committed only if dispatch accepts it.
     CommandWithArgs(SlashCommand, String, Vec<TextElement>),
+    /// Agent-directed input was attempted while viewing a parent-owned spawned child thread.
+    ParentOwnedInputBlocked,
     None,
+}
+
+fn parent_owned_command_is_allowed(command: SlashCommand, args: &str) -> bool {
+    args.is_empty()
+        && matches!(
+            command,
+            SlashCommand::Feedback
+                | SlashCommand::New
+                | SlashCommand::Clear
+                | SlashCommand::Resume
+                | SlashCommand::App
+                | SlashCommand::Side
+                | SlashCommand::Btw
+                | SlashCommand::Agent
+                | SlashCommand::MultiAgents
+                | SlashCommand::Vim
+                | SlashCommand::Keymap
+                | SlashCommand::ElevateSandbox
+                | SlashCommand::SandboxReadRoot
+                | SlashCommand::Experimental
+                | SlashCommand::Memories
+                | SlashCommand::Quit
+                | SlashCommand::Exit
+                | SlashCommand::Logout
+                | SlashCommand::Copy
+                | SlashCommand::Raw
+                | SlashCommand::Diff
+                | SlashCommand::Mention
+                | SlashCommand::Skills
+                | SlashCommand::Import
+                | SlashCommand::Hooks
+                | SlashCommand::Status
+                | SlashCommand::Usage
+                | SlashCommand::Ide
+                | SlashCommand::DebugConfig
+                | SlashCommand::Title
+                | SlashCommand::Statusline
+                | SlashCommand::Theme
+                | SlashCommand::Pets
+                | SlashCommand::Ps
+                | SlashCommand::Stop
+                | SlashCommand::MemoryDrop
+                | SlashCommand::MemoryUpdate
+                | SlashCommand::Mcp
+                | SlashCommand::Apps
+                | SlashCommand::Plugins
+                | SlashCommand::Rollout
+        )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -382,8 +459,14 @@ pub(crate) struct ChatComposer {
     footer: FooterState,
     has_focus: bool,
     frame_requester: Option<FrameRequester>,
+    effort_tier: Option<EffortTier>,
+    effort_animation_style: Option<IgnitionStyle>,
+    effort_ignition: Option<EffortIgnition>,
+    effort_status_line_transition: Option<EffortStatusLineTransition>,
+    effort_observed: bool,
     attachments: AttachmentState,
     placeholder_text: String,
+    blocks_direct_input: bool,
     is_task_running: bool,
     queue_submissions: bool,
     /// Slash-command draft staged for local recall after application-level dispatch.
@@ -434,7 +517,7 @@ struct ComposerDraft {
     cursor: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ComposerDraftSnapshot {
     pub(crate) text: String,
     pub(crate) text_elements: Vec<TextElement>,
@@ -557,8 +640,14 @@ impl ChatComposer {
             },
             has_focus: has_input_focus,
             frame_requester: None,
+            effort_tier: None,
+            effort_animation_style: None,
+            effort_ignition: None,
+            effort_status_line_transition: None,
+            effort_observed: false,
             attachments: AttachmentState::default(),
             placeholder_text,
+            blocks_direct_input: false,
             is_task_running: false,
             queue_submissions: false,
             pending_slash_command_history: None,
@@ -596,6 +685,55 @@ impl ChatComposer {
 
     pub(crate) fn set_frame_requester(&mut self, frame_requester: FrameRequester) {
         self.frame_requester = Some(frame_requester);
+    }
+
+    /// Records the effective reasoning tier, captures the outgoing status
+    /// line, and queues the one-shot effects for a genuine Max/Ultra change
+    /// after the initial baseline.
+    pub(crate) fn set_active_reasoning_effort(
+        &mut self,
+        effort: Option<&ReasoningEffort>,
+        animations_enabled: bool,
+    ) -> bool {
+        let tier = EffortTier::from_effort(effort);
+        let is_baseline = !self.effort_observed;
+        self.effort_observed = true;
+        if self.effort_tier == tier {
+            return false;
+        }
+        self.effort_tier = tier;
+        self.effort_ignition = None;
+        self.effort_status_line_transition = None;
+        if let Some(tier) = tier
+            && !is_baseline
+            && animations_enabled
+        {
+            let style = IgnitionStyle::random(self.effort_animation_style);
+            self.effort_ignition = Some(EffortIgnition::new(tier, style));
+            self.effort_animation_style = Some(style);
+            if self.footer.status_line_enabled
+                && !self.footer.plan_mode_nudge_visible
+                && let Some(previous) = passive_footer_status_line(&self.footer_props())
+            {
+                self.effort_status_line_transition =
+                    Some(EffortStatusLineTransition::new(tier, previous));
+            }
+            if let Some(frame_requester) = &self.frame_requester {
+                frame_requester.schedule_frame();
+            }
+        }
+        true
+    }
+
+    /// Establishes the current tier without retaining or starting a one-shot effect.
+    pub(crate) fn set_active_reasoning_effort_baseline(
+        &mut self,
+        effort: Option<&ReasoningEffort>,
+    ) {
+        self.effort_tier = EffortTier::from_effort(effort);
+        self.effort_observed = true;
+        self.effort_ignition = None;
+        self.effort_status_line_transition = None;
     }
 
     pub fn set_skill_mentions(&mut self, skills: Option<Vec<SkillMetadata>>) {
@@ -877,6 +1015,46 @@ impl ChatComposer {
             }
             HistoryEntryResponse::Ignored => false,
         }
+    }
+
+    pub(crate) fn on_history_batch_response(
+        &mut self,
+        log_id: u64,
+        cursor: HistoryBatchCursor,
+        entries: Vec<crate::app_event::HistoryBatchEntryResponse>,
+        next_older_cursor: Option<HistoryBatchCursor>,
+    ) -> bool {
+        let result = self.history.on_batch_response(
+            log_id,
+            cursor,
+            entries,
+            next_older_cursor,
+            &self.app_event_tx,
+        );
+        self.apply_history_batch_result(result)
+    }
+
+    /// Applies a failed batch lookup without conflating it with history exhaustion.
+    ///
+    /// The history state machine either schedules a bounded retry, preserves an existing match, or
+    /// returns the search UI to its idle draft when no match has been selected yet.
+    pub(crate) fn on_history_batch_error(
+        &mut self,
+        log_id: u64,
+        cursor: HistoryBatchCursor,
+    ) -> bool {
+        let result = self
+            .history
+            .on_batch_error(log_id, cursor, &self.app_event_tx);
+        self.apply_history_batch_result(result)
+    }
+
+    fn apply_history_batch_result(&mut self, result: Option<HistorySearchResult>) -> bool {
+        let Some(result) = result else {
+            return false;
+        };
+        self.apply_history_search_result(result);
+        true
     }
 
     pub(crate) fn record_replayed_user_message_history(&mut self, entry: HistoryEntry) {
@@ -1366,6 +1544,11 @@ impl ChatComposer {
     /// Update the placeholder text without changing input enablement.
     pub(crate) fn set_placeholder_text(&mut self, placeholder: String) {
         self.placeholder_text = placeholder;
+    }
+
+    pub(crate) fn set_parent_owned_thread(&mut self) {
+        self.blocks_direct_input = true;
+        self.placeholder_text = "Viewing sub-agent — direct input is disabled".to_string();
     }
 
     /// Move the cursor to the end of the current text buffer.
@@ -2776,6 +2959,43 @@ impl ChatComposer {
         should_queue: bool,
         now: Instant,
     ) -> (InputResult, bool) {
+        // Preserve newlines that are part of a paste before applying parent-owned submission
+        // policy. Queued startup input still flushes the burst into its queued message below.
+        let in_slash_context = self.slash_commands_enabled()
+            && !self.draft.is_bash_mode
+            && (matches!(self.popups.active, ActivePopup::Command(_))
+                || self
+                    .draft
+                    .textarea
+                    .text()
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .starts_with('/'));
+        if !should_queue
+            && !self.draft.disable_paste_burst
+            && self.draft.paste_burst.is_active()
+            && !in_slash_context
+            && self.draft.paste_burst.append_newline_if_active(now)
+        {
+            return (InputResult::None, true);
+        }
+        if !should_queue
+            && !in_slash_context
+            && !self.draft.disable_paste_burst
+            && self
+                .draft
+                .paste_burst
+                .newline_should_insert_instead_of_submit(now)
+        {
+            self.draft.textarea.insert_str("\n");
+            self.draft.paste_burst.extend_window(now);
+            return (InputResult::None, true);
+        }
+
+        if let Some(result) = self.handle_parent_owned_submission() {
+            return result;
+        }
         if should_queue {
             if let Some(pasted) = self.draft.paste_burst.flush_before_modified_input() {
                 self.handle_paste(pasted);
@@ -2829,41 +3049,6 @@ impl ChatComposer {
             return (result, true);
         }
 
-        // If we're in a paste-like burst capture, treat Enter/Ctrl+Shift+Q as part of the burst
-        // and accumulate it rather than submitting or inserting immediately.
-        // Do not treat as paste inside a slash-command context.
-        let in_slash_context = self.slash_commands_enabled()
-            && !self.draft.is_bash_mode
-            && (matches!(self.popups.active, ActivePopup::Command(_))
-                || self
-                    .draft
-                    .textarea
-                    .text()
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .starts_with('/'));
-        if !self.draft.disable_paste_burst
-            && self.draft.paste_burst.is_active()
-            && !in_slash_context
-            && self.draft.paste_burst.append_newline_if_active(now)
-        {
-            return (InputResult::None, true);
-        }
-
-        // During a paste-like burst, treat Enter/Ctrl+Shift+Q as a newline instead of submit.
-        if !in_slash_context
-            && !self.draft.disable_paste_burst
-            && self
-                .draft
-                .paste_burst
-                .newline_should_insert_instead_of_submit(now)
-        {
-            self.draft.textarea.insert_str("\n");
-            self.draft.paste_burst.extend_window(now);
-            return (InputResult::None, true);
-        }
-
         let original_input = self.current_text();
         let original_text_elements = self.current_text_elements();
         let original_mention_bindings = self.snapshot_mention_bindings();
@@ -2908,6 +3093,27 @@ impl ChatComposer {
             self.draft.pending_pastes = original_pending_pastes;
             (InputResult::None, true)
         }
+    }
+
+    fn handle_parent_owned_submission(&mut self) -> Option<(InputResult, bool)> {
+        if !self.blocks_direct_input {
+            return None;
+        }
+
+        let text = self.current_text();
+        let allowed_slash_command = parse_slash_name(&text).is_some_and(|(name, args, _)| {
+            matches!(
+                self.slash_input().command(name),
+                Some(SlashCommandItem::Builtin(command))
+                    if name == command.command()
+                        && parent_owned_command_is_allowed(command, args)
+            )
+        });
+        if text.starts_with('/') && allowed_slash_command {
+            return None;
+        }
+
+        Some((InputResult::ParentOwnedInputBlocked, true))
     }
 
     /// Check if the first line is a bare slash command (no args) and dispatch it.
@@ -3821,7 +4027,7 @@ impl ChatComposer {
                     description,
                     insert_text: format!("${skill_name}"),
                     search_terms,
-                    path: Some(skill.path_to_skills_md.to_string_lossy().into_owned()),
+                    path: Some(skill.path.to_string_lossy().into_owned()),
                     category_tag: Some("[Skill]".to_string()),
                     sort_rank: 1,
                 });
@@ -4276,6 +4482,25 @@ impl ChatComposer {
                     } else {
                         None
                     };
+                    let transition_visible = status_line_active
+                        && !self.footer.flash_visible()
+                        && self.footer.hint_override.is_none();
+                    let transition_active = transition_visible
+                        && self
+                            .effort_status_line_transition
+                            .as_ref()
+                            .is_some_and(|transition| !transition.is_finished());
+                    let combined_status_line = if transition_visible
+                        && let Some(transition) = &self.effort_status_line_transition
+                        && !transition.is_finished()
+                    {
+                        transition.render_line(
+                            combined_status_line.as_ref(),
+                            hint_rect.width.saturating_sub(FOOTER_INDENT_COLS as u16),
+                        )
+                    } else {
+                        combined_status_line
+                    };
                     let mut truncated_status_line = if status_line_active {
                         combined_status_line.as_ref().map(|line| {
                             truncate_line_with_ellipsis_if_overflow(line.clone(), available_width)
@@ -4316,6 +4541,8 @@ impl ChatComposer {
                             Some(side_conversation_context_line(label))
                         } else if let Some(line) = self.shell_mode_footer_line() {
                             Some(line)
+                        } else if transition_active {
+                            None
                         } else if status_line_active {
                             let full = self.mode_indicator_line(show_cycle_hint);
                             let compact = self.mode_indicator_line(/*show_cycle_hint*/ false);
@@ -4446,6 +4673,13 @@ impl ChatComposer {
                     {
                         mark_underlined_hyperlink(buf, hint_rect, url);
                     }
+                    if transition_visible
+                        && let Some(transition) = &self.effort_status_line_transition
+                        && !transition.is_finished()
+                        && let Some(frame_requester) = &self.frame_requester
+                    {
+                        frame_requester.schedule_frame_in(EFFORT_STATUS_LINE_FRAME_TICK);
+                    }
                 }
             }
         }
@@ -4460,6 +4694,13 @@ impl ChatComposer {
             let prompt = if self.draft.input_enabled {
                 if self.draft.is_bash_mode {
                     Span::from("!").light_red().bold()
+                } else if let Some(tier) = self.effort_tier {
+                    let charge = self
+                        .effort_ignition
+                        .as_ref()
+                        .map(EffortIgnition::charge_alpha)
+                        .unwrap_or(1.0);
+                    tier.prompt(charge)
                 } else {
                     "›".bold()
                 }
@@ -4524,8 +4765,33 @@ impl ChatComposer {
                     .render_ref(textarea_rect.inner(Margin::new(0, 0)), buf);
             }
         }
+        if matches!(self.popups.active, ActivePopup::None)
+            && let Some(ignition) = &self.effort_ignition
+            && !ignition.is_finished()
+        {
+            let protected_top = if remote_images_rect.is_empty() {
+                textarea_rect.y
+            } else {
+                remote_images_rect.y
+            };
+            let protected = Rect::new(
+                composer_rect.x,
+                protected_top,
+                composer_rect.width,
+                textarea_rect.bottom().saturating_sub(protected_top),
+            );
+            if ignition.render(composer_rect, protected, buf)
+                && let Some(frame_requester) = &self.frame_requester
+            {
+                frame_requester.schedule_frame_in(IGNITION_FRAME_TICK);
+            }
+        }
     }
 }
+
+#[cfg(test)]
+#[path = "chat_composer_effort_tests.rs"]
+mod effort_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4550,7 +4816,7 @@ mod tests {
     use tokio::sync::mpsc::UnboundedReceiver;
     use tokio::sync::mpsc::unbounded_channel;
 
-    fn new_test_composer() -> (ChatComposer, UnboundedReceiver<AppEvent>) {
+    pub(super) fn new_test_composer() -> (ChatComposer, UnboundedReceiver<AppEvent>) {
         let (tx, rx) = unbounded_channel::<AppEvent>();
         let sender = AppEventSender::new(tx);
         (
@@ -4563,6 +4829,47 @@ mod tests {
             ),
             rx,
         )
+    }
+
+    #[test]
+    fn parent_owned_thread_allows_bare_navigation_commands() {
+        for (command, expected) in [
+            ("/agent", SlashCommand::Agent),
+            ("/side", SlashCommand::Side),
+            ("/btw", SlashCommand::Btw),
+            ("/diff ", SlashCommand::Diff),
+        ] {
+            let (mut composer, _rx) = new_test_composer();
+            composer.set_parent_owned_thread();
+            composer.set_text_content(command.to_string(), Vec::new(), Vec::new());
+
+            assert_eq!(
+                composer.handle_submission(/*should_queue*/ false).0,
+                InputResult::Command(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn parent_owned_thread_allows_safe_command_selected_from_prefix() {
+        let (mut composer, _rx) = new_test_composer();
+        composer.set_parent_owned_thread();
+        type_chars_humanlike(&mut composer, &['/', 'a', 'g']);
+
+        let result = composer
+            .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .0;
+
+        assert_eq!(result, InputResult::Command(SlashCommand::Agent));
+    }
+
+    #[test]
+    fn parent_owned_thread_placeholder_snapshot() {
+        snapshot_composer_state(
+            "parent_owned_thread_placeholder",
+            /*enhanced_keys_supported*/ false,
+            ChatComposer::set_parent_owned_thread,
+        );
     }
 
     #[test]
@@ -4697,7 +5004,7 @@ mod tests {
         );
     }
 
-    fn snapshot_composer_state_with_width<F>(
+    pub(super) fn snapshot_composer_state_with_width<F>(
         name: &str,
         width: u16,
         enhanced_keys_supported: bool,
@@ -4850,6 +5157,21 @@ mod tests {
                     .handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
                 let _ = composer
                     .handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+            },
+        );
+
+        snapshot_composer_state(
+            "footer_mode_history_search_unavailable",
+            /*enhanced_keys_supported*/ true,
+            |composer| {
+                composer.set_text_content("draft".to_string(), Vec::new(), Vec::new());
+                composer.begin_history_search();
+                for ch in ['g', 'i', 't'] {
+                    let _ = composer
+                        .handle_key_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+                }
+                composer.apply_history_search_result(HistorySearchResult::Pending);
+                composer.apply_history_search_result(HistorySearchResult::Unavailable);
             },
         );
 
@@ -6319,10 +6641,9 @@ mod tests {
             short_description: None,
             interface: None,
             dependencies: None,
-            policy: None,
-            path_to_skills_md: test_path_buf(&format!("/tmp/{name}/SKILL.md")).abs(),
+            path: test_path_buf(&format!("/tmp/{name}/SKILL.md")).abs(),
             scope: crate::test_support::skill_scope_user(),
-            plugin_id: None,
+            enabled: true,
         }
     }
 
@@ -6970,10 +7291,9 @@ mod tests {
             short_description: None,
             interface: None,
             dependencies: None,
-            policy: None,
-            path_to_skills_md: skill_path.clone(),
+            path: skill_path.clone(),
             scope: crate::test_support::skill_scope_user(),
-            plugin_id: None,
+            enabled: true,
         }]));
 
         let ActivePopup::Skill(popup) = &composer.popups.active else {
@@ -7013,10 +7333,9 @@ mod tests {
                 default_prompt: None,
             }),
             dependencies: None,
-            policy: None,
-            path_to_skills_md: skill_path.clone(),
+            path: skill_path.clone(),
             scope: crate::test_support::skill_scope_repo(),
-            plugin_id: None,
+            enabled: true,
         }]));
         composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
             config_name: "google-calendar@debug".to_string(),
@@ -7129,10 +7448,9 @@ mod tests {
                         default_prompt: None,
                     }),
                     dependencies: None,
-                    policy: None,
-                    path_to_skills_md: test_path_buf("/tmp/repo/google-calendar/SKILL.md").abs(),
+                    path: test_path_buf("/tmp/repo/google-calendar/SKILL.md").abs(),
                     scope: crate::test_support::skill_scope_repo(),
-                    plugin_id: None,
+                    enabled: true,
                 }]));
                 composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
                 config_name: "google-calendar@debug".to_string(),
@@ -7984,54 +8302,51 @@ mod tests {
     /// Behavior: while a paste-like burst is active, Enter should not submit; it should insert a
     /// newline into the buffered payload and flush as a single paste later.
     #[test]
-    fn ascii_burst_treats_enter_as_newline() {
+    fn ascii_burst_treats_enter_as_newline_even_when_parent_owned() {
         use crossterm::event::KeyCode;
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
-        let sender = AppEventSender::new(tx);
-        let mut composer = ChatComposer::new(
-            /*has_input_focus*/ true,
-            sender,
-            /*enhanced_keys_supported*/ false,
-            "Ask Codex to do anything".to_string(),
-            /*disable_paste_burst*/ false,
-        );
+        for parent_owned in [false, true] {
+            let (mut composer, _rx) = new_test_composer();
+            if parent_owned {
+                composer.set_parent_owned_thread();
+            }
+            let mut now = Instant::now();
+            let step = Duration::from_millis(1);
 
-        let mut now = Instant::now();
-        let step = Duration::from_millis(1);
-
-        let _ = composer.handle_input_basic_with_time(
-            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
-            now,
-        );
-        now += step;
-        let _ = composer.handle_input_basic_with_time(
-            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
-            now,
-        );
-        now += step;
-
-        let (result, _) = composer.handle_submission_with_time(/*should_queue*/ false, now);
-        assert!(
-            matches!(result, InputResult::None),
-            "Enter during a burst should insert newline, not submit"
-        );
-
-        for ch in ['t', 'h', 'e', 'r', 'e'] {
-            now += step;
             let _ = composer.handle_input_basic_with_time(
-                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
                 now,
             );
-        }
+            now += step;
+            let _ = composer.handle_input_basic_with_time(
+                KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+                now,
+            );
+            now += step;
 
-        assert!(composer.draft.textarea.text().is_empty());
-        let flush_time = now + PasteBurst::recommended_active_flush_delay() + step;
-        let flushed = composer.handle_paste_burst_flush(flush_time);
-        assert!(flushed, "expected paste burst to flush");
-        assert_eq!(composer.draft.textarea.text(), "hi\nthere");
+            let (result, _) =
+                composer.handle_submission_with_time(/*should_queue*/ false, now);
+            assert!(
+                matches!(result, InputResult::None),
+                "Enter during a burst should insert newline, not submit"
+            );
+
+            for ch in ['t', 'h', 'e', 'r', 'e'] {
+                now += step;
+                let _ = composer.handle_input_basic_with_time(
+                    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                    now,
+                );
+            }
+
+            assert!(composer.draft.textarea.text().is_empty());
+            let flush_time = now + PasteBurst::recommended_active_flush_delay() + step;
+            let flushed = composer.handle_paste_burst_flush(flush_time);
+            assert!(flushed, "expected paste burst to flush");
+            assert_eq!(composer.draft.textarea.text(), "hi\nthere");
+        }
     }
 
     /// Behavior: startup-pending submissions are queued immediately, so Enter should flush any
@@ -8947,6 +9262,9 @@ mod tests {
             InputResult::Queued { .. } => {
                 panic!("expected command dispatch, but composer queued literal text")
             }
+            InputResult::ParentOwnedInputBlocked => {
+                panic!("expected command dispatch, but parent-owned input was blocked")
+            }
             InputResult::None => panic!("expected Command result for '/init'"),
         }
         assert!(
@@ -9454,6 +9772,9 @@ mod tests {
             InputResult::Queued { .. } => {
                 panic!("expected command dispatch after Tab completion, got literal queue")
             }
+            InputResult::ParentOwnedInputBlocked => {
+                panic!("expected command dispatch, but parent-owned input was blocked")
+            }
             InputResult::None => panic!("expected Command result for '/diff'"),
         }
         assert!(composer.draft.textarea.is_empty());
@@ -9650,6 +9971,9 @@ mod tests {
             }
             InputResult::Queued { .. } => {
                 panic!("expected command dispatch, but composer queued literal text")
+            }
+            InputResult::ParentOwnedInputBlocked => {
+                panic!("expected command dispatch, but parent-owned input was blocked")
             }
             InputResult::None => panic!("expected Command result for '/mention'"),
         }

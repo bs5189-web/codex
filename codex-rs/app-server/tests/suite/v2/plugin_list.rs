@@ -121,6 +121,7 @@ async fn plugin_list_skips_invalid_marketplace_file_and_reports_error() -> Resul
         .send_plugin_list_request(PluginListParams {
             cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?]),
             marketplace_kinds: None,
+            force_refetch: false,
         })
         .await?;
 
@@ -253,6 +254,8 @@ enabled = true
     let mut global_installed_body: serde_json::Value = serde_json::from_str(
         &remote_installed_plugin_body("", "1.2.3", /*enabled*/ true),
     )?;
+    global_installed_body["plugins"][0]["must_show_installation_interstitial"] =
+        serde_json::json!(false);
     let mut remote_only = global_installed_body["plugins"][0].clone();
     remote_only["id"] = serde_json::json!("plugins~Plugin_11111111111111111111111111111111");
     remote_only["name"] = serde_json::json!("remote-only");
@@ -310,16 +313,24 @@ enabled = true
         remote_marketplace
             .plugins
             .iter()
-            .map(|plugin| (plugin.id.clone(), plugin.install_policy_source))
+            .map(|plugin| {
+                (
+                    plugin.id.clone(),
+                    plugin.install_policy_source,
+                    plugin.must_show_installation_interstitial,
+                )
+            })
             .collect::<Vec<_>>(),
         vec![
             (
                 "linear@openai-curated-remote".to_string(),
                 Some(PluginInstallPolicySource::WorkspaceSetting),
+                Some(false),
             ),
             (
                 "remote-only@openai-curated-remote".to_string(),
                 Some(PluginInstallPolicySource::WorkspaceSetting),
+                Some(false),
             ),
         ]
     );
@@ -469,6 +480,7 @@ async fn plugin_list_keeps_valid_marketplaces_when_another_marketplace_fails_to_
                 AbsolutePathBuf::try_from(invalid_repo_root.path())?,
             ]),
             marketplace_kinds: None,
+            force_refetch: false,
         })
         .await?;
 
@@ -499,6 +511,7 @@ async fn plugin_list_keeps_valid_marketplaces_when_another_marketplace_fails_to_
                 enabled: false,
                 install_policy: PluginInstallPolicy::Available,
                 install_policy_source: None,
+                must_show_installation_interstitial: None,
                 auth_policy: PluginAuthPolicy::OnInstall,
                 availability: codex_app_server_protocol::PluginAvailability::Available,
                 interface: None,
@@ -587,6 +600,7 @@ async fn plugin_list_returns_empty_when_workspace_codex_plugins_disabled() -> Re
         .send_plugin_list_request(PluginListParams {
             cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?]),
             marketplace_kinds: None,
+            force_refetch: false,
         })
         .await?;
 
@@ -681,6 +695,7 @@ async fn plugin_list_reuses_cached_workspace_codex_plugins_setting() -> Result<(
             .send_plugin_list_request(PluginListParams {
                 cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?]),
                 marketplace_kinds: None,
+                force_refetch: false,
             })
             .await?;
 
@@ -766,6 +781,7 @@ async fn plugin_list_uses_alternate_discoverable_manifest_and_keeps_undiscoverab
         .send_plugin_list_request(PluginListParams {
             cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?]),
             marketplace_kinds: None,
+            force_refetch: false,
         })
         .await?;
 
@@ -797,6 +813,7 @@ async fn plugin_list_uses_alternate_discoverable_manifest_and_keeps_undiscoverab
                     enabled: false,
                     install_policy: PluginInstallPolicy::Available,
                     install_policy_source: None,
+                    must_show_installation_interstitial: None,
                     auth_policy: PluginAuthPolicy::OnInstall,
                     availability: codex_app_server_protocol::PluginAvailability::Available,
                     interface: Some(codex_app_server_protocol::PluginInterface {
@@ -838,6 +855,7 @@ async fn plugin_list_uses_alternate_discoverable_manifest_and_keeps_undiscoverab
                     enabled: false,
                     install_policy: PluginInstallPolicy::Available,
                     install_policy_source: None,
+                    must_show_installation_interstitial: None,
                     auth_policy: PluginAuthPolicy::OnInstall,
                     availability: codex_app_server_protocol::PluginAvailability::Available,
                     interface: None,
@@ -886,6 +904,7 @@ async fn plugin_list_accepts_omitted_cwds() -> Result<()> {
         .send_plugin_list_request(PluginListParams {
             cwds: None,
             marketplace_kinds: None,
+            force_refetch: false,
         })
         .await?;
 
@@ -943,6 +962,7 @@ async fn plugin_list_returns_share_context_for_shared_local_plugin() -> Result<(
         .send_plugin_list_request(PluginListParams {
             cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?]),
             marketplace_kinds: None,
+            force_refetch: false,
         })
         .await?;
 
@@ -1039,6 +1059,7 @@ enabled = false
         .send_plugin_list_request(PluginListParams {
             cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?]),
             marketplace_kinds: None,
+            force_refetch: false,
         })
         .await?;
 
@@ -1197,6 +1218,7 @@ enabled = false
                 AbsolutePathBuf::try_from(workspace_default.path())?,
             ]),
             marketplace_kinds: None,
+            force_refetch: false,
         })
         .await?;
 
@@ -1285,6 +1307,7 @@ async fn plugin_list_returns_plugin_interface_with_absolute_asset_paths() -> Res
         .send_plugin_list_request(PluginListParams {
             cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?]),
             marketplace_kinds: None,
+            force_refetch: false,
         })
         .await?;
 
@@ -1402,6 +1425,7 @@ async fn plugin_list_accepts_legacy_string_default_prompt() -> Result<()> {
         .send_plugin_list_request(PluginListParams {
             cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?]),
             marketplace_kinds: None,
+            force_refetch: false,
         })
         .await?;
 
@@ -1494,6 +1518,7 @@ enabled = true
         .send_plugin_list_request(PluginListParams {
             cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?]),
             marketplace_kinds: None,
+            force_refetch: false,
         })
         .await?;
 
@@ -1687,6 +1712,7 @@ async fn plugin_list_sync_upgrades_and_removes_remote_installed_plugin_bundles()
         .send_plugin_list_request(PluginListParams {
             cwds: None,
             marketplace_kinds: None,
+            force_refetch: false,
         })
         .await?;
     let response: JSONRPCResponse = timeout(
@@ -1753,6 +1779,7 @@ async fn plugin_list_includes_remote_marketplaces_when_remote_plugin_enabled() -
       "scope": "GLOBAL",
       "installation_policy": "AVAILABLE",
       "installation_policy_source": "IMPLICIT_CANONICAL_APP",
+      "must_show_installation_interstitial": true,
       "authentication_policy": "ON_USE",
       "status": "ENABLED",
       "release": {
@@ -1793,6 +1820,7 @@ async fn plugin_list_includes_remote_marketplaces_when_remote_plugin_enabled() -
       "scope": "GLOBAL",
       "installation_policy": "AVAILABLE",
       "installation_policy_source": "WORKSPACE_SETTING",
+      "must_show_installation_interstitial": false,
       "authentication_policy": "ON_USE",
       "status": "ENABLED",
       "release": {
@@ -1876,6 +1904,7 @@ async fn plugin_list_includes_remote_marketplaces_when_remote_plugin_enabled() -
         .send_plugin_list_request(PluginListParams {
             cwds: None,
             marketplace_kinds: None,
+            force_refetch: false,
         })
         .await?;
 
@@ -1925,6 +1954,10 @@ async fn plugin_list_includes_remote_marketplaces_when_remote_plugin_enabled() -
         Some(PluginInstallPolicySource::ImplicitCanonicalApp)
     );
     assert_eq!(
+        remote_marketplace.plugins[0].must_show_installation_interstitial,
+        Some(true)
+    );
+    assert_eq!(
         remote_marketplace.plugins[0].availability,
         codex_app_server_protocol::PluginAvailability::Available
     );
@@ -1962,6 +1995,10 @@ async fn plugin_list_includes_remote_marketplaces_when_remote_plugin_enabled() -
     assert_eq!(
         cached_catalog["plugins"][0]["installation_policy_source"],
         serde_json::json!("IMPLICIT_CANONICAL_APP")
+    );
+    assert_eq!(
+        cached_catalog["plugins"][0]["must_show_installation_interstitial"],
+        serde_json::json!(true)
     );
     assert_eq!(
         cached_catalog["plugins"][0]["release"]["interface"]["default_prompts"],
@@ -2039,6 +2076,7 @@ async fn plugin_list_uses_cached_global_remote_catalog_and_refreshes_it() -> Res
         .send_plugin_list_request(PluginListParams {
             cwds: None,
             marketplace_kinds: None,
+            force_refetch: false,
         })
         .await?;
     let response: PluginListResponse = to_response(
@@ -2057,6 +2095,10 @@ async fn plugin_list_uses_cached_global_remote_catalog_and_refreshes_it() -> Res
         remote_marketplace.plugins[0].id,
         "linear@openai-curated-remote"
     );
+    assert_eq!(
+        remote_marketplace.plugins[0].must_show_installation_interstitial,
+        None
+    );
     wait_for_remote_plugin_request_count(&server, "/ps/plugins/list", /*expected_count*/ 1).await?;
     wait_for_cached_remote_catalog_plugin_ids(codex_home.path(), &[cached_remote_plugin_id])
         .await?;
@@ -2072,6 +2114,7 @@ async fn plugin_list_uses_cached_global_remote_catalog_and_refreshes_it() -> Res
         .send_plugin_list_request(PluginListParams {
             cwds: None,
             marketplace_kinds: None,
+            force_refetch: false,
         })
         .await?;
     let response: PluginListResponse = to_response(
@@ -2159,6 +2202,7 @@ async fn plugin_list_includes_openai_curated_remote_collection_when_remote_plugi
         .send_plugin_list_request(PluginListParams {
             cwds: None,
             marketplace_kinds: Some(vec![PluginListMarketplaceKind::Vertical]),
+            force_refetch: false,
         })
         .await?;
     let response: JSONRPCResponse = timeout(
@@ -2253,6 +2297,7 @@ async fn plugin_list_propagates_openai_curated_remote_collection_errors_when_rem
         .send_plugin_list_request(PluginListParams {
             cwds: None,
             marketplace_kinds: Some(vec![PluginListMarketplaceKind::Vertical]),
+            force_refetch: false,
         })
         .await?;
     let err = timeout(
@@ -2297,6 +2342,7 @@ async fn plugin_list_skips_openai_curated_remote_collection_for_api_auth_when_re
         .send_plugin_list_request(PluginListParams {
             cwds: None,
             marketplace_kinds: Some(vec![PluginListMarketplaceKind::Vertical]),
+            force_refetch: false,
         })
         .await?;
     let response: JSONRPCResponse = timeout(
@@ -2340,6 +2386,7 @@ async fn plugin_list_includes_api_curated_marketplace_for_api_auth_when_remote_p
         .send_plugin_list_request(PluginListParams {
             cwds: None,
             marketplace_kinds: None,
+            force_refetch: false,
         })
         .await?;
     let response: JSONRPCResponse = timeout(
@@ -2399,6 +2446,7 @@ async fn plugin_list_does_not_query_openai_curated_remote_collection_by_default(
         .send_plugin_list_request(PluginListParams {
             cwds: None,
             marketplace_kinds: None,
+            force_refetch: false,
         })
         .await?;
     let response: JSONRPCResponse = timeout(
@@ -2456,6 +2504,7 @@ async fn plugin_list_vertical_kind_noops_when_remote_plugin_enabled() -> Result<
         .send_plugin_list_request(PluginListParams {
             cwds: None,
             marketplace_kinds: Some(vec![PluginListMarketplaceKind::Vertical]),
+            force_refetch: false,
         })
         .await?;
     let response: JSONRPCResponse = timeout(
@@ -2514,6 +2563,7 @@ async fn plugin_list_does_not_append_global_remote_when_marketplace_kinds_are_ex
         .send_plugin_list_request(PluginListParams {
             cwds: None,
             marketplace_kinds: Some(vec![PluginListMarketplaceKind::Local]),
+            force_refetch: false,
         })
         .await?;
 
@@ -3062,6 +3112,7 @@ async fn plugin_list_fetches_workspace_directory_kind_when_remote_plugin_disable
         .send_plugin_list_request(PluginListParams {
             cwds: None,
             marketplace_kinds: Some(vec![PluginListMarketplaceKind::WorkspaceDirectory]),
+            force_refetch: false,
         })
         .await?;
 
@@ -3192,6 +3243,7 @@ plugin_sharing = false
         .send_plugin_list_request(PluginListParams {
             cwds: None,
             marketplace_kinds: Some(vec![PluginListMarketplaceKind::CreatedByMeRemote]),
+            force_refetch: false,
         })
         .await?;
 
@@ -3323,6 +3375,7 @@ async fn plugin_list_fetches_shared_with_me_kind() -> Result<()> {
         .send_plugin_list_request(PluginListParams {
             cwds: None,
             marketplace_kinds: Some(vec![PluginListMarketplaceKind::SharedWithMe]),
+            force_refetch: false,
         })
         .await?;
 
@@ -3484,6 +3537,7 @@ plugin_sharing = false
         .send_plugin_list_request(PluginListParams {
             cwds: None,
             marketplace_kinds: Some(vec![PluginListMarketplaceKind::SharedWithMe]),
+            force_refetch: false,
         })
         .await?;
 
@@ -3548,6 +3602,7 @@ plugin_sharing = true
         .send_plugin_list_request(PluginListParams {
             cwds: None,
             marketplace_kinds: Some(vec![PluginListMarketplaceKind::CreatedByMeRemote]),
+            force_refetch: false,
         })
         .await?;
 
@@ -3682,6 +3737,7 @@ async fn plugin_list_marks_remote_plugin_disabled_by_admin() -> Result<()> {
         .send_plugin_list_request(PluginListParams {
             cwds: None,
             marketplace_kinds: None,
+            force_refetch: false,
         })
         .await?;
 
@@ -3746,6 +3802,7 @@ remote_plugin = true
         .send_plugin_list_request(PluginListParams {
             cwds: None,
             marketplace_kinds: None,
+            force_refetch: false,
         })
         .await?;
 
@@ -3786,6 +3843,7 @@ async fn plugin_list_fetches_featured_plugin_ids_without_chatgpt_auth() -> Resul
         .send_plugin_list_request(PluginListParams {
             cwds: None,
             marketplace_kinds: None,
+            force_refetch: false,
         })
         .await?;
 
@@ -3831,6 +3889,7 @@ async fn plugin_list_uses_warmed_featured_plugin_ids_cache_on_first_request() ->
         .send_plugin_list_request(PluginListParams {
             cwds: None,
             marketplace_kinds: None,
+            force_refetch: false,
         })
         .await?;
 

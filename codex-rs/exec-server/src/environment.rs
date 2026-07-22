@@ -9,6 +9,8 @@ use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use futures::FutureExt;
 
+use crate::CapabilityRootsDiscoverParams;
+use crate::CapabilityRootsDiscoverResponse;
 use crate::ExecServerError;
 use crate::ExecServerRuntimePaths;
 use crate::ExecutorFileSystem;
@@ -328,12 +330,6 @@ impl EnvironmentManager {
     /// Returns the local environment instance when one is configured.
     pub fn try_local_environment(&self) -> Option<Arc<Environment>> {
         self.local_environment.as_ref().map(Arc::clone)
-    }
-
-    /// Returns the default environment or local environment when either exists.
-    pub fn default_or_local_environment(&self) -> Option<Arc<Environment>> {
-        self.default_environment()
-            .or_else(|| self.try_local_environment())
     }
 
     /// Returns a named environment instance.
@@ -710,6 +706,19 @@ impl Environment {
         match &self.remote_client {
             Some(client) => client.environment_info().await,
             None => Ok(EnvironmentInfo::local()),
+        }
+    }
+
+    /// Discovers plugin and skill manifests through the environment's high-level discovery API.
+    pub async fn discover_capability_roots(
+        &self,
+        params: CapabilityRootsDiscoverParams,
+    ) -> Result<CapabilityRootsDiscoverResponse, ExecServerError> {
+        match &self.remote_client {
+            Some(client) => client.get().await?.discover_capability_roots(params).await,
+            None => crate::discover_capability_roots(self.filesystem.as_ref(), params)
+                .await
+                .map_err(|error| ExecServerError::Protocol(error.to_string())),
         }
     }
 
@@ -1444,6 +1453,7 @@ mod tests {
                 sandbox: None,
                 enforce_managed_network: false,
                 managed_network: None,
+                network_proxy: None,
             })
             .await
             .expect("start process");
@@ -1484,6 +1494,7 @@ mod tests {
                 sandbox: Some(sandbox),
                 enforce_managed_network: false,
                 managed_network: None,
+                network_proxy: None,
             })
             .await;
         let Err(err) = result else {

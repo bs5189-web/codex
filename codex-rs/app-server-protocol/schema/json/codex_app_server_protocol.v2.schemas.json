@@ -956,6 +956,42 @@
       },
       "type": "object"
     },
+    "AppsInstalledParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "Read the committed installed connector runtime snapshot.",
+      "properties": {
+        "forceRefresh": {
+          "description": "When true and Apps are permitted, refresh and publish the hosted connector runtime tool snapshot first.",
+          "type": "boolean"
+        },
+        "threadId": {
+          "description": "Optional loaded thread id used to evaluate effective app configuration.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "AppsInstalledParams",
+      "type": "object"
+    },
+    "AppsInstalledResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "The installed connectors in one committed runtime snapshot.",
+      "properties": {
+        "apps": {
+          "items": {
+            "$ref": "#/definitions/InstalledApp"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "apps"
+      ],
+      "title": "AppsInstalledResponse",
+      "type": "object"
+    },
     "AppsListParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "description": "EXPERIMENTAL - list available apps/connectors.",
@@ -2210,6 +2246,30 @@
             "params"
           ],
           "title": "App/listRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "app/installed"
+              ],
+              "title": "App/installedRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AppsInstalledParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "App/installedRequest",
           "type": "object"
         },
         {
@@ -3549,6 +3609,14 @@
         }
       ]
     },
+    "CodexResponseHandoffMode": {
+      "enum": [
+        "thinking",
+        "commentary",
+        "bemTags"
+      ],
+      "type": "string"
+    },
     "CollabAgentState": {
       "properties": {
         "message": {
@@ -4652,6 +4720,12 @@
             "null"
           ]
         },
+        "allowLoginShell": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "allowManagedHooksOnly": {
           "type": [
             "boolean",
@@ -4709,6 +4783,12 @@
             "null"
           ]
         },
+        "checkForUpdateOnStartup": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "computerUse": {
           "anyOf": [
             {
@@ -4744,6 +4824,28 @@
             "null"
           ]
         },
+        "feedback": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FeedbackRequirements"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "logDir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "modelCatalogJson": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "models": {
           "anyOf": [
             {
@@ -4752,6 +4854,18 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "sqliteHome": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "windowsSandboxPrivateDesktop": {
+          "type": [
+            "boolean",
+            "null"
           ]
         }
       },
@@ -4886,6 +5000,15 @@
       "oneOf": [
         {
           "properties": {
+            "additionalContextLimit": {
+              "description": "Approximate token threshold for spilling this hook's `additionalContext` to disk. `null` uses 2,500 tokens; `0` disables spilling for this hook. The threshold is evaluated against the original context; a spilled preview also includes recovery metadata.",
+              "format": "uint",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "async": {
               "type": "boolean"
             },
@@ -4991,7 +5114,19 @@
             "null"
           ]
         },
+        "distributionChannel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "iconUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "iconUrlDark": {
           "type": [
             "string",
             "null"
@@ -5000,8 +5135,21 @@
         "id": {
           "type": "string"
         },
+        "installUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "type": "string"
+        },
+        "pluginDisplayNames": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "toolSummaries": {
           "items": {
@@ -5139,6 +5287,26 @@
         },
         {
           "properties": {
+            "audio_url": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "input_audio"
+              ],
+              "title": "InputAudioContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "audio_url",
+            "type"
+          ],
+          "title": "InputAudioContentItem",
+          "type": "object"
+        },
+        {
+          "properties": {
             "text": {
               "type": "string"
             },
@@ -5267,6 +5435,26 @@
             "type"
           ],
           "title": "InputImageDynamicToolCallOutputContentItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "audioUrl": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "inputAudio"
+              ],
+              "title": "InputAudioDynamicToolCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "audioUrl",
+            "type"
+          ],
+          "title": "InputAudioDynamicToolCallOutputContentItem",
           "type": "object"
         }
       ]
@@ -5613,6 +5801,24 @@
           "description": "If true, include detection under the user's home directory.",
           "type": "boolean"
         },
+        "maxSessionAgeDays": {
+          "description": "Maximum age in days for detected sessions. Missing values use the default limit.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maxSessions": {
+          "description": "Maximum number of sessions to detect. Missing values use the default limit.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "migrationSource": {
           "description": "Optional migration-source selector. Missing or unrecognized values use the default source.",
           "type": [
@@ -5808,6 +6014,13 @@
             "null"
           ]
         },
+        "providerId": {
+          "description": "Opaque provider identifier supplied by the caller for analytics attribution. This does not select the migration source.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "source": {
           "description": "Optional identifier for the product that initiated the import.",
           "type": [
@@ -5953,6 +6166,17 @@
         "remoteMcpServersConfig"
       ],
       "type": "string"
+    },
+    "FeedbackRequirements": {
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     },
     "FeedbackUploadParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
@@ -6755,6 +6979,26 @@
         },
         {
           "properties": {
+            "audio_url": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "input_audio"
+              ],
+              "title": "InputAudioFunctionCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "audio_url",
+            "type"
+          ],
+          "title": "InputAudioFunctionCallOutputContentItem",
+          "type": "object"
+        },
+        {
+          "properties": {
             "encrypted_content": {
               "type": "string"
             },
@@ -7362,6 +7606,7 @@
         "preCompact",
         "postCompact",
         "sessionStart",
+        "sessionEnd",
         "userPromptSubmit",
         "subagentStart",
         "subagentStop",
@@ -7386,6 +7631,15 @@
     },
     "HookMetadata": {
       "properties": {
+        "additionalContextLimit": {
+          "description": "Configured `additionalContext` spill threshold. `null` uses 2,500 tokens; `0` disables spilling.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "command": {
           "type": [
             "string",
@@ -7798,8 +8052,44 @@
             "image"
           ],
           "type": "string"
+        },
+        {
+          "description": "Audio attachments included in user turns.",
+          "enum": [
+            "audio"
+          ],
+          "type": "string"
         }
       ]
+    },
+    "InstalledApp": {
+      "description": "Installed connector runtime state.",
+      "properties": {
+        "callable": {
+          "description": "Whether the connector is enabled and has a non-synthetic, model-visible tool allowed by effective MCP and app/tool policy in the committed runtime snapshot.",
+          "type": "boolean"
+        },
+        "enabled": {
+          "description": "Effective enabled state after applying global, workspace, local, and managed configuration at read time.",
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "runtimeName": {
+          "description": "Best-effort name carried by the runtime tool catalog. Canonical app metadata remains owned by `app/read`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "callable",
+        "enabled",
+        "id"
+      ],
+      "type": "object"
     },
     "InternalChatMessageMetadataPassthrough": {
       "description": "Internal Responses API passthrough metadata copied into underlying chat messages.\n\nResponses API strongly types this payload. Do not modify it without first getting API approval and making the corresponding Responses API change.",
@@ -8377,6 +8667,13 @@
           "type": "array"
         },
         "PreToolUse": {
+          "items": {
+            "$ref": "#/definitions/ConfiguredHookMatcherGroup"
+          },
+          "type": "array"
+        },
+        "SessionEnd": {
+          "default": [],
           "items": {
             "$ref": "#/definitions/ConfiguredHookMatcherGroup"
           },
@@ -9826,6 +10123,9 @@
         }
       ]
     },
+    "PathUri": {
+      "type": "string"
+    },
     "PermissionProfileListParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
@@ -10359,6 +10659,10 @@
             "null"
           ]
         },
+        "forceRefetch": {
+          "description": "Whether the client requests a fresh remote plugin catalog fetch.",
+          "type": "boolean"
+        },
         "marketplaceKinds": {
           "description": "Optional marketplace kind filter. When omitted, only local marketplaces are queried, plus the default remote catalog when enabled by feature flag.",
           "items": {
@@ -10783,7 +11087,8 @@
     "PluginShareUpdateDiscoverability": {
       "enum": [
         "UNLISTED",
-        "PRIVATE"
+        "PRIVATE",
+        "LISTED"
       ],
       "type": "string"
     },
@@ -11036,6 +11341,13 @@
           "description": "Version of the locally materialized plugin package when available.",
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "mustShowInstallationInterstitial": {
+          "default": null,
+          "type": [
+            "boolean",
             "null"
           ]
         },
@@ -17200,6 +17512,22 @@
       "title": "ThreadRealtimeErrorNotification",
       "type": "object"
     },
+    "ThreadRealtimeInitialItem": {
+      "description": "EXPERIMENTAL - role-bearing text item included when a realtime V3 session starts.",
+      "properties": {
+        "role": {
+          "$ref": "#/definitions/ConversationTextRole"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "text"
+      ],
+      "type": "object"
+    },
     "ThreadRealtimeItemAddedNotification": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "description": "EXPERIMENTAL - raw non-audio thread realtime item emitted by the backend.",
@@ -18898,6 +19226,46 @@
             "type"
           ],
           "title": "LocalImageUserInput",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "audio"
+              ],
+              "title": "AudioUserInputType",
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "url"
+          ],
+          "title": "AudioUserInput",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "localAudio"
+              ],
+              "title": "LocalAudioUserInputType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "type"
+          ],
+          "title": "LocalAudioUserInput",
           "type": "object"
         },
         {

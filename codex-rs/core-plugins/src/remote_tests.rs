@@ -1,5 +1,50 @@
 use super::*;
+use crate::test_support::recorded_http_client_urls;
+use crate::test_support::recording_remote_plugin_service_config;
 use pretty_assertions::assert_eq;
+use wiremock::Mock;
+use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::header_exists;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
+
+#[tokio::test]
+async fn remote_plugin_list_routes_the_complete_query_url() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/ps/plugins/list"))
+        .and(header_exists("user-agent"))
+        .and(header_exists("originator"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "plugins": [],
+            "pagination": {"next_page_token": null},
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (config, selected_urls) =
+        recording_remote_plugin_service_config(format!("{}/backend-api", server.uri()));
+    let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
+
+    get_remote_plugin_list_page(
+        &config,
+        &auth,
+        RemotePluginScope::Global,
+        Some("next page/+"),
+        Some("vertical & special"),
+    )
+    .await
+    .expect("plugin list request should succeed");
+
+    assert_eq!(
+        recorded_http_client_urls(&selected_urls),
+        vec![format!(
+            "{}/backend-api/ps/plugins/list?scope=GLOBAL&limit=200&collection=vertical+%26+special&pageToken=next+page%2F%2B",
+            server.uri()
+        )]
+    );
+}
 
 #[test]
 fn build_remote_marketplace_preserves_directory_order_and_appends_installed_only_plugins() {
@@ -82,6 +127,64 @@ fn installation_policy_source_is_preserved_across_remote_summary_paths() {
 }
 
 #[test]
+fn installation_interstitial_requirement_is_preserved_across_remote_summary_paths() {
+    let mut directory_plugin = directory_plugin("plugin-linear", "linear");
+    directory_plugin.must_show_installation_interstitial = Some(true);
+    let marketplace = build_remote_marketplace(
+        REMOTE_GLOBAL_MARKETPLACE_NAME,
+        REMOTE_GLOBAL_MARKETPLACE_DISPLAY_NAME,
+        vec![directory_plugin.clone()],
+        Vec::new(),
+        /*include_installed_only*/ false,
+    )
+    .expect("marketplace should be valid")
+    .expect("marketplace should not be empty");
+    assert_eq!(
+        marketplace
+            .plugins
+            .into_iter()
+            .map(|plugin| plugin.must_show_installation_interstitial)
+            .collect::<Vec<_>>(),
+        vec![Some(true)]
+    );
+
+    directory_plugin.must_show_installation_interstitial = Some(false);
+    let installed_plugin = remote_installed_plugin_to_cache_entry(&RemotePluginInstalledItem {
+        plugin: directory_plugin,
+        enabled: true,
+        disabled_skill_names: Vec::new(),
+    })
+    .expect("installed plugin should be valid");
+    let marketplaces = group_remote_installed_plugins_by_marketplaces(
+        &[installed_plugin],
+        &[REMOTE_GLOBAL_MARKETPLACE_NAME],
+    );
+    assert_eq!(
+        marketplaces
+            .into_iter()
+            .flat_map(|marketplace| marketplace.plugins)
+            .map(|plugin| plugin.must_show_installation_interstitial)
+            .collect::<Vec<_>>(),
+        vec![Some(false)]
+    );
+}
+
+#[test]
+fn missing_installation_interstitial_requirement_deserializes_to_none() {
+    let plugin = directory_plugin("plugin-linear", "linear");
+    let mut plugin_json = serde_json::to_value(plugin).expect("plugin should serialize");
+    plugin_json
+        .as_object_mut()
+        .expect("plugin should serialize to an object")
+        .remove("must_show_installation_interstitial");
+
+    let plugin: RemotePluginDirectoryItem =
+        serde_json::from_value(plugin_json).expect("missing requirement should deserialize");
+
+    assert_eq!(plugin.must_show_installation_interstitial, None);
+}
+
+#[test]
 fn unknown_installation_policy_source_maps_to_none() {
     let plugin = directory_plugin("plugin-linear", "linear");
     let mut plugin_json = serde_json::to_value(plugin).expect("plugin should serialize");
@@ -126,6 +229,7 @@ fn directory_plugin(id: &str, name: &str) -> RemotePluginDirectoryItem {
         share_principals: None,
         installation_policy: PluginInstallPolicy::Available,
         installation_policy_source: None,
+        must_show_installation_interstitial: None,
         authentication_policy: PluginAuthPolicy::OnUse,
         availability: PluginAvailability::Available,
         release: RemotePluginReleaseResponse {
