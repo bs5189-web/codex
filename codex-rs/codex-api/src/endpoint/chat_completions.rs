@@ -317,6 +317,8 @@ fn convert_request(request: ResponsesApiRequest) -> Result<ChatCompletionsReques
 
     let tools = request
         .tools
+        .as_ref()
+        .and_then(|tools| serde_json::from_str::<Vec<Value>>(tools.as_raw_value().get()).ok())
         .unwrap_or_default()
         .into_iter()
         .filter_map(chat_tool_from_responses_tool)
@@ -447,7 +449,7 @@ fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
             ContentItem::InputText { text } | ContentItem::OutputText { text } => {
                 Some(text.as_str())
             }
-            ContentItem::InputImage { .. } => None,
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -665,6 +667,7 @@ async fn flush_tool_calls(
             name,
             namespace: None,
             arguments: pending.arguments,
+            encrypted_function_args: None,
             call_id,
             internal_chat_message_metadata_passthrough: None,
         };
