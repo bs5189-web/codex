@@ -1,6 +1,9 @@
 name: bootstrap-windows-x64-release
 
 on:
+  push:
+    branches:
+      - dev-codex-0.3.146.0
   workflow_dispatch:
     inputs:
       tag_name:
@@ -16,7 +19,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: bootstrap-windows-x64-release-${{ inputs.tag_name }}
+  group: bootstrap-windows-x64-release-${{ inputs.tag_name || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -198,7 +201,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ inputs.tag_name }}
+          TAG_NAME: ${{ inputs.tag_name || 'codex-windows-x64-bootstrap-0.146.0' }}
         run: |
           set -euo pipefail
           target="${TARGET}"

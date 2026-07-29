@@ -1,6 +1,9 @@
 name: bootstrap-macos-release
 
 on:
+  push:
+    branches:
+      - dev-codex-0.3.146.0
   workflow_dispatch:
     inputs:
       tag_name:
@@ -16,7 +19,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: bootstrap-macos-release-${{ inputs.tag_name }}
+  group: bootstrap-macos-release-${{ inputs.tag_name || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -24,6 +27,10 @@ jobs:
     name: Build bootstrap macOS package
     runs-on: macos-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(github.event_name == 'push' && '["aarch64-apple-darwin","x86_64-apple-darwin"]' || format('["{0}"]', inputs.target)) }}
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       CARGO_PROFILE_RELEASE_LTO: "thin"
@@ -39,7 +46,7 @@ jobs:
         id: target
         shell: bash
         env:
-          REQUESTED_TARGET: ${{ inputs.target }}
+          REQUESTED_TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
           if [[ "${REQUESTED_TARGET}" == "native" ]]; then
@@ -164,7 +171,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ inputs.tag_name }}
+          TAG_NAME: ${{ inputs.tag_name || format('codex-macos-{0}-bootstrap-0.146.0', matrix.target) }}
         run: |
           set -euo pipefail
           target="${{ steps.target.outputs.target }}"
