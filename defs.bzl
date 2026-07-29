@@ -13,8 +13,8 @@ WINDOWS_GNULLVM_RUSTC_LINK_FLAGS = [
 ]
 
 WINDOWS_RUSTC_LINK_FLAGS = select({
-    "@rules_rs//rs/experimental/platforms/constraints:windows_gnullvm": WINDOWS_GNULLVM_RUSTC_LINK_FLAGS,
-    "@rules_rs//rs/experimental/platforms/constraints:windows_msvc": [
+    "@llvm//constraints/windows/abi:gnullvm": WINDOWS_GNULLVM_RUSTC_LINK_FLAGS,
+    "@llvm//constraints/windows/abi:msvc": [
         "-C",
         "link-arg=/STACK:8388608",  # 8 MiB
         "-C",
@@ -26,12 +26,12 @@ WINDOWS_RUSTC_LINK_FLAGS = select({
 })
 
 WINDOWS_GNULLVM_INCOMPATIBLE = select({
-    "@rules_rs//rs/experimental/platforms/constraints:windows_gnullvm": ["@platforms//:incompatible"],
+    "@llvm//constraints/windows/abi:gnullvm": ["@platforms//:incompatible"],
     "//conditions:default": [],
 })
 
 WINDOWS_GNULLVM_ONLY = select({
-    "@rules_rs//rs/experimental/platforms/constraints:windows_gnullvm": [],
+    "@llvm//constraints/windows/abi:gnullvm": [],
     "//conditions:default": ["@platforms//:incompatible"],
 })
 
@@ -195,6 +195,7 @@ def codex_rust_crate(
         integration_compile_data_extra = [],
         integration_test_args = [],
         unit_test_args = [],
+        binary_test_target_compatible_with = [],
         integration_test_timeout = None,
         test_data_extra = [],
         test_shard_counts = {},
@@ -232,6 +233,7 @@ def codex_rust_crate(
         integration_compile_data_extra: Extra compile_data for integration tests.
         integration_test_args: Optional args for integration test binaries.
         unit_test_args: Optional args for the unit test binary.
+        binary_test_target_compatible_with: Platform constraints for binary unit tests.
         integration_test_timeout: Optional Bazel timeout for integration test
             targets generated from `tests/*.rs`.
         test_data_extra: Extra runtime data for tests.
@@ -386,6 +388,45 @@ def codex_rust_crate(
             rustc_flags = rustc_flags_extra + WINDOWS_RUSTC_LINK_FLAGS,
             srcs = native.glob(["src/**/*.rs"]),
             visibility = ["//visibility:public"],
+        )
+
+        binary_unit_test_name = binary + "-bin-unit-tests"
+        binary_unit_test_binary = binary_unit_test_name + "-bin"
+        binary_unit_test_shard_count = _test_shard_count(test_shard_counts, binary_unit_test_name)
+
+        # Keep the Rust test manual so the repo-root wrapper owns filtering and
+        # sharding while Clippy can still discover the underlying test crate.
+        rust_test(
+            name = binary_unit_test_binary,
+            crate = ":" + binary,
+            crate_features = crate_features,
+            deps = all_crate_deps(normal_dev = True),
+            rustc_flags = rustc_flags_extra + WINDOWS_RUSTC_LINK_FLAGS + [
+                "--remap-path-prefix=../codex-rs=",
+                "--remap-path-prefix=codex-rs=",
+            ],
+            rustc_env = rustc_env,
+            data = test_data_extra,
+            tags = test_tags + ["manual"],
+        )
+
+        binary_unit_test_kwargs = {}
+        if unit_test_args:
+            binary_unit_test_kwargs["args"] = unit_test_args
+        if unit_test_timeout:
+            binary_unit_test_kwargs["timeout"] = unit_test_timeout
+        if binary_unit_test_shard_count:
+            binary_unit_test_kwargs["shard_count"] = binary_unit_test_shard_count
+            binary_unit_test_kwargs["flaky"] = True
+
+        workspace_root_test(
+            name = binary_unit_test_name,
+            env = test_env,
+            test_bin = ":" + binary_unit_test_binary,
+            workspace_root_marker = "//codex-rs/utils/cargo-bin:repo_root.marker",
+            target_compatible_with = binary_test_target_compatible_with,
+            tags = test_tags,
+            **binary_unit_test_kwargs
         )
 
     for binary_label in extra_binaries:

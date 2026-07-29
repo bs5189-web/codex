@@ -21,15 +21,14 @@ use tokio::sync::RwLock;
 
 use crate::McpConfig;
 use crate::binding_clients::McpBindingClients;
-use crate::connection_manager::McpConnectionManager;
-use crate::resource_client::McpResourceClient;
+use crate::connection_manager::McpConnectionSet;
 use crate::rmcp_client::ManagedClient;
 use crate::server::McpServerMetadata;
 use crate::tools::ToolInfo;
 
 /// The exact tool catalog and execution handles for one model sampling request.
 pub struct McpBinding {
-    connections: Arc<McpConnectionManager>,
+    connections: Arc<McpConnectionSet>,
     clients: Arc<McpBindingClients>,
     config: Arc<McpConfig>,
     plugins_available: bool,
@@ -41,7 +40,7 @@ impl McpBinding {
     /// Creates an empty binding for tests and callers without a materialized runtime.
     pub fn empty(config: Arc<McpConfig>) -> Self {
         Self::new(
-            Arc::new(McpConnectionManager::empty(config.prefix_mcp_tool_names)),
+            Arc::new(McpConnectionSet::empty(config.prefix_mcp_tool_names)),
             Arc::new(McpBindingClients::new(HashMap::new())),
             config,
             /*plugins_available*/ false,
@@ -51,7 +50,7 @@ impl McpBinding {
     }
 
     pub(crate) fn new(
-        connections: Arc<McpConnectionManager>,
+        connections: Arc<McpConnectionSet>,
         clients: Arc<McpBindingClients>,
         config: Arc<McpConfig>,
         plugins_available: bool,
@@ -92,17 +91,16 @@ impl McpBinding {
         self.connections.has_servers()
     }
 
-    /// Returns resource access bound to this binding's exact connection set.
-    pub fn resource_client(&self) -> McpResourceClient {
-        McpResourceClient::for_binding(Arc::clone(&self.clients))
-    }
-
     pub async fn list_resources(
         &self,
         server: &str,
         params: Option<PaginatedRequestParams>,
     ) -> Result<ListResourcesResult> {
-        self.clients.list_resources(server, params).await
+        if self.clients.client(server).is_some() {
+            self.clients.list_resources(server, params).await
+        } else {
+            self.connections.list_resources(server, params).await
+        }
     }
 
     pub async fn list_all_resources(
@@ -117,7 +115,13 @@ impl McpBinding {
         server: &str,
         params: Option<PaginatedRequestParams>,
     ) -> Result<ListResourceTemplatesResult> {
-        self.clients.list_resource_templates(server, params).await
+        if self.clients.client(server).is_some() {
+            self.clients.list_resource_templates(server, params).await
+        } else {
+            self.connections
+                .list_resource_templates(server, params)
+                .await
+        }
     }
 
     pub async fn list_all_resource_templates(
@@ -134,7 +138,11 @@ impl McpBinding {
         server: &str,
         params: ReadResourceRequestParams,
     ) -> Result<ReadResourceResult> {
-        self.clients.read_resource(server, params).await
+        if self.clients.client(server).is_some() {
+            self.clients.read_resource(server, params).await
+        } else {
+            self.connections.read_resource(server, params).await
+        }
     }
 }
 
@@ -152,8 +160,9 @@ impl fmt::Debug for McpBinding {
 /// one [`McpBinding`].
 #[derive(Clone)]
 pub struct PreparedMcpCall {
-    _connections: Arc<McpConnectionManager>,
+    _connections: Arc<McpConnectionSet>,
     client: Arc<ManagedClient>,
+    config: Arc<McpConfig>,
     catalog_revision: u64,
     catalog_revision_source: Arc<RwLock<u64>>,
     tool_info: ToolInfo,
@@ -169,8 +178,9 @@ impl PreparedMcpCall {
         reason = "the exact call authority stays together"
     )]
     pub(crate) fn new(
-        connections: Arc<McpConnectionManager>,
+        connections: Arc<McpConnectionSet>,
         client: Arc<ManagedClient>,
+        config: Arc<McpConfig>,
         catalog_revision: u64,
         catalog_revision_source: Arc<RwLock<u64>>,
         tool_info: ToolInfo,
@@ -182,6 +192,7 @@ impl PreparedMcpCall {
         Self {
             _connections: connections,
             client,
+            config,
             catalog_revision,
             catalog_revision_source,
             tool_info,
@@ -194,6 +205,11 @@ impl PreparedMcpCall {
 
     pub fn tool_info(&self) -> &ToolInfo {
         &self.tool_info
+    }
+
+    /// Returns the configuration and approval authority captured with this client.
+    pub fn config(&self) -> &McpConfig {
+        &self.config
     }
 
     pub fn server_name(&self) -> &str {

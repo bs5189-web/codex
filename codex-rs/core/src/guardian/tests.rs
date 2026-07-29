@@ -9,6 +9,7 @@ use crate::guardian::approval_request::guardian_request_target_item_id;
 use crate::guardian::prompt::BUNDLED_GUARDIAN_POLICY;
 use crate::guardian::prompt::BUNDLED_GUARDIAN_POLICY_TEMPLATE;
 use crate::guardian::prompt::guardian_policy_prompt_with_config_and_template;
+use crate::guardian::review::guardian_review_session_config;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::test_support;
@@ -114,7 +115,6 @@ impl codex_extension_api::ContextContributor for GuardianMemoryContextProbe {
         &'a self,
         _session_store: &'a codex_extension_api::ExtensionData,
         thread_store: &'a codex_extension_api::ExtensionData,
-        _step_store: &'a codex_extension_api::ExtensionData,
     ) -> codex_extension_api::ExtensionFuture<'a, Vec<codex_extension_api::PromptFragment>> {
         Box::pin(async move {
             if thread_store
@@ -308,6 +308,7 @@ async fn seed_guardian_parent_history(session: &Arc<Session>, turn: &Arc<TurnCon
                     namespace: None,
                     arguments: "{\"repo\":\"openai/codex\"}".to_string(),
                     call_id: "call-1".to_string(),
+                    encrypted_function_args: None,
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCallOutput {
@@ -830,6 +831,7 @@ fn collect_guardian_transcript_entries_includes_recent_tool_calls_and_output() {
             namespace: None,
             arguments: "{\"path\":\"README.md\"}".to_string(),
             call_id: "call-1".to_string(),
+            encrypted_function_args: None,
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::FunctionCallOutput {
@@ -1167,8 +1169,11 @@ async fn cancelled_guardian_review_emits_terminal_abort_without_warning() {
                 .to_string(),
         },
         /*retry_reason*/ None,
-        GuardianApprovalRequestSource::MainTurn,
-        cancel_token,
+        GuardianReviewOptions {
+            plugin_attribution_override: None,
+            approval_request_source: GuardianApprovalRequestSource::MainTurn,
+            external_cancel: Some(cancel_token),
+        },
     )
     .await;
 
@@ -1473,6 +1478,7 @@ async fn guardian_request_model_for_auto_review(
         .auto_review_model_override = auto_review_model_override;
     let parent_model = turn.model_info.slug.clone();
     let preferred_model = turn.provider.approval_review_preferred_model().to_string();
+    let parent_turn_id = turn.sub_id.clone();
     seed_guardian_parent_history(&session, &turn).await;
 
     let (outcome, analytics_result) = run_guardian_review_session_for_test(
@@ -1497,8 +1503,9 @@ async fn guardian_request_model_for_auto_review(
     };
 
     let request = request_log.single_request();
-    let request_model = request
-        .body_json()
+    let request_body = request.body_json();
+    core_test_support::responses::assert_parent_turn(&request_body, Some(parent_turn_id.as_str()))?;
+    let request_model = request_body
         .get("model")
         .and_then(|value| value.as_str())
         .expect("guardian request should include a model")
@@ -2930,6 +2937,69 @@ async fn guardian_review_session_config_preserves_parent_network_proxy() {
     assert_eq!(
         guardian_config.permissions.permission_profile(),
         &PermissionProfile::read_only()
+    );
+}
+
+#[tokio::test]
+async fn guardian_review_session_config_clears_context_overrides_for_distinct_effective_model() {
+    let server = start_mock_server().await;
+    let (session, mut turn) = guardian_test_session_and_turn(&server).await;
+    let mut config = (*turn.config).clone();
+    config.model = Some("codex-auto-review".to_string());
+    config.model_context_window = Some(900_000);
+    config.model_auto_compact_token_limit = Some(600_000);
+    Arc::get_mut(&mut turn)
+        .expect("turn should be unique")
+        .config = Arc::new(config);
+
+    let guardian_config = guardian_review_session_config(session.as_ref(), turn.as_ref())
+        .await
+        .expect("guardian config")
+        .spawn_config;
+
+    assert_eq!(
+        (
+            guardian_config.model_context_window,
+            guardian_config.model_auto_compact_token_limit,
+        ),
+        (None, None)
+    );
+}
+
+#[tokio::test]
+async fn guardian_review_session_config_preserves_context_overrides_for_same_effective_model() {
+    let server = start_mock_server().await;
+    let (mut session, mut turn) = guardian_test_session_and_turn(&server).await;
+    let parent_model = turn.model_info.clone();
+    let auth_manager = Arc::clone(&session.services.auth_manager);
+    Arc::get_mut(&mut session)
+        .expect("session should be unique")
+        .services
+        .models_manager = Arc::new(StaticModelsManager::new(
+        Some(auth_manager),
+        ModelsResponse {
+            models: vec![parent_model],
+        },
+    ));
+    let mut config = (*turn.config).clone();
+    config.model = Some("stale-parent-model".to_string());
+    config.model_context_window = Some(128_000);
+    config.model_auto_compact_token_limit = Some(100_000);
+    Arc::get_mut(&mut turn)
+        .expect("turn should be unique")
+        .config = Arc::new(config);
+
+    let guardian_config = guardian_review_session_config(session.as_ref(), turn.as_ref())
+        .await
+        .expect("guardian config")
+        .spawn_config;
+
+    assert_eq!(
+        (
+            guardian_config.model_context_window,
+            guardian_config.model_auto_compact_token_limit,
+        ),
+        (Some(128_000), Some(100_000))
     );
 }
 

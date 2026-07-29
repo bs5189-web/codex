@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use bytes::Bytes;
+use futures::TryStream;
 use http::HeaderMap;
 use http::HeaderName;
 use http::HeaderValue;
@@ -19,6 +21,7 @@ use serde::Serialize;
 use crate::BuildRouteAwareHttpClientError;
 use crate::ClientRouteClass;
 use crate::HttpClient;
+use crate::HttpClientBuilder;
 use crate::HttpClientFactory;
 use crate::OutboundProxyPolicy;
 use crate::OutboundProxyRoute;
@@ -28,9 +31,15 @@ use crate::route_aware_redirect::is_redirect;
 use crate::route_aware_redirect::redirect_request;
 use crate::route_aware_redirect::redirect_url;
 use crate::route_aware_redirect::remove_sensitive_headers;
-use crate::with_chatgpt_cloudflare_cookie_store;
 
 const MAX_CACHED_ROUTES: usize = 16;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum CustomCaFallback {
+    #[default]
+    Disabled,
+    LegacyTransportDefault,
+}
 
 /// Reuses transport clients by resolved route while selecting a route for every request URL.
 ///
@@ -41,8 +50,8 @@ const MAX_CACHED_ROUTES: usize = 16;
 pub struct RouteAwareClientPool {
     http_client_factory: HttpClientFactory,
     route_class: ClientRouteClass,
-    builder_factory: Arc<dyn Fn() -> reqwest::ClientBuilder + Send + Sync>,
-    request_logging: PoolRequestLogging,
+    client_builder: HttpClientBuilder,
+    custom_ca_fallback: CustomCaFallback,
     clients: Arc<Mutex<HashMap<OutboundProxyRoute, HttpClient>>>,
 }
 
@@ -52,15 +61,8 @@ impl fmt::Debug for RouteAwareClientPool {
             .debug_struct("RouteAwareClientPool")
             .field("http_client_factory", &self.http_client_factory)
             .field("route_class", &self.route_class)
-            .field("request_logging", &self.request_logging)
             .finish_non_exhaustive()
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PoolRequestLogging {
-    Enabled,
-    Disabled,
 }
 
 /// Error returned when selecting a route or constructing its pooled HTTP client.
@@ -107,6 +109,24 @@ impl RouteAwareRequestError {
 
     pub fn is_connect(&self) -> bool {
         matches!(self, Self::Request(error) if error.is_connect())
+    }
+
+    pub fn is_body(&self) -> bool {
+        matches!(self, Self::Request(error) if error.is_body())
+    }
+
+    pub fn is_request(&self) -> bool {
+        matches!(self, Self::Request(error) if error.is_request())
+    }
+
+    /// Removes a request URL from the underlying transport error before it is logged or returned.
+    ///
+    /// Use this for requests whose URL can contain credentials, such as signed blob uploads.
+    pub fn without_url(self) -> Self {
+        match self {
+            Self::Request(error) => Self::Request(error.without_url()),
+            other => other,
+        }
     }
 }
 
@@ -174,6 +194,12 @@ impl RouteAwareRequestBuilder {
         self
     }
 
+    /// Sets a timeout for the request as a whole.
+    ///
+    /// The budget starts before outbound-route resolution and covers selecting or constructing a
+    /// pooled client, establishing a connection, sending the request, and awaiting the response.
+    /// Use [`HttpClientBuilder::connect_timeout`] when only connection establishment should be
+    /// bounded.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         if let Ok(request) = &mut self.request {
             *request.timeout_mut() = Some(timeout);
@@ -213,6 +239,19 @@ impl RouteAwareRequestBuilder {
         self
     }
 
+    /// Sets a streaming request body without exposing the underlying HTTP implementation.
+    pub fn body_stream<S>(mut self, stream: S) -> Self
+    where
+        S: TryStream + Send + 'static,
+        S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+        Bytes: From<S::Ok>,
+    {
+        if let Ok(request) = &mut self.request {
+            *request.body_mut() = Some(reqwest::Body::wrap_stream(stream));
+        }
+        self
+    }
+
     pub async fn send(self) -> Result<reqwest::Response, RouteAwareRequestError> {
         self.pool.send(self.request?).await
     }
@@ -225,12 +264,65 @@ impl RouteAwareClientPool {
 
     /// Creates a pool with the shared default HTTP transport settings.
     pub fn new(http_client_factory: HttpClientFactory, route_class: ClientRouteClass) -> Self {
-        Self::with_builder_factory(
+        Self::with_builder(http_client_factory, route_class, HttpClientBuilder::new())
+    }
+
+    /// Creates a pool that returns redirect responses without following them.
+    ///
+    /// This applies both when reqwest owns redirect handling and when the pool follows redirects
+    /// manually so each hop can receive its own proxy-route decision.
+    pub fn new_without_redirects(
+        http_client_factory: HttpClientFactory,
+        route_class: ClientRouteClass,
+    ) -> Self {
+        Self::with_builder(
             http_client_factory,
             route_class,
-            reqwest::Client::builder,
-            PoolRequestLogging::Enabled,
+            HttpClientBuilder::new().without_redirects(),
         )
+    }
+
+    /// Creates a no-redirect pool without request URL or response-header diagnostics.
+    pub fn new_without_redirects_or_request_logging(
+        http_client_factory: HttpClientFactory,
+        route_class: ClientRouteClass,
+    ) -> Self {
+        Self::with_builder(
+            http_client_factory,
+            route_class,
+            HttpClientBuilder::new()
+                .without_redirects()
+                .without_request_logging(),
+        )
+    }
+
+    /// Creates a pool whose clients limit only connection establishment.
+    ///
+    /// The timeout applies to every client built for a resolved route, including redirect hops.
+    pub fn with_connect_timeout(
+        http_client_factory: HttpClientFactory,
+        route_class: ClientRouteClass,
+        connect_timeout: Duration,
+    ) -> Self {
+        Self::with_builder(
+            http_client_factory,
+            route_class,
+            HttpClientBuilder::new().connect_timeout(connect_timeout),
+        )
+    }
+
+    fn with_builder(
+        http_client_factory: HttpClientFactory,
+        route_class: ClientRouteClass,
+        client_builder: HttpClientBuilder,
+    ) -> Self {
+        Self {
+            http_client_factory,
+            route_class,
+            client_builder,
+            custom_ca_fallback: CustomCaFallback::Disabled,
+            clients: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Creates a pool with the shared defaults but without URL or response-header diagnostics.
@@ -238,12 +330,20 @@ impl RouteAwareClientPool {
         http_client_factory: HttpClientFactory,
         route_class: ClientRouteClass,
     ) -> Self {
-        Self::with_builder_factory(
+        Self::with_builder(
             http_client_factory,
             route_class,
-            reqwest::Client::builder,
-            PoolRequestLogging::Disabled,
+            HttpClientBuilder::new().without_request_logging(),
         )
+    }
+
+    /// Preserves the legacy custom-CA fallback for transport-default proxy routes.
+    ///
+    /// Use this only when migrating a client that already continued with system roots after a
+    /// custom-CA construction failure. System-proxy routes still propagate construction errors.
+    pub fn with_legacy_custom_ca_fallback(mut self) -> Self {
+        self.custom_ca_fallback = CustomCaFallback::LegacyTransportDefault;
+        self
     }
 
     /// Creates a pool that retains the Cloudflare cookies required by ChatGPT endpoints.
@@ -251,11 +351,40 @@ impl RouteAwareClientPool {
         http_client_factory: HttpClientFactory,
         route_class: ClientRouteClass,
     ) -> Self {
-        Self::with_builder_factory(
+        Self::with_builder(
             http_client_factory,
             route_class,
-            || with_chatgpt_cloudflare_cookie_store(reqwest::Client::builder()),
-            PoolRequestLogging::Enabled,
+            HttpClientBuilder::new().with_chatgpt_cloudflare_cookie_store(),
+        )
+    }
+
+    /// Creates a no-redirect pool that retains the Cloudflare cookies required by ChatGPT
+    /// endpoints.
+    pub fn with_chatgpt_cloudflare_cookies_without_redirects(
+        http_client_factory: HttpClientFactory,
+        route_class: ClientRouteClass,
+    ) -> Self {
+        Self::with_builder(
+            http_client_factory,
+            route_class,
+            HttpClientBuilder::new()
+                .with_chatgpt_cloudflare_cookie_store()
+                .without_redirects(),
+        )
+    }
+
+    /// Creates a no-redirect ChatGPT Cloudflare-cookie pool without request diagnostics.
+    pub fn with_chatgpt_cloudflare_cookies_without_redirects_or_request_logging(
+        http_client_factory: HttpClientFactory,
+        route_class: ClientRouteClass,
+    ) -> Self {
+        Self::with_builder(
+            http_client_factory,
+            route_class,
+            HttpClientBuilder::new()
+                .with_chatgpt_cloudflare_cookie_store()
+                .without_redirects()
+                .without_request_logging(),
         )
     }
 
@@ -264,11 +393,12 @@ impl RouteAwareClientPool {
         http_client_factory: HttpClientFactory,
         route_class: ClientRouteClass,
     ) -> Self {
-        Self::with_builder_factory(
+        Self::with_builder(
             http_client_factory,
             route_class,
-            || with_chatgpt_cloudflare_cookie_store(reqwest::Client::builder()),
-            PoolRequestLogging::Disabled,
+            HttpClientBuilder::new()
+                .with_chatgpt_cloudflare_cookie_store()
+                .without_request_logging(),
         )
     }
 
@@ -307,21 +437,6 @@ impl RouteAwareClientPool {
         RouteAwareRequestBuilder::new(self.clone(), method, url)
     }
 
-    fn with_builder_factory(
-        http_client_factory: HttpClientFactory,
-        route_class: ClientRouteClass,
-        builder_factory: impl Fn() -> reqwest::ClientBuilder + Send + Sync + 'static,
-        request_logging: PoolRequestLogging,
-    ) -> Self {
-        Self {
-            http_client_factory,
-            route_class,
-            builder_factory: Arc::new(builder_factory),
-            request_logging,
-            clients: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
     async fn send(
         &self,
         request: reqwest::Request,
@@ -349,8 +464,9 @@ impl RouteAwareClientPool {
     {
         let request_method = request.method().clone();
         let request_url = request.url().to_string();
-        let follows_redirects_manually = self.http_client_factory.outbound_proxy_policy()
-            == OutboundProxyPolicy::RespectSystemProxy;
+        let follows_redirects_manually = self.client_builder.follows_redirects()
+            && self.http_client_factory.outbound_proxy_policy()
+                == OutboundProxyPolicy::RespectSystemProxy;
         let timeout_deadline = request
             .timeout()
             .copied()
@@ -416,7 +532,7 @@ impl RouteAwareClientPool {
                 }
             };
             let status = response.status();
-            if !is_redirect(status) {
+            if !follows_redirects_manually || !is_redirect(status) {
                 if follows_redirects_manually {
                     client.log_response(&request_method, &request_url, &response);
                 }
@@ -473,19 +589,32 @@ impl RouteAwareClientPool {
         }
         drop(clients);
 
-        let builder = (self.builder_factory)();
-        let builder = match self.http_client_factory.outbound_proxy_policy() {
-            OutboundProxyPolicy::ReqwestDefault => builder,
+        let client_builder = match self.http_client_factory.outbound_proxy_policy() {
+            OutboundProxyPolicy::ReqwestDefault => self.client_builder.clone(),
             OutboundProxyPolicy::RespectSystemProxy => {
-                builder.redirect(reqwest::redirect::Policy::none())
+                self.client_builder.clone().without_redirects()
             }
         };
-        let client = self
-            .http_client_factory
-            .build_reqwest_client_for_resolved_route(builder, self.route_class, &route)?;
-        let client = match self.request_logging {
-            PoolRequestLogging::Enabled => HttpClient::new(client),
-            PoolRequestLogging::Disabled => HttpClient::new_without_request_logging(client),
+        #[expect(
+            deprecated,
+            reason = "explicitly opted-in pools preserve the legacy custom-CA fallback"
+        )]
+        let client = match (
+            self.http_client_factory.outbound_proxy_policy(),
+            self.custom_ca_fallback,
+        ) {
+            (OutboundProxyPolicy::ReqwestDefault, CustomCaFallback::LegacyTransportDefault) => {
+                client_builder.build_with_transport_default_proxy_and_custom_ca_fallback()
+            }
+            (OutboundProxyPolicy::ReqwestDefault, CustomCaFallback::Disabled)
+            | (OutboundProxyPolicy::RespectSystemProxy, CustomCaFallback::Disabled)
+            | (OutboundProxyPolicy::RespectSystemProxy, CustomCaFallback::LegacyTransportDefault) => {
+                client_builder.build_for_resolved_route(
+                    &self.http_client_factory,
+                    self.route_class,
+                    &route,
+                )?
+            }
         };
         let mut clients = match self.clients.lock() {
             Ok(clients) => clients,

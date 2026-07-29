@@ -27,7 +27,6 @@ use codex_responses_api_proxy::Args as ResponsesApiProxyArgs;
 use codex_rollout_trace::REDUCED_STATE_FILE_NAME;
 use codex_rollout_trace::replay_bundle;
 use codex_state::StateRuntime;
-use codex_state::memories_db_path;
 use codex_tui::AppExitInfo;
 use codex_tui::Cli as TuiCli;
 use codex_tui::ExitReason;
@@ -517,6 +516,9 @@ struct AppServerCommand {
     #[command(subcommand)]
     subcommand: Option<AppServerSubcommand>,
 
+    #[command(flatten)]
+    code_mode_host: codex_app_server::AppServerCodeModeHostArgs,
+
     /// Error out when config.toml contains fields that are not recognized by this version of Codex.
     #[arg(long = "strict-config", default_value_t = false)]
     strict_config: bool,
@@ -585,6 +587,14 @@ struct ExecServerCommand {
     /// Use Agent Identity auth from CODEX_ACCESS_TOKEN for remote registration.
     #[arg(long = "use-agent-identity-auth", requires = "remote")]
     use_agent_identity_auth: bool,
+
+    /// Exit when the parent-owned standard-input pipe closes.
+    #[arg(
+        long = "exit-on-stdin-close",
+        env = codex_exec_server::CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE_ENV_VAR,
+        requires_if("true", "remote")
+    )]
+    exit_on_stdin_close: bool,
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -1100,6 +1110,7 @@ async fn cli_main(
         Some(Subcommand::AppServer(app_server_cli)) => {
             let AppServerCommand {
                 subcommand,
+                code_mode_host,
                 strict_config: app_server_strict_config,
                 listen,
                 stdio,
@@ -1123,6 +1134,7 @@ async fn cli_main(
                     };
                     let auth = auth.try_into_settings()?;
                     let runtime_options = codex_app_server::AppServerRuntimeOptions {
+                        code_mode_host_transport: code_mode_host.into(),
                         remote_control_startup_mode: match (remote_control, remote_control_disabled)
                         {
                             (true, _) => {
@@ -1714,14 +1726,32 @@ async fn run_exec_server_command(
             base_url,
             environment_id,
             auth_provider,
+            config.http_client_factory(),
         )?;
         if let Some(name) = cmd.name {
             remote_config.name = name;
         }
         let remote_config = remote_config.with_telemetry(telemetry);
-        exec_server_telemetry::run_until_shutdown(async move {
-            codex_exec_server::run_remote_environment(remote_config, runtime_paths).await
-        })
+        let parent_lifetime = if cmd.exit_on_stdin_close {
+            exec_server_telemetry::ParentLifetime::StdinPipe
+        } else {
+            exec_server_telemetry::ParentLifetime::Independent
+        };
+        let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel();
+        exec_server_telemetry::run_until_shutdown(
+            async move {
+                codex_exec_server::run_remote_environment_until_shutdown(
+                    remote_config,
+                    runtime_paths,
+                    async move {
+                        let _ = shutdown_receiver.await;
+                    },
+                )
+                .await
+            },
+            parent_lifetime,
+            exec_server_telemetry::ShutdownBehavior::Graceful(shutdown_sender),
+        )
         .await?;
         Ok(())
     } else {
@@ -1732,12 +1762,30 @@ async fn run_exec_server_command(
             config_result.ok()
         };
         let (_otel, telemetry) = exec_server_telemetry::init(config.as_ref());
+        let http_client_factory = config
+            .as_ref()
+            .map(codex_core::config::Config::http_client_factory)
+            .unwrap_or_else(|| {
+                codex_http_client::HttpClientFactory::new(
+                    codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+                )
+            });
         let listen_url = cmd
             .listen
             .unwrap_or_else(|| codex_exec_server::DEFAULT_LISTEN_URL.to_string());
-        exec_server_telemetry::run_until_shutdown(async move {
-            codex_exec_server::run_main_with_telemetry(&listen_url, runtime_paths, telemetry).await
-        })
+        exec_server_telemetry::run_until_shutdown(
+            async move {
+                codex_exec_server::run_main_with_telemetry(
+                    &listen_url,
+                    runtime_paths,
+                    telemetry,
+                    http_client_factory,
+                )
+                .await
+            },
+            exec_server_telemetry::ParentLifetime::Independent,
+            exec_server_telemetry::ShutdownBehavior::Immediate,
+        )
         .await
         .map_err(anyhow::Error::from_boxed)
     }
@@ -1999,10 +2047,20 @@ async fn run_debug_prompt_input_command(
     let user_instructions_provider = Arc::new(CodexHomeUserInstructionsProvider::new(
         config.codex_home.clone(),
     ));
+    let auth_manager =
+        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await;
+    let mut extensions = codex_extension_api::ExtensionRegistryBuilder::new();
+    codex_git_attribution::install(
+        &mut extensions,
+        auth_manager,
+        config.chatgpt_base_url.clone(),
+        config.http_client_factory(),
+    );
     let prompt_input = codex_core::build_prompt_input(
         config,
         input,
         /*state_db*/ None,
+        Arc::new(extensions.build()),
         user_instructions_provider,
     )
     .await?;
@@ -2052,9 +2110,9 @@ async fn run_debug_clear_memories_command(
         .build()
         .await?;
 
-    let memories_path = memories_db_path(config.sqlite_home.as_path());
+    let memories_path = config.sqlite_config().memories_db_path();
     let cleared_memories_db =
-        StateRuntime::clear_memory_data_in_sqlite_home(config.sqlite_home.as_path()).await?;
+        StateRuntime::clear_memory_data_in_sqlite_home(config.sqlite_config()).await?;
 
     clear_memory_roots_contents(&config.codex_home).await?;
 
@@ -3042,9 +3100,10 @@ mod tests {
 
     #[test]
     fn delete_force_requires_uuid() {
-        assert!(delete_action("123e4567-e89b-12d3-a456-426614174000", true).is_ok());
+        assert!(delete_action("123e4567-e89b-12d3-a456-426614174000", /*force*/ true).is_ok());
 
-        let err = delete_action("my-thread", true).expect_err("name should require prompt");
+        let err =
+            delete_action("my-thread", /*force*/ true).expect_err("name should require prompt");
         assert_eq!(
             err.to_string(),
             "--force requires a session UUID; names must be confirmed interactively"
@@ -3790,6 +3849,50 @@ mod tests {
         })
         .expect_err("empty env vars should be rejected");
         assert!(err.to_string().contains("is empty"));
+    }
+
+    #[test]
+    fn app_server_code_mode_host_url_parses_independently_of_listen_transport() {
+        let app_server = app_server_from_args(
+            [
+                "codex",
+                "app-server",
+                "--code-mode-host",
+                "wss://example.test/code-mode",
+                "--listen",
+                "ws://127.0.0.1:4500",
+            ]
+            .as_ref(),
+        );
+
+        assert_eq!(
+            app_server.code_mode_host.code_mode_host,
+            Some(
+                url::Url::parse("wss://example.test/code-mode")
+                    .expect("test endpoint should parse")
+            )
+        );
+        assert_eq!(
+            app_server.listen,
+            codex_app_server::AppServerTransport::WebSocket {
+                bind_address: "127.0.0.1:4500".parse().expect("valid socket address"),
+            }
+        );
+    }
+
+    #[test]
+    fn app_server_rejects_invalid_code_mode_host_urls() {
+        for endpoint in [
+            "http://127.0.0.1:8765",
+            "ws://",
+            "wss://example.test/code-mode#fragment",
+        ] {
+            let error =
+                MultitoolCli::try_parse_from(["codex", "app-server", "--code-mode-host", endpoint])
+                    .expect_err("invalid code-mode host endpoint should fail argument parsing");
+
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+        }
     }
 
     #[test]

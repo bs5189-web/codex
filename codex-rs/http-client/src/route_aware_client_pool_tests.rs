@@ -10,6 +10,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
+use bytes::Bytes;
+use futures::stream;
 use pretty_assertions::assert_eq;
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
@@ -32,24 +34,134 @@ fn request_builder_debug_redacts_url_secrets() {
         concat!(
             "RouteAwareRequestBuilder { pool: RouteAwareClientPool { ",
             "http_client_factory: HttpClientFactory { outbound_proxy_policy: ReqwestDefault }, ",
-            "route_class: Api, request_logging: Enabled, .. }, method: Some(GET), ",
+            "route_class: Api, .. }, method: Some(GET), ",
             "url: Some(\"<redacted>\"), .. }"
         )
     );
 }
 
 #[tokio::test]
-async fn forwards_exact_urls_and_reuses_clients_by_resolved_route() {
-    let builder_count = Arc::new(AtomicUsize::new(0));
-    let observed_builder_count = Arc::clone(&builder_count);
-    let pool = RouteAwareClientPool::with_builder_factory(
+async fn streams_request_bodies_without_exposing_reqwest_body() {
+    let (address, server) = spawn_response_server(vec![
+        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+    ]);
+    let pool = RouteAwareClientPool::new(
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         ClientRouteClass::Api,
-        move || {
-            observed_builder_count.fetch_add(1, Ordering::SeqCst);
-            reqwest::Client::builder()
-        },
-        PoolRequestLogging::Enabled,
+    );
+    let response = pool
+        .put(format!("http://{address}/upload"))
+        .header(http::header::CONTENT_LENGTH, /*value*/ 5)
+        .body_stream(stream::iter(vec![Ok::<_, io::Error>(Bytes::from_static(
+            b"hello",
+        ))]))
+        .send()
+        .await
+        .expect("streaming request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let requests = server.join().expect("response server should finish");
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].ends_with("\r\n\r\nhello"));
+}
+
+#[tokio::test]
+async fn legacy_custom_ca_fallback_is_limited_to_reqwest_default() {
+    const CHILD_POLICY_ENV: &str = "CODEX_HTTP_CLIENT_POOL_INVALID_CA_TEST_POLICY";
+
+    let Ok(policy_name) = std::env::var(CHILD_POLICY_ENV) else {
+        let temp_dir = tempfile::tempdir().expect("temporary directory should be created");
+        let invalid_ca_path = temp_dir.path().join("invalid-ca.pem");
+        std::fs::write(&invalid_ca_path, "not a PEM certificate")
+            .expect("invalid CA fixture should be written");
+
+        for ca_env in ["CODEX_CA_CERTIFICATE", "SSL_CERT_FILE"] {
+            for policy_name in ["reqwest-default", "respect-system-proxy"] {
+                let output = std::process::Command::new(
+                    std::env::current_exe().expect("test executable should be available"),
+                )
+                .arg("--exact")
+                .arg("route_aware_client_pool::tests::legacy_custom_ca_fallback_is_limited_to_reqwest_default")
+                .arg("--nocapture")
+                .env_remove("CODEX_CA_CERTIFICATE")
+                .env_remove("SSL_CERT_FILE")
+                .env(ca_env, &invalid_ca_path)
+                .env(CHILD_POLICY_ENV, policy_name)
+                .output()
+                .expect("isolated CA subprocess should run");
+
+                assert!(
+                    output.status.success(),
+                    "{policy_name} failed with invalid {ca_env}\nstdout:\n{}\nstderr:\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+            }
+        }
+        return;
+    };
+
+    let outbound_proxy_policy = match policy_name.as_str() {
+        "reqwest-default" => OutboundProxyPolicy::ReqwestDefault,
+        "respect-system-proxy" => OutboundProxyPolicy::RespectSystemProxy,
+        _ => panic!("unexpected test proxy policy: {policy_name}"),
+    };
+    let pool = RouteAwareClientPool::with_chatgpt_cloudflare_cookies(
+        HttpClientFactory::new(outbound_proxy_policy),
+        ClientRouteClass::Other,
+    )
+    .with_legacy_custom_ca_fallback();
+
+    match outbound_proxy_policy {
+        OutboundProxyPolicy::ReqwestDefault => {
+            let (address, server) = spawn_response_server(vec![
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+            ]);
+            let response = pool
+                .get(format!("http://{address}/update"))
+                .send()
+                .await
+                .expect("default-routed request should fall back to system roots");
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let requests = server.join().expect("response server should finish");
+            assert_eq!(requests.len(), 1);
+        }
+        OutboundProxyPolicy::RespectSystemProxy => {
+            let error = pool
+                .client_for_url_with_resolver("http://127.0.0.1/update", |_| async {
+                    Ok(OutboundProxyRoute::Direct)
+                })
+                .await
+                .expect_err("system-proxy routes should reject invalid custom CAs");
+
+            assert!(matches!(error, RouteAwareClientPoolError::Build(_)));
+        }
+    }
+}
+
+#[tokio::test]
+async fn without_url_redacts_transport_error_urls() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("listener should bind");
+    let address = listener.local_addr().expect("listener should have address");
+    drop(listener);
+    let secret = "signed-secret";
+    let error = reqwest::Client::new()
+        .get(format!("http://{address}/upload?sig={secret}"))
+        .send()
+        .await
+        .expect_err("closed listener should reject request");
+    let error = RouteAwareRequestError::from(error).without_url();
+
+    assert!(!error.to_string().contains(secret));
+}
+
+#[tokio::test]
+async fn forwards_exact_urls_and_caches_clients_by_resolved_route() {
+    let pool = RouteAwareClientPool::with_builder(
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        ClientRouteClass::Api,
+        HttpClientBuilder::new(),
     );
 
     let direct_url = "https://example.com/first?target=direct";
@@ -77,7 +189,7 @@ async fn forwards_exact_urls_and_reuses_clients_by_resolved_route() {
         .await
         .expect("proxy client should build separately");
 
-    assert_eq!(builder_count.load(Ordering::SeqCst), 2);
+    assert_eq!(pool.clients.lock().expect("client cache lock").len(), 2);
     assert_eq!(
         resolver.observed_urls(),
         vec![
@@ -135,17 +247,19 @@ async fn reqwest_default_route_preserves_transport_redirects() {
         }
         request_lines
     });
-    let pool = RouteAwareClientPool::with_builder_factory(
+    let pool = RouteAwareClientPool::with_builder(
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         ClientRouteClass::Api,
-        || reqwest::Client::builder().no_proxy(),
-        PoolRequestLogging::Enabled,
+        HttpClientBuilder::new(),
     );
     let initial_url = format!("http://{address}/start");
+    let request = reqwest::Request::new(
+        Method::GET,
+        reqwest::Url::parse(&initial_url).expect("request URL should parse"),
+    );
 
     let response = pool
-        .get(initial_url)
-        .send()
+        .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
         .await
         .expect("default-routed request should follow redirect");
 
@@ -161,17 +275,43 @@ async fn reqwest_default_route_preserves_transport_redirects() {
 }
 
 #[tokio::test]
+async fn no_redirect_pool_returns_redirect_response() {
+    for outbound_proxy_policy in [
+        OutboundProxyPolicy::ReqwestDefault,
+        OutboundProxyPolicy::RespectSystemProxy,
+    ] {
+        let (address, server) = spawn_response_server(vec![
+            "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_string(),
+        ]);
+        let pool = RouteAwareClientPool::new_without_redirects(
+            HttpClientFactory::new(outbound_proxy_policy),
+            ClientRouteClass::Api,
+        );
+        let initial_url = format!("http://{address}/start");
+        let request = reqwest::Request::new(
+            Method::GET,
+            reqwest::Url::parse(&initial_url).expect("request URL should parse"),
+        );
+
+        let response = pool
+            .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
+            .await
+            .expect("no-redirect request should finish");
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let requests = server.join().expect("redirect server should finish");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("GET /start HTTP/1.1\r\n"));
+    }
+}
+
+#[tokio::test]
 async fn bounds_cached_routes_and_rebuilds_an_evicted_route() {
-    let builder_count = Arc::new(AtomicUsize::new(0));
-    let observed_builder_count = Arc::clone(&builder_count);
-    let pool = RouteAwareClientPool::with_builder_factory(
+    let pool = RouteAwareClientPool::with_builder(
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         ClientRouteClass::Api,
-        move || {
-            observed_builder_count.fetch_add(1, Ordering::SeqCst);
-            reqwest::Client::builder()
-        },
-        PoolRequestLogging::Enabled,
+        HttpClientBuilder::new(),
     );
     let routes = (0..=MAX_CACHED_ROUTES)
         .map(|index| {
@@ -205,11 +345,9 @@ async fn bounds_cached_routes_and_rebuilds_an_evicted_route() {
         .await
         .expect("evicted client should rebuild");
 
-    assert_eq!(builder_count.load(Ordering::SeqCst), MAX_CACHED_ROUTES + 2);
-    assert_eq!(
-        pool.clients.lock().expect("client cache lock").len(),
-        MAX_CACHED_ROUTES
-    );
+    let clients = pool.clients.lock().expect("client cache lock");
+    assert_eq!(clients.len(), MAX_CACHED_ROUTES);
+    assert!(clients.contains_key(&routes[&evicted_route]));
 }
 
 #[tokio::test]
@@ -342,11 +480,10 @@ async fn disabled_pool_logging_does_not_expose_request_or_response_data() {
         "HTTP/1.1 200 OK\r\nx-sensitive-response: response-secret-value\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
             .to_string(),
     ]);
-    let pool = RouteAwareClientPool::with_builder_factory(
+    let pool = RouteAwareClientPool::with_builder(
         HttpClientFactory::new(OutboundProxyPolicy::RespectSystemProxy),
         ClientRouteClass::Api,
-        || reqwest::Client::builder().no_proxy(),
-        PoolRequestLogging::Disabled,
+        HttpClientBuilder::new().without_request_logging(),
     );
     let buffer = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::registry().with(
@@ -467,11 +604,10 @@ async fn resolve_with(
 }
 
 fn manual_redirect_pool() -> RouteAwareClientPool {
-    RouteAwareClientPool::with_builder_factory(
+    RouteAwareClientPool::with_builder(
         HttpClientFactory::new(OutboundProxyPolicy::RespectSystemProxy),
         ClientRouteClass::Api,
-        || reqwest::Client::builder().no_proxy(),
-        PoolRequestLogging::Enabled,
+        HttpClientBuilder::new(),
     )
 }
 
@@ -502,6 +638,9 @@ fn spawn_response_server(
                     Err(error) => panic!("response server should accept: {error}"),
                 }
             };
+            stream
+                .set_nonblocking(false)
+                .expect("response stream should become blocking");
             stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .expect("response stream should get a read timeout");

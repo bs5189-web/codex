@@ -71,10 +71,12 @@ impl PlanType {
             "pro" => Self::Known(KnownPlan::Pro),
             "prolite" => Self::Known(KnownPlan::ProLite),
             "team" => Self::Known(KnownPlan::Team),
+            "self_serve_business_prolite" => Self::Known(KnownPlan::SelfServeBusinessProLite),
             "self_serve_business_usage_based" => {
                 Self::Known(KnownPlan::SelfServeBusinessUsageBased)
             }
             "business" => Self::Known(KnownPlan::Business),
+            "ent26" => Self::Known(KnownPlan::Ent26),
             "enterprise_cbp_usage_based" => Self::Known(KnownPlan::EnterpriseCbpUsageBased),
             "enterprise" | "hc" => Self::Known(KnownPlan::Enterprise),
             "education" | "edu" => Self::Known(KnownPlan::Edu),
@@ -92,9 +94,12 @@ pub enum KnownPlan {
     Pro,
     ProLite,
     Team,
+    #[serde(rename = "self_serve_business_prolite")]
+    SelfServeBusinessProLite,
     #[serde(rename = "self_serve_business_usage_based")]
     SelfServeBusinessUsageBased,
     Business,
+    Ent26,
     #[serde(rename = "enterprise_cbp_usage_based")]
     EnterpriseCbpUsageBased,
     #[serde(alias = "hc")]
@@ -112,8 +117,10 @@ impl KnownPlan {
             Self::Pro => "Pro",
             Self::ProLite => "Pro Lite",
             Self::Team => "Team",
+            Self::SelfServeBusinessProLite => "Self Serve Business ProLite",
             Self::SelfServeBusinessUsageBased => "Self Serve Business Usage Based",
             Self::Business => "Business",
+            Self::Ent26 => "Enterprise",
             Self::EnterpriseCbpUsageBased => "Enterprise CBP Usage Based",
             Self::Enterprise => "Enterprise",
             Self::Edu => "Edu",
@@ -128,8 +135,10 @@ impl KnownPlan {
             Self::Pro => "pro",
             Self::ProLite => "prolite",
             Self::Team => "team",
+            Self::SelfServeBusinessProLite => "self_serve_business_prolite",
             Self::SelfServeBusinessUsageBased => "self_serve_business_usage_based",
             Self::Business => "business",
+            Self::Ent26 => "ent26",
             Self::EnterpriseCbpUsageBased => "enterprise_cbp_usage_based",
             Self::Enterprise => "enterprise",
             Self::Edu => "edu",
@@ -140,8 +149,10 @@ impl KnownPlan {
         matches!(
             self,
             Self::Team
+                | Self::SelfServeBusinessProLite
                 | Self::SelfServeBusinessUsageBased
                 | Self::Business
+                | Self::Ent26
                 | Self::EnterpriseCbpUsageBased
                 | Self::Enterprise
                 | Self::Edu

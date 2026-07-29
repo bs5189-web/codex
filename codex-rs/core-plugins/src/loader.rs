@@ -15,6 +15,8 @@ use crate::marketplace_policy::configured_plugins_from_stack;
 use crate::npm_source::materialize_npm_plugin_source;
 use crate::remote::REMOTE_GLOBAL_MARKETPLACE_NAME;
 use crate::remote::RemoteInstalledPlugin;
+use crate::remote_plugin_id_resolver::RemoteInstalledPluginsSnapshot;
+use crate::remote_plugin_id_resolver::RemotePluginIdResolver;
 use crate::store::PluginStore;
 use crate::store::plugin_version_for_source;
 use crate::store::plugin_version_for_source_with_fallback_manifest;
@@ -45,6 +47,8 @@ use codex_protocol::protocol::SkillScope;
 use codex_skills::SkillConfigRules;
 use codex_skills::SkillMetadata;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_plugins::PluginIdentity;
+use codex_utils_plugins::SkillDiscoveryMode;
 use codex_utils_plugins::find_plugin_manifest_path;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -72,11 +76,20 @@ pub struct PluginHookLoadOutcome {
     pub hook_load_warnings: Vec<String>,
 }
 
+/// The built-in curated marketplace selection for the current runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetCuratedMarketplace {
+    OpenAi,
+    OpenAiWithRemote,
+    OpenAiApi,
+}
+
 enum PluginLoadScope<'a> {
     AllCapabilities {
         restriction_product: Option<Product>,
         skill_config_rules: &'a SkillConfigRules,
         plugin_skill_snapshots: Option<&'a PluginSkillSnapshots>,
+        remote_plugin_id_resolver: &'a RemotePluginIdResolver,
         root_scan_slots: Arc<Semaphore>,
     },
     HooksOnly,
@@ -116,7 +129,7 @@ pub(crate) fn log_plugin_load_errors(plugins: &[LoadedPlugin<McpServerConfig>]) 
 #[instrument(level = "trace", skip_all)]
 pub(crate) async fn load_plugins_from_layer_stack(
     config_layer_stack: &ConfigLayerStack,
-    extra_plugins: HashMap<String, PluginConfig>,
+    remote_installed_plugins_snapshot: RemoteInstalledPluginsSnapshot,
     store: &PluginStore,
     plugin_skill_snapshots: Option<&PluginSkillSnapshots>,
     restriction_product: Option<Product>,
@@ -124,6 +137,10 @@ pub(crate) async fn load_plugins_from_layer_stack(
     root_scan_slots: Arc<Semaphore>,
 ) -> Vec<LoadedPlugin<McpServerConfig>> {
     let skill_config_rules = skill_config_rules_from_stack(config_layer_stack);
+    let RemoteInstalledPluginsSnapshot {
+        configs: extra_plugins,
+        remote_plugin_id_resolver,
+    } = remote_installed_plugins_snapshot;
     load_plugins_from_layer_stack_with_scope(
         config_layer_stack,
         extra_plugins,
@@ -133,6 +150,7 @@ pub(crate) async fn load_plugins_from_layer_stack(
             restriction_product,
             skill_config_rules: &skill_config_rules,
             plugin_skill_snapshots,
+            remote_plugin_id_resolver: &remote_plugin_id_resolver,
             root_scan_slots,
         },
     )
@@ -182,9 +200,10 @@ pub async fn load_plugin_hooks_from_layer_stack(
     config_layer_stack: &ConfigLayerStack,
     extra_plugins: HashMap<String, PluginConfig>,
     store: &PluginStore,
+    target_curated_marketplace: TargetCuratedMarketplace,
     remote_global_catalog_active: bool,
 ) -> PluginHookLoadOutcome {
-    let plugins = load_plugins_from_layer_stack_with_scope(
+    let mut plugins = load_plugins_from_layer_stack_with_scope(
         config_layer_stack,
         extra_plugins,
         store,
@@ -192,6 +211,9 @@ pub async fn load_plugin_hooks_from_layer_stack(
         PluginLoadScope::HooksOnly,
     )
     .await;
+    plugins.retain(|plugin| {
+        plugin_is_eligible_for_target_marketplace(&plugin.config_name, target_curated_marketplace)
+    });
     PluginHookLoadOutcome {
         hook_sources: plugins
             .iter()
@@ -217,7 +239,9 @@ fn merge_configured_plugins_with_remote_installed(
             Ok(plugin_id) => plugin_id.marketplace_name != crate::OPENAI_CURATED_MARKETPLACE_NAME,
             Err(_) => true,
         });
-        configured_plugins.extend(extra_plugins);
+        for (plugin_key, plugin_config) in extra_plugins {
+            merge_remote_plugin_config(&mut configured_plugins, plugin_key, plugin_config);
+        }
         return configured_plugins;
     }
 
@@ -226,7 +250,7 @@ fn merge_configured_plugins_with_remote_installed(
         let Ok(plugin_id) = PluginId::parse(plugin_key) else {
             continue;
         };
-        if !is_openai_curated_marketplace_name(&plugin_id.marketplace_name)
+        if plugin_id.marketplace_name != crate::OPENAI_CURATED_MARKETPLACE_NAME
             || store.active_plugin_version(&plugin_id).is_none()
         {
             continue;
@@ -251,10 +275,45 @@ fn merge_configured_plugins_with_remote_installed(
             continue;
         }
 
-        configured_plugins.insert(plugin_key, plugin_config);
+        merge_remote_plugin_config(&mut configured_plugins, plugin_key, plugin_config);
     }
 
     configured_plugins
+}
+
+pub(crate) fn plugin_is_eligible_for_target_marketplace(
+    plugin_key: &str,
+    target_curated_marketplace: TargetCuratedMarketplace,
+) -> bool {
+    let Ok(plugin_id) = PluginId::parse(plugin_key) else {
+        return true;
+    };
+    match target_curated_marketplace {
+        TargetCuratedMarketplace::OpenAi => {
+            plugin_id.marketplace_name != crate::OPENAI_API_CURATED_MARKETPLACE_NAME
+                && plugin_id.marketplace_name != REMOTE_GLOBAL_MARKETPLACE_NAME
+        }
+        TargetCuratedMarketplace::OpenAiWithRemote => {
+            plugin_id.marketplace_name != crate::OPENAI_API_CURATED_MARKETPLACE_NAME
+        }
+        TargetCuratedMarketplace::OpenAiApi => {
+            plugin_id.marketplace_name != crate::OPENAI_CURATED_MARKETPLACE_NAME
+                && plugin_id.marketplace_name != REMOTE_GLOBAL_MARKETPLACE_NAME
+        }
+    }
+}
+
+fn merge_remote_plugin_config(
+    configured_plugins: &mut HashMap<String, PluginConfig>,
+    plugin_key: String,
+    mut remote_plugin_config: PluginConfig,
+) {
+    if let Some(configured_plugin) = configured_plugins.get(&plugin_key) {
+        remote_plugin_config
+            .mcp_servers
+            .clone_from(&configured_plugin.mcp_servers);
+    }
+    configured_plugins.insert(plugin_key, remote_plugin_config);
 }
 
 fn installed_plugin_name_for_marketplace(
@@ -752,18 +811,20 @@ async fn load_plugin(
     scope: &PluginLoadScope<'_>,
 ) -> LoadedPlugin<McpServerConfig> {
     let plugin_id = PluginId::parse(&config_name);
-    let active_plugin_root = plugin_id
+    let active_plugin_installation = plugin_id
         .as_ref()
         .ok()
-        .and_then(|plugin_id| store.active_plugin_root(plugin_id));
-    let root = active_plugin_root
-        .clone()
+        .and_then(|plugin_id| store.active_plugin_installation(plugin_id));
+    let root = active_plugin_installation
+        .as_ref()
+        .map(|installation| installation.root.clone())
         .unwrap_or_else(|| match &plugin_id {
             Ok(plugin_id) => store.plugin_base_root(plugin_id),
             Err(_) => store.root().clone(),
         });
     let mut loaded_plugin = LoadedPlugin {
         config_name,
+        remote_plugin_id: None,
         manifest_name: None,
         plugin_namespace: None,
         manifest_description: None,
@@ -783,19 +844,29 @@ async fn load_plugin(
         return loaded_plugin;
     }
 
-    let (loaded_plugin_id, plugin_root) = match plugin_id {
+    let (loaded_plugin_id, installation) = match plugin_id {
         Ok(plugin_id) => {
-            let Some(plugin_root) = active_plugin_root else {
+            let Some(installation) = active_plugin_installation else {
                 loaded_plugin.error = Some("plugin is not installed".to_string());
                 return loaded_plugin;
             };
-            (plugin_id, plugin_root)
+            (plugin_id, installation)
         }
         Err(err) => {
             loaded_plugin.error = Some(err.to_string());
             return loaded_plugin;
         }
     };
+
+    loaded_plugin.remote_plugin_id = match scope {
+        PluginLoadScope::AllCapabilities {
+            remote_plugin_id_resolver,
+            ..
+        } => remote_plugin_id_resolver.remote_plugin_id_for_installation(&installation),
+        PluginLoadScope::HooksOnly => None,
+    };
+
+    let plugin_root = installation.root;
 
     if !plugin_root.as_path().is_dir() {
         loaded_plugin.error = Some("path does not exist or is not a directory".to_string());
@@ -814,14 +885,19 @@ async fn load_plugin(
             restriction_product,
             skill_config_rules,
             plugin_skill_snapshots,
+            remote_plugin_id_resolver: _,
             root_scan_slots,
         } => {
             loaded_plugin.manifest_name = Some(manifest.display_name().to_string());
             loaded_plugin.manifest_description = manifest.description.clone();
             loaded_plugin.skill_roots = plugin_skill_roots(&plugin_root, manifest_paths);
-            let resolved_skills = load_plugin_skills(
+            let plugin_identity = PluginIdentity {
+                plugin_id: loaded_plugin_id.as_key(),
+                remote_plugin_id: loaded_plugin.remote_plugin_id.clone(),
+            };
+            let resolved_skills = load_plugin_skills_with_identity(
                 &plugin_root,
-                &loaded_plugin_id,
+                &plugin_identity,
                 &manifest,
                 *restriction_product,
                 skill_config_rules,
@@ -926,9 +1002,34 @@ pub async fn load_plugin_skills(
     plugin_skill_snapshots: Option<&PluginSkillSnapshots>,
     root_scan_slots: Arc<Semaphore>,
 ) -> ResolvedPluginSkills {
+    let plugin_identity = PluginIdentity {
+        plugin_id: plugin_id.as_key(),
+        remote_plugin_id: None,
+    };
+    load_plugin_skills_with_identity(
+        plugin_root,
+        &plugin_identity,
+        manifest,
+        restriction_product,
+        skill_config_rules,
+        plugin_skill_snapshots,
+        root_scan_slots,
+    )
+    .await
+}
+
+pub(crate) async fn load_plugin_skills_with_identity(
+    plugin_root: &AbsolutePathBuf,
+    plugin_identity: &PluginIdentity,
+    manifest: &PluginManifest,
+    restriction_product: Option<Product>,
+    skill_config_rules: &SkillConfigRules,
+    plugin_skill_snapshots: Option<&PluginSkillSnapshots>,
+    root_scan_slots: Arc<Semaphore>,
+) -> ResolvedPluginSkills {
     load_plugin_skill_inventory(
         plugin_root,
-        plugin_id,
+        plugin_identity,
         manifest,
         restriction_product,
         plugin_skill_snapshots,
@@ -940,7 +1041,7 @@ pub async fn load_plugin_skills(
 
 pub(crate) async fn load_plugin_skill_inventory(
     plugin_root: &AbsolutePathBuf,
-    plugin_id: &PluginId,
+    plugin_identity: &PluginIdentity,
     manifest: &PluginManifest,
     restriction_product: Option<Product>,
     plugin_skill_snapshots: Option<&PluginSkillSnapshots>,
@@ -952,9 +1053,10 @@ pub(crate) async fn load_plugin_skill_inventory(
             path,
             scope: SkillScope::User,
             file_system: Arc::clone(&LOCAL_FS),
-            plugin_id: Some(plugin_id.as_key()),
+            plugin_identity: Some(plugin_identity.clone()),
             plugin_namespace: Some(manifest.name.clone()),
             plugin_root: Some(plugin_root.clone()),
+            discovery_mode: SkillDiscoveryMode::Recursive,
         })
         .collect::<Vec<_>>();
     let outcome = load_skills_from_roots(roots, plugin_skill_snapshots, root_scan_slots).await;
@@ -1275,11 +1377,37 @@ pub async fn plugin_capability_summary_from_root(
     })
 }
 
+/// Loads plugin MCP servers without applying user-specific policy overrides.
 pub async fn load_plugin_mcp_servers(
     plugin_root: &Path,
     auth_mode: Option<AuthMode>,
 ) -> HashMap<String, McpServerConfig> {
-    let mut mcp_servers = load_declared_plugin_mcp_servers(plugin_root).await;
+    load_plugin_mcp_servers_with_policy(plugin_root, auth_mode, /*plugin_policy*/ None).await
+}
+
+/// Loads plugin MCP servers with the effective user policy for an installed plugin.
+pub async fn load_configured_plugin_mcp_servers(
+    plugin_root: &Path,
+    auth_mode: Option<AuthMode>,
+    plugin_id: &PluginId,
+    config_layer_stack: &ConfigLayerStack,
+    codex_home: &Path,
+) -> HashMap<String, McpServerConfig> {
+    let configured_plugins = configured_plugins_from_stack(config_layer_stack, codex_home);
+    let plugin_id = plugin_id.as_key();
+    let plugin_policy = configured_plugins
+        .get(&plugin_id)
+        .map(|plugin| &plugin.mcp_servers);
+
+    load_plugin_mcp_servers_with_policy(plugin_root, auth_mode, plugin_policy).await
+}
+
+async fn load_plugin_mcp_servers_with_policy(
+    plugin_root: &Path,
+    auth_mode: Option<AuthMode>,
+    plugin_policy: Option<&HashMap<String, PluginMcpServerConfig>>,
+) -> HashMap<String, McpServerConfig> {
+    let mut mcp_servers = load_declared_plugin_mcp_servers(plugin_root, plugin_policy).await;
     if !apps_route_available(auth_mode) || mcp_servers.is_empty() {
         return mcp_servers;
     }
@@ -1294,13 +1422,15 @@ pub async fn load_plugin_mcp_servers(
     mcp_servers
 }
 
-async fn load_declared_plugin_mcp_servers(plugin_root: &Path) -> HashMap<String, McpServerConfig> {
+async fn load_declared_plugin_mcp_servers(
+    plugin_root: &Path,
+    plugin_policy: Option<&HashMap<String, PluginMcpServerConfig>>,
+) -> HashMap<String, McpServerConfig> {
     let Some(manifest) = load_plugin_manifest(plugin_root) else {
         return HashMap::new();
     };
 
-    load_plugin_mcp_servers_from_manifest(plugin_root, &manifest.paths, /*plugin_policy*/ None)
-        .await
+    load_plugin_mcp_servers_from_manifest(plugin_root, &manifest.paths, plugin_policy).await
 }
 
 pub(crate) async fn load_plugin_mcp_servers_from_manifest(

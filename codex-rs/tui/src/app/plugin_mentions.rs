@@ -156,6 +156,7 @@ mod tests {
                 creator_account_user_id: None,
                 creator_name: Some("Test User".to_string()),
                 share_principals: None,
+                can_publish_to_workspace: None,
             }),
             ..plugin_summary(name)
         }
@@ -171,12 +172,15 @@ mod tests {
             share_context: None,
             source: PluginSource::Remote,
             installed: true,
+            installed_at: None,
             enabled: true,
             install_policy: PluginInstallPolicy::Available,
             install_policy_source: None,
             must_show_installation_interstitial: None,
             auth_policy: PluginAuthPolicy::OnInstall,
             availability: PluginAvailability::Available,
+            disabled_reason: None,
+            eligible_plan_types: None,
             interface: None,
             keywords: Vec::new(),
         }

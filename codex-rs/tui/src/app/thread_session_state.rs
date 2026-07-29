@@ -417,6 +417,7 @@ mod tests {
             parent_thread_id: None,
             preview: "read thread".to_string(),
             ephemeral: false,
+            section: None,
             history_mode: Default::default(),
             model_provider: "read-provider".to_string(),
             created_at: 1,

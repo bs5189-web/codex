@@ -9,4 +9,8 @@ export type ThreadMetadataUpdateParams = { threadId: string,
  * Omit a field to leave it unchanged, set it to `null` to clear it, or
  * provide a string to replace the stored value.
  */
-gitInfo?: ThreadMetadataGitInfoUpdateParams | null, };
+gitInfo?: ThreadMetadataGitInfoUpdateParams | null,
+/**
+ * Omit to leave the section unchanged, set to `null` to clear it, or provide a section ID.
+ */
+sectionId?: string | null, };

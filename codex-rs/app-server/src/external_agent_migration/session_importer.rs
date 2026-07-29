@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use chrono::DateTime;
 use chrono::Utc;
 use codex_arg0::Arg0DispatchPaths;
 use codex_core::ThreadManager;
@@ -19,7 +20,9 @@ use codex_external_agent_migration::sessions::record_completed_session_imports;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::is_persisted_rollout_item;
@@ -110,6 +113,7 @@ impl ExternalAgentSessionImporter {
                     item_result.record_success(
                         Some(completed_import.import.source_path.display().to_string()),
                         Some(completed_import.import.imported_thread_id.to_string()),
+                        completed_import.import.title.clone(),
                     );
                     completed_imports.push(completed_import);
                 }
@@ -208,6 +212,7 @@ impl ExternalAgentSessionImporter {
                 session_id: session_id.to_string(),
                 server_ids: pending_import.attributed_mcp_server_ids,
             });
+        let title = pending_import.session.title.clone();
         let imported_thread_id =
             self.persist_session(pending_import.session)
                 .await
@@ -223,6 +228,7 @@ impl ExternalAgentSessionImporter {
                 source_content_sha256: pending_import.source_content_sha256,
                 imported_thread_id,
                 connector_names: Vec::new(),
+                title,
             },
             connector_attribution,
         }))
@@ -321,6 +327,7 @@ impl ExternalAgentSessionImporter {
             selected_capability_roots: Vec::new(),
             multi_agent_version: Some(MultiAgentVersion::V1),
             history_mode: ThreadHistoryMode::Legacy,
+            history_base: None,
             subagent_history_start_ordinal: None,
             initial_window_id: uuid::Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
@@ -330,6 +337,28 @@ impl ExternalAgentSessionImporter {
             },
         };
         rollout_items.retain(|item| is_persisted_rollout_item(item, ThreadHistoryMode::Legacy));
+        let (created_at, updated_at) = rollout_items
+            .iter()
+            .filter_map(|item| match item {
+                RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => event.started_at,
+                RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => event.completed_at,
+                _ => None,
+            })
+            .fold(None, |chronology: Option<(i64, i64)>, timestamp| {
+                Some(match chronology {
+                    Some((created_at, updated_at)) => {
+                        (created_at.min(timestamp), updated_at.max(timestamp))
+                    }
+                    None => (timestamp, timestamp),
+                })
+            })
+            .and_then(|(created_at, updated_at)| {
+                Some((
+                    DateTime::from_timestamp(created_at, /*nsecs*/ 0)?,
+                    DateTime::from_timestamp(updated_at, /*nsecs*/ 0)?,
+                ))
+            })
+            .unwrap_or((now, now));
         let title = title
             .as_deref()
             .and_then(codex_core::util::normalize_thread_name);
@@ -337,8 +366,9 @@ impl ExternalAgentSessionImporter {
             title,
             preview: first_user_message.clone(),
             model_provider: Some(model_provider),
-            created_at: Some(now),
-            updated_at: Some(now),
+            created_at: Some(created_at),
+            updated_at: Some(updated_at),
+            advance_recency_at: Some(updated_at),
             source: Some(source.clone()),
             thread_source: Some(None),
             agent_nickname: Some(source.get_nickname()),

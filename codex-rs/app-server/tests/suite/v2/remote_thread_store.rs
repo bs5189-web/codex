@@ -18,6 +18,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
+use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use codex_app_server::in_process;
@@ -36,6 +37,7 @@ use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadListResponse;
 use codex_app_server_protocol::ThreadResumeParams;
+use codex_app_server_protocol::ThreadSectionListParams;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
@@ -47,6 +49,7 @@ use codex_config::NoopThreadConfigLoader;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_exec_server::EnvironmentManager;
+use codex_features::Feature;
 use codex_feedback::CodexFeedback;
 use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
@@ -56,12 +59,48 @@ use codex_thread_store::CreateThreadParams as StoreCreateThreadParams;
 use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::ThreadPersistenceMetadata;
 use codex_thread_store::ThreadStore;
+use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use tokio::time::timeout;
 use uuid::Uuid;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[tokio::test]
+async fn thread_section_list_without_sqlite_returns_method_not_found() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let store_id = Uuid::new_v4().to_string();
+    create_config_toml_with_thread_store(codex_home.path(), "http://127.0.0.1:1", &store_id)?;
+    let _in_memory_store = InMemoryThreadStoreId { store_id };
+    let client = start_in_process_server(codex_home.path()).await?;
+
+    let error = client
+        .request(ClientRequest::ThreadSectionList {
+            request_id: RequestId::Integer(1),
+            params: ThreadSectionListParams::default(),
+        })
+        .await?
+        .expect_err("section discovery requires sqlite state");
+
+    assert_eq!(error.code, -32601);
+    assert_eq!(
+        error.message,
+        "threadSection/list is unavailable without sqlite state"
+    );
+
+    client.shutdown().await?;
+    assert!(
+        !codex_home.path().join("state_5.sqlite").exists(),
+        "section discovery must not create local SQLite state"
+    );
+    assert!(
+        !codex_home.path().join("sessions").exists(),
+        "section discovery must not create local thread persistence"
+    );
+
+    Ok(())
+}
 
 #[tokio::test]
 async fn thread_start_rejects_paginated_history_without_list_support() -> Result<()> {
@@ -152,9 +191,8 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
             let Some(event) = client.next_event().await else {
                 anyhow::bail!("in-process app-server stopped before turn/completed");
             };
-            if let InProcessServerEvent::ServerNotification(ServerNotification::TurnCompleted(
-                completed,
-            )) = event
+            if let InProcessServerEvent::ServerNotification(notification) = event
+                && let ServerNotification::TurnCompleted(completed) = notification.as_ref()
                 && completed.thread_id == thread.id
             {
                 return Ok::<(), anyhow::Error>(());
@@ -174,6 +212,7 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
                 model_providers: Some(Vec::new()),
                 source_kinds: None,
                 archived: None,
+                section_id: None,
                 cwd: None,
                 use_state_db_only: false,
                 search_term: None,
@@ -206,6 +245,7 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
             history_mode: Default::default(),
+            history_base: None,
             subagent_history_start_ordinal: None,
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
@@ -291,9 +331,8 @@ async fn cold_thread_resume_reuses_non_local_history_probe() -> Result<()> {
             let Some(event) = client.next_event().await else {
                 anyhow::bail!("in-process app-server stopped before turn/completed");
             };
-            if let InProcessServerEvent::ServerNotification(ServerNotification::TurnCompleted(
-                completed,
-            )) = event
+            if let InProcessServerEvent::ServerNotification(notification) = event
+                && let ServerNotification::TurnCompleted(completed) = notification.as_ref()
                 && completed.thread_id == thread.id
             {
                 return Ok::<(), anyhow::Error>(());
@@ -402,7 +441,9 @@ fn assert_no_local_persistence_artifacts(codex_home: &Path) -> Result<()> {
         "non-local thread persistence should not create archived rollout sessions"
     );
     assert!(
-        !codex_state::state_db_path(codex_home).exists(),
+        !codex_state::SqliteConfig::new_for_testing(codex_home.abs())
+            .state_db_path()
+            .exists(),
         "non-local thread persistence should not create local thread sqlite"
     );
 
@@ -467,27 +508,10 @@ fn create_config_toml_with_thread_store(
     server_uri: &str,
     store_id: &str,
 ) -> std::io::Result<()> {
-    std::fs::write(
-        codex_home.join("config.toml"),
-        format!(
-            r#"
-model = "mock-model"
-approval_policy = "never"
-sandbox_mode = "read-only"
-experimental_thread_store = {{ type = "in_memory", id = "{store_id}" }}
-
-model_provider = "mock_provider"
-
-[model_providers.mock_provider]
-name = "Mock provider for test"
-base_url = "{server_uri}/v1"
-wire_api = "responses"
-request_max_retries = 0
-stream_max_retries = 0
-
-[features]
-plugins = false
-"#
-        ),
-    )
+    MockResponsesConfig::new(server_uri)
+        .with_root_config(&format!(
+            "experimental_thread_store = {{ type = \"in_memory\", id = \"{store_id}\" }}"
+        ))
+        .disable_feature(Feature::Plugins)
+        .write(codex_home)
 }

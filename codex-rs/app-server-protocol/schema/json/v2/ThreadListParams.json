@@ -97,6 +97,13 @@
         "null"
       ]
     },
+    "sectionId": {
+      "description": "Omit to include every section, set to `null` for unsectioned threads, or provide a section ID to return only threads in that section.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "sortDirection": {
       "anyOf": [
         {

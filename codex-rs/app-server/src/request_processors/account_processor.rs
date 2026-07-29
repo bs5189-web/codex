@@ -225,19 +225,33 @@ impl AccountRequestProcessor {
             .await
         {
             Ok(config) => {
+                Self::spawn_effective_plugins_changed_task(
+                    Arc::clone(thread_manager),
+                    config_manager.clone(),
+                );
+                let plugins_config = config.plugins_config_input();
                 let refresh_thread_manager = Arc::clone(thread_manager);
                 let refresh_config_manager = config_manager.clone();
+                let on_effective_plugins_changed: Arc<
+                    dyn Fn(codex_core_plugins::EffectivePluginsChange) + Send + Sync,
+                > = Arc::new(move |_change| {
+                    Self::spawn_effective_plugins_changed_task(
+                        Arc::clone(&refresh_thread_manager),
+                        refresh_config_manager.clone(),
+                    );
+                });
+                thread_manager
+                    .plugins_manager()
+                    .maybe_start_curated_repo_sync_for_config(
+                        &plugins_config,
+                        Some(Arc::clone(&on_effective_plugins_changed)),
+                    );
                 thread_manager
                     .plugins_manager()
                     .maybe_start_remote_plugin_caches_refresh(
-                        &config.plugins_config_input(),
+                        &plugins_config,
                         auth,
-                        Some(Arc::new(move |_change| {
-                            Self::spawn_effective_plugins_changed_task(
-                                Arc::clone(&refresh_thread_manager),
-                                refresh_config_manager.clone(),
-                            );
-                        })),
+                        Some(on_effective_plugins_changed),
                     );
             }
             Err(err) => {
@@ -255,10 +269,9 @@ impl AccountRequestProcessor {
         tokio::spawn(async move {
             thread_manager.plugins_manager().clear_cache();
             thread_manager.skills_service().clear_cache();
-            if thread_manager.list_thread_ids().await.is_empty() {
-                return;
-            }
-            crate::mcp_refresh::queue_best_effort_refresh(&thread_manager, &config_manager).await;
+            crate::mcp_refresh::reload_mcp_config_best_effort(&thread_manager, &config_manager)
+                .await;
+            thread_manager.invalidate_mcp_runtimes().await;
         });
     }
 

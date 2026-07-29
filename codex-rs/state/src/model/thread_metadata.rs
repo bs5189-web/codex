@@ -8,6 +8,8 @@ use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
+use serde::Deserialize;
+use serde::Serialize;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 use std::collections::HashMap;
@@ -47,6 +49,24 @@ pub struct Anchor {
     pub ts: DateTime<Utc>,
     /// The thread ID component used to disambiguate equal recency timestamps.
     pub id: Option<ThreadId>,
+}
+
+/// An independently persisted thread section and its user-facing name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadSection {
+    /// Opaque UUIDv7 identifying the section independently of its name.
+    pub id: String,
+    /// User-facing section name.
+    pub name: String,
+}
+
+/// A cursor-paginated page of independently persisted thread sections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadSectionsPage {
+    /// Sections in ascending identifier order.
+    pub sections: Vec<ThreadSection>,
+    /// Identifier after which the next page starts, if any.
+    pub next_cursor: Option<String>,
 }
 
 /// A single page of thread metadata results.
@@ -124,6 +144,8 @@ pub struct ThreadMetadata {
     pub first_user_message: Option<String>,
     /// The archive timestamp, if the thread is archived.
     pub archived_at: Option<DateTime<Utc>>,
+    /// The user-selected section for this thread, if any.
+    pub section: Option<ThreadSection>,
     /// The git commit SHA, if known.
     pub git_sha: Option<String>,
     /// The git branch name, if known.
@@ -254,6 +276,7 @@ impl ThreadMetadataBuilder {
             tokens_used: 0,
             first_user_message: None,
             archived_at: self.archived_at.map(canonicalize_datetime),
+            section: None,
             git_sha: self.git_sha.clone(),
             git_branch: self.git_branch.clone(),
             git_origin_url: self.git_origin_url.clone(),
@@ -368,6 +391,9 @@ impl ThreadMetadata {
         if self.archived_at != other.archived_at {
             diffs.push("archived_at");
         }
+        if self.section != other.section {
+            diffs.push("section");
+        }
         if self.git_sha != other.git_sha {
             diffs.push("git_sha");
         }
@@ -411,6 +437,8 @@ pub(crate) struct ThreadRow {
     tokens_used: i64,
     first_user_message: String,
     archived_at: Option<i64>,
+    section: Option<String>,
+    section_name: Option<String>,
     git_sha: Option<String>,
     git_branch: Option<String>,
     git_origin_url: Option<String>,
@@ -443,6 +471,8 @@ impl ThreadRow {
             tokens_used: row.try_get("tokens_used")?,
             first_user_message: row.try_get("first_user_message")?,
             archived_at: row.try_get("archived_at")?,
+            section: row.try_get("section")?,
+            section_name: row.try_get("section_name")?,
             git_sha: row.try_get("git_sha")?,
             git_branch: row.try_get("git_branch")?,
             git_origin_url: row.try_get("git_origin_url")?,
@@ -479,6 +509,8 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             tokens_used,
             first_user_message,
             archived_at,
+            section,
+            section_name,
             git_sha,
             git_branch,
             git_origin_url,
@@ -488,6 +520,20 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             .transpose()
             .map_err(anyhow::Error::msg)?;
         let history_mode = history_mode.parse().map_err(anyhow::Error::msg)?;
+        let section = match (section, section_name) {
+            (Some(id), Some(name)) => Some(ThreadSection { id, name }),
+            (None, None) => None,
+            (Some(id), None) => {
+                return Err(anyhow::anyhow!(
+                    "thread references an unknown section: {id}"
+                ));
+            }
+            (None, Some(name)) => {
+                return Err(anyhow::anyhow!(
+                    "thread has a section name without a section id: {name}"
+                ));
+            }
+        };
         Ok(Self {
             id: ThreadId::try_from(id)?,
             rollout_path: PathBuf::from(rollout_path),
@@ -514,6 +560,7 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             tokens_used,
             first_user_message: (!first_user_message.is_empty()).then_some(first_user_message),
             archived_at: archived_at.map(epoch_seconds_to_datetime).transpose()?,
+            section,
             git_sha,
             git_branch,
             git_origin_url,
@@ -612,6 +659,8 @@ mod tests {
             tokens_used: 1,
             first_user_message: String::new(),
             archived_at: None,
+            section: None,
+            section_name: None,
             git_sha: None,
             git_branch: None,
             git_origin_url: None,
@@ -645,6 +694,7 @@ mod tests {
             tokens_used: 1,
             first_user_message: None,
             archived_at: None,
+            section: None,
             git_sha: None,
             git_branch: None,
             git_origin_url: None,

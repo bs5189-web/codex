@@ -1,4 +1,5 @@
 use codex_utils_absolute_path::test_support::PathExt;
+use pretty_assertions::assert_eq;
 use sqlx::Connection;
 use sqlx::Row;
 use sqlx::migrate::Migration;
@@ -6,8 +7,12 @@ use sqlx::migrate::Migrator;
 use std::borrow::Cow;
 
 use super::STATE_MIGRATOR;
+use super::THREAD_HISTORY_MIGRATOR;
 use super::repair_legacy_recency_migration_version;
-use crate::state_db_path;
+use crate::PINNED_THREAD_SECTION_ID;
+use crate::PINNED_THREAD_SECTION_NAME;
+
+const CUSTOM_THREAD_SECTION_ID: &str = "01984de2-8f74-7c91-a3b2-5c5e937cf317";
 
 fn migrator_through(version: i64) -> Migrator {
     Migrator {
@@ -28,6 +33,228 @@ fn migrator_through(version: i64) -> Migrator {
 }
 
 #[tokio::test]
+async fn thread_section_migration_preserves_legacy_pin_compatibility() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let state_path = sqlite.state_db_path();
+    let pool = sqlite
+        .open_read_write_pool(&state_path)
+        .await
+        .expect("sqlite database should open");
+    migrator_through(/*version*/ 44)
+        .run(&pool)
+        .await
+        .expect("released thread migrations should apply");
+
+    for thread_id in [
+        "00000000-0000-0000-0000-000000000043",
+        "00000000-0000-0000-0000-000000000044",
+    ] {
+        if thread_id.ends_with("44") {
+            sqlx::query("UPDATE threads SET is_pinned = 1 WHERE id = ?")
+                .bind("00000000-0000-0000-0000-000000000043")
+                .execute(&pool)
+                .await
+                .expect("legacy pin should remain writable before section migration");
+            STATE_MIGRATOR
+                .run(&pool)
+                .await
+                .expect("section migration should apply");
+        }
+        sqlx::query(
+            r#"
+INSERT INTO threads (
+    id,
+    rollout_path,
+    created_at,
+    updated_at,
+    created_at_ms,
+    updated_at_ms,
+    source,
+    model_provider,
+    cwd,
+    title,
+    sandbox_policy,
+    approval_mode
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(thread_id)
+        .bind("/tmp/legacy.jsonl")
+        .bind(1_700_000_000_i64)
+        .bind(1_700_000_000_i64)
+        .bind(1_700_000_000_000_i64)
+        .bind(1_700_000_000_000_i64)
+        .bind("cli")
+        .bind("openai")
+        .bind("/tmp")
+        .bind("")
+        .bind("read-only")
+        .bind("on-request")
+        .execute(&pool)
+        .await
+        .expect("legacy thread insert should succeed");
+    }
+
+    let registered_sections =
+        sqlx::query_as::<_, (String, String)>("SELECT id, name FROM thread_sections ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .expect("independent thread sections should load");
+    assert_eq!(
+        registered_sections,
+        vec![(
+            PINNED_THREAD_SECTION_ID.to_string(),
+            PINNED_THREAD_SECTION_NAME.to_string(),
+        )]
+    );
+
+    let threads = sqlx::query_as::<_, (i64, Option<String>)>(
+        "SELECT is_pinned, thread_section_id FROM threads ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("legacy and section-aware thread metadata should load");
+    assert_eq!(threads, vec![(1, None), (0, None)]);
+
+    sqlx::query("INSERT INTO thread_sections (id, name) VALUES (?, ?)")
+        .bind(CUSTOM_THREAD_SECTION_ID)
+        .bind("Custom section")
+        .execute(&pool)
+        .await
+        .expect("custom sections should have independent persisted identities");
+
+    let thread_id = "00000000-0000-0000-0000-000000000043";
+    sqlx::query("UPDATE threads SET thread_section_id = ? WHERE id = ?")
+        .bind(CUSTOM_THREAD_SECTION_ID)
+        .bind(thread_id)
+        .execute(&pool)
+        .await
+        .expect("threads should reference independently persisted sections");
+    sqlx::query("UPDATE threads SET is_pinned = 0 WHERE id = ?")
+        .bind(thread_id)
+        .execute(&pool)
+        .await
+        .expect("released binaries should still update the legacy pin column");
+    let thread = sqlx::query_as::<_, (i64, Option<String>)>(
+        "SELECT is_pinned, thread_section_id FROM threads WHERE id = ?",
+    )
+    .bind(thread_id)
+    .fetch_one(&pool)
+    .await
+    .expect("legacy pin updates should not overwrite the authoritative section");
+    assert_eq!(thread, (0, Some(CUSTOM_THREAD_SECTION_ID.to_string())));
+
+    sqlx::query("UPDATE threads SET thread_section_id = NULL WHERE id = ?")
+        .bind(thread_id)
+        .execute(&pool)
+        .await
+        .expect("threads should be removable from sections");
+
+    let registered_sections =
+        sqlx::query_as::<_, (String, String)>("SELECT id, name FROM thread_sections ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .expect("empty sections should remain independently discoverable");
+    assert_eq!(
+        registered_sections,
+        vec![
+            (
+                CUSTOM_THREAD_SECTION_ID.to_string(),
+                "Custom section".to_string(),
+            ),
+            (
+                PINNED_THREAD_SECTION_ID.to_string(),
+                PINNED_THREAD_SECTION_NAME.to_string(),
+            ),
+        ]
+    );
+
+    let mut released_pin_migrator = migrator_through(/*version*/ 44);
+    released_pin_migrator.ignore_missing = true;
+    released_pin_migrator
+        .run(&pool)
+        .await
+        .expect("released pin-capable binaries should tolerate newer migrations");
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn thread_item_update_ordinals_allow_older_writers() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let pre_update_ordinal_migrator = Migrator {
+        migrations: Cow::Owned(
+            THREAD_HISTORY_MIGRATOR
+                .migrations
+                .iter()
+                .filter(|migration| migration.version < 4)
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: THREAD_HISTORY_MIGRATOR.ignore_missing,
+        locking: THREAD_HISTORY_MIGRATOR.locking,
+        table_name: THREAD_HISTORY_MIGRATOR.table_name.clone(),
+        create_schemas: THREAD_HISTORY_MIGRATOR.create_schemas.clone(),
+        no_tx: THREAD_HISTORY_MIGRATOR.no_tx,
+    };
+    let pool = sqlite
+        .open_thread_history_db(
+            &pre_update_ordinal_migrator,
+            /*telemetry_override*/ None,
+        )
+        .await
+        .expect("pre-update-ordinal migrations should apply");
+    sqlx::query(
+        r#"
+INSERT INTO thread_items (thread_id, turn_id, item_id, rollout_ordinal, created_at_ms, item_type, item_json) VALUES
+    ('thread-1', 'turn-1', 'existing-item-1', 11, 1_100, 'userMessage', '{}'),
+    ('thread-1', 'turn-1', 'existing-item-2', 12, 1_200, 'userMessage', '{}')
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .expect("pre-migration items should be inserted");
+    THREAD_HISTORY_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("update-ordinal migration should apply");
+    sqlx::query(
+        r#"
+INSERT INTO thread_items (thread_id, turn_id, item_id, rollout_ordinal, created_at_ms, item_type, item_json) VALUES
+    ('thread-1', 'turn-1', 'old-writer-item-1', 13, 1_300, 'userMessage', '{}'),
+    ('thread-1', 'turn-1', 'old-writer-item-2', 14, 1_400, 'userMessage', '{}')
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .expect("older writers should be able to append multiple items after migration");
+    let ordinals = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT rollout_ordinal, updated_at_ordinal FROM thread_items WHERE thread_id = ? ORDER BY rollout_ordinal",
+    )
+    .bind("thread-1")
+    .fetch_all(&pool)
+    .await
+    .expect("old-writer items should load");
+    assert_eq!(ordinals, vec![(11, 11), (12, 12), (13, 0), (14, 0)]);
+
+    pool.close().await;
+}
+
+#[tokio::test]
 async fn agent_job_tables_are_dropped_when_upgrading() {
     let sqlite_home = crate::runtime::test_support::unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home)
@@ -37,8 +264,9 @@ async fn agent_job_tables_are_dropped_when_upgrading() {
         let _ = std::fs::remove_dir_all(sqlite_home);
     });
     let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let state_path = sqlite.state_db_path();
     let pool = sqlite
-        .open_read_write_pool(&state_db_path(&sqlite_home))
+        .open_read_write_pool(&state_path)
         .await
         .expect("sqlite database should open");
     migrator_through(/*version*/ 15)
@@ -130,8 +358,9 @@ async fn recency_migration_backfills_and_seeds_old_binary_inserts() {
         let _ = std::fs::remove_dir_all(sqlite_home);
     });
     let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let state_path = sqlite.state_db_path();
     let pool = sqlite
-        .open_read_write_pool(&state_db_path(&sqlite_home))
+        .open_read_write_pool(&state_path)
         .await
         .expect("sqlite database should open");
     migrator_through(/*version*/ 37)
@@ -243,8 +472,9 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
         let _ = std::fs::remove_dir_all(sqlite_home);
     });
     let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let state_path = sqlite.state_db_path();
     let pool = sqlite
-        .open_read_write_pool(&state_db_path(&sqlite_home))
+        .open_read_write_pool(&state_path)
         .await
         .expect("sqlite database should open");
     migrator_through(/*version*/ 37)
@@ -319,7 +549,7 @@ async fn repair_recency_migration_succeeds_while_another_connection_holds_writer
         let _ = std::fs::remove_dir_all(sqlite_home);
     });
     let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
-    let state_path = state_db_path(&sqlite_home);
+    let state_path = sqlite.state_db_path();
     let pool = sqlite
         .open_read_write_pool(&state_path)
         .await

@@ -230,6 +230,7 @@ async fn save_remote_plugin_share_creates_workspace_plugin() {
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "plugin_id": "plugins_123",
             "share_url": "https://chatgpt.example/plugins/share/share-key-1",
+            "can_publish_to_workspace": true,
         })))
         .expect(1)
         .mount(&server)
@@ -258,6 +259,7 @@ async fn save_remote_plugin_share_creates_workspace_plugin() {
         RemotePluginShareSaveResult {
             remote_plugin_id: "plugins_123".to_string(),
             share_url: Some("https://chatgpt.example/plugins/share/share-key-1".to_string()),
+            can_publish_to_workspace: Some(true),
         }
     );
     assert_eq!(
@@ -435,6 +437,7 @@ async fn save_remote_plugin_share_updates_existing_workspace_plugin() {
         RemotePluginShareSaveResult {
             remote_plugin_id: "plugins_123".to_string(),
             share_url: None,
+            can_publish_to_workspace: None,
         }
     );
 }
@@ -659,14 +662,18 @@ async fn list_remote_plugin_shares_fetches_created_workspace_plugins() {
                                 name: "Reader".to_string(),
                             },
                         ]),
+                        can_publish_to_workspace: None,
                     }),
                     installed: false,
+                    installed_at: None,
                     enabled: false,
                     install_policy: PluginInstallPolicy::Available,
                     install_policy_source: None,
                     must_show_installation_interstitial: None,
                     auth_policy: PluginAuthPolicy::OnUse,
                     availability: PluginAvailability::Available,
+                    disabled_reason: None,
+                    eligible_plan_types: None,
                     interface: Some(expected_plugin_interface()),
                     keywords: Vec::new(),
                 },
@@ -700,14 +707,18 @@ async fn list_remote_plugin_shares_fetches_created_workspace_plugins() {
                                 name: "Editor".to_string(),
                             },
                         ]),
+                        can_publish_to_workspace: None,
                     }),
                     installed: true,
+                    installed_at: None,
                     enabled: true,
                     install_policy: PluginInstallPolicy::Available,
                     install_policy_source: None,
                     must_show_installation_interstitial: None,
                     auth_policy: PluginAuthPolicy::OnUse,
                     availability: PluginAvailability::Available,
+                    disabled_reason: None,
+                    eligible_plan_types: None,
                     interface: Some(expected_plugin_interface()),
                     keywords: Vec::new(),
                 },

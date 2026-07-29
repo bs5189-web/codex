@@ -3,9 +3,12 @@ use crate::http_client_selector::HttpClientSelector;
 use crate::loader::plugin_app_declarations_from_value;
 use crate::store::PLUGINS_CACHE_DIR;
 use crate::store::PluginStore;
+use chrono::DateTime;
+use chrono::Utc;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::PluginAuthPolicy;
 use codex_app_server_protocol::PluginAvailability;
+use codex_app_server_protocol::PluginDisabledReason;
 use codex_app_server_protocol::PluginInstallPolicy;
 use codex_app_server_protocol::PluginInstallPolicySource;
 use codex_app_server_protocol::PluginInterface;
@@ -189,18 +192,33 @@ pub enum RemoteMarketplaceSource {
     SharedWithMe,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemotePluginCatalogCacheMode {
+    PreferCache,
+    ForceRefetch,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteMarketplacesFetchOutcome {
+    pub marketplaces: Vec<RemoteMarketplace>,
+    pub catalog_cache_refresh_scopes: BTreeSet<RemotePluginScope>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemoteInstalledPlugin {
     pub marketplace_name: String,
     pub id: String,
     pub version: Option<String>,
     pub name: String,
+    pub installed_at: Option<DateTime<Utc>>,
     pub enabled: bool,
     pub install_policy: PluginInstallPolicy,
     pub install_policy_source: Option<PluginInstallPolicySource>,
     pub must_show_installation_interstitial: Option<bool>,
     pub auth_policy: PluginAuthPolicy,
     pub availability: PluginAvailability,
+    pub disabled_reason: Option<PluginDisabledReason>,
+    pub eligible_plan_types: Option<Vec<String>>,
     pub interface: Option<PluginInterface>,
     pub keywords: Vec<String>,
 }
@@ -214,12 +232,15 @@ pub struct RemotePluginSummary {
     pub name: String,
     pub share_context: Option<RemotePluginShareContext>,
     pub installed: bool,
+    pub installed_at: Option<DateTime<Utc>>,
     pub enabled: bool,
     pub install_policy: PluginInstallPolicy,
     pub install_policy_source: Option<PluginInstallPolicySource>,
     pub must_show_installation_interstitial: Option<bool>,
     pub auth_policy: PluginAuthPolicy,
     pub availability: PluginAvailability,
+    pub disabled_reason: Option<PluginDisabledReason>,
+    pub eligible_plan_types: Option<Vec<String>>,
     pub interface: Option<PluginInterface>,
     pub keywords: Vec<String>,
 }
@@ -233,6 +254,7 @@ pub struct RemotePluginShareContext {
     pub creator_account_user_id: Option<String>,
     pub creator_name: Option<String>,
     pub share_principals: Option<Vec<RemotePluginSharePrincipal>>,
+    pub can_publish_to_workspace: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -443,6 +465,8 @@ pub enum RemotePluginScope {
 }
 
 impl RemotePluginScope {
+    const CATALOG_CACHE_SCOPES: [Self; 3] = [Self::Global, Self::User, Self::Workspace];
+
     fn api_value(self) -> &'static str {
         match self {
             Self::Global => "GLOBAL",
@@ -467,7 +491,7 @@ impl RemotePluginScope {
         }
     }
 
-    fn from_marketplace_name(name: &str) -> Option<Self> {
+    pub(crate) fn from_marketplace_name(name: &str) -> Option<Self> {
         match name {
             REMOTE_GLOBAL_MARKETPLACE_NAME => Some(Self::Global),
             REMOTE_CREATED_BY_ME_MARKETPLACE_NAME => Some(Self::User),
@@ -614,6 +638,8 @@ struct RemotePluginDirectoryItem {
     share_url: Option<String>,
     #[serde(default)]
     share_principals: Option<Vec<RemotePluginDirectorySharePrincipal>>,
+    #[serde(default)]
+    can_publish_to_workspace: Option<bool>,
     installation_policy: PluginInstallPolicy,
     installation_policy_source: Option<RemotePluginInstallPolicySource>,
     #[serde(default)]
@@ -621,6 +647,10 @@ struct RemotePluginDirectoryItem {
     authentication_policy: PluginAuthPolicy,
     #[serde(rename = "status", default)]
     availability: PluginAvailability,
+    #[serde(default)]
+    disabled_reason: Option<PluginDisabledReason>,
+    #[serde(default)]
+    eligible_plan_types: Option<Vec<String>>,
     release: RemotePluginReleaseResponse,
 }
 
@@ -663,6 +693,8 @@ struct RemotePluginDirectorySharePrincipal {
 struct RemotePluginInstalledItem {
     #[serde(flatten)]
     plugin: RemotePluginDirectoryItem,
+    #[serde(default)]
+    installed_at: Option<DateTime<Utc>>,
     enabled: bool,
     #[serde(default)]
     disabled_skill_names: Vec<String>,
@@ -722,10 +754,12 @@ pub async fn fetch_remote_marketplaces(
     config: &RemotePluginServiceConfig,
     auth: Option<&CodexAuth>,
     sources: &[RemoteMarketplaceSource],
-    global_catalog_cache_path: Option<&Path>,
-) -> Result<Vec<RemoteMarketplace>, RemotePluginCatalogError> {
+    catalog_cache_root: Option<&Path>,
+    catalog_cache_mode: RemotePluginCatalogCacheMode,
+) -> Result<RemoteMarketplacesFetchOutcome, RemotePluginCatalogError> {
     let auth = ensure_chatgpt_auth(auth)?;
     let mut marketplaces = Vec::new();
+    let mut catalog_cache_refresh_scopes = BTreeSet::new();
     let needs_workspace_installed = sources.iter().any(|source| {
         matches!(
             source,
@@ -742,61 +776,48 @@ pub async fn fetch_remote_marketplaces(
         match source {
             RemoteMarketplaceSource::Global => {
                 let scope = RemotePluginScope::Global;
-                if let Some(codex_home) = global_catalog_cache_path
-                    && let Some(directory_plugins) =
-                        catalog_cache::load_cached_global_directory_plugins(
-                            codex_home, config, auth,
-                        )
-                {
-                    let installed_plugins =
-                        fetch_installed_plugins_for_scope(config, auth, scope).await?;
-                    if let Some(marketplace) = build_remote_marketplace(
-                        scope.marketplace_name(),
-                        scope.marketplace_display_name(),
-                        directory_plugins,
-                        installed_plugins,
-                        /*include_installed_only*/ true,
-                    )? {
-                        marketplaces.push(marketplace);
-                    }
-                    continue;
-                }
                 let (directory_plugins, installed_plugins) = tokio::try_join!(
-                    fetch_directory_plugins_for_scope(config, auth, scope),
+                    fetch_directory_plugins_for_scope_with_cache(
+                        catalog_cache_root,
+                        config,
+                        auth,
+                        scope,
+                        catalog_cache_mode,
+                    ),
                     fetch_installed_plugins_for_scope(config, auth, scope),
                 )?;
-                let directory_plugins_for_cache =
-                    global_catalog_cache_path.map(|_| directory_plugins.clone());
+                if directory_plugins.cache_refresh_needed {
+                    catalog_cache_refresh_scopes.insert(scope);
+                }
                 if let Some(marketplace) = build_remote_marketplace(
                     scope.marketplace_name(),
                     scope.marketplace_display_name(),
-                    directory_plugins,
+                    directory_plugins.plugins,
                     installed_plugins,
                     /*include_installed_only*/ true,
                 )? {
                     marketplaces.push(marketplace);
                 }
-                if let (Some(codex_home), Some(directory_plugins)) =
-                    (global_catalog_cache_path, directory_plugins_for_cache)
-                {
-                    catalog_cache::write_cached_global_directory_plugins(
-                        codex_home,
-                        config,
-                        auth,
-                        &directory_plugins,
-                    );
-                }
             }
             RemoteMarketplaceSource::CreatedByMeRemote => {
                 let scope = RemotePluginScope::User;
                 let (directory_plugins, installed_plugins) = tokio::try_join!(
-                    fetch_directory_plugins_for_scope(config, auth, scope),
+                    fetch_directory_plugins_for_scope_with_cache(
+                        catalog_cache_root,
+                        config,
+                        auth,
+                        scope,
+                        catalog_cache_mode,
+                    ),
                     fetch_installed_plugins_for_scope(config, auth, scope),
                 )?;
+                if directory_plugins.cache_refresh_needed {
+                    catalog_cache_refresh_scopes.insert(scope);
+                }
                 if let Some(marketplace) = build_remote_marketplace(
                     scope.marketplace_name(),
                     scope.marketplace_display_name(),
-                    directory_plugins,
+                    directory_plugins.plugins,
                     installed_plugins,
                     /*include_installed_only*/ false,
                 )? {
@@ -805,12 +826,21 @@ pub async fn fetch_remote_marketplaces(
             }
             RemoteMarketplaceSource::WorkspaceDirectory => {
                 let scope = RemotePluginScope::Workspace;
-                let directory_plugins =
-                    fetch_directory_plugins_for_scope(config, auth, scope).await?;
+                let directory_plugins = fetch_directory_plugins_for_scope_with_cache(
+                    catalog_cache_root,
+                    config,
+                    auth,
+                    scope,
+                    catalog_cache_mode,
+                )
+                .await?;
+                if directory_plugins.cache_refresh_needed {
+                    catalog_cache_refresh_scopes.insert(scope);
+                }
                 if let Some(marketplace) = build_remote_marketplace(
                     scope.marketplace_name(),
                     scope.marketplace_display_name(),
-                    directory_plugins,
+                    directory_plugins.plugins,
                     workspace_installed_plugins.clone().unwrap_or_default(),
                     /*include_installed_only*/ false,
                 )? {
@@ -878,7 +908,22 @@ pub async fn fetch_remote_marketplaces(
         }
     }
 
-    Ok(marketplaces)
+    Ok(RemoteMarketplacesFetchOutcome {
+        marketplaces,
+        catalog_cache_refresh_scopes,
+    })
+}
+
+pub(crate) async fn fetch_and_cache_remote_plugin_catalog(
+    codex_home: &Path,
+    config: &RemotePluginServiceConfig,
+    auth: Option<&CodexAuth>,
+    scope: RemotePluginScope,
+) -> Result<(), RemotePluginCatalogError> {
+    let auth = ensure_chatgpt_auth(auth)?;
+    let plugins = fetch_directory_plugins_for_scope(config, auth, scope).await?;
+    catalog_cache::write_cached_directory_plugins(codex_home, config, auth, scope, &plugins);
+    Ok(())
 }
 
 pub async fn fetch_and_cache_global_remote_plugin_catalog(
@@ -886,11 +931,21 @@ pub async fn fetch_and_cache_global_remote_plugin_catalog(
     config: &RemotePluginServiceConfig,
     auth: Option<&CodexAuth>,
 ) -> Result<(), RemotePluginCatalogError> {
-    let auth = ensure_chatgpt_auth(auth)?;
-    let plugins =
-        fetch_directory_plugins_for_scope(config, auth, RemotePluginScope::Global).await?;
-    catalog_cache::write_cached_global_directory_plugins(codex_home, config, auth, &plugins);
-    Ok(())
+    fetch_and_cache_remote_plugin_catalog(codex_home, config, auth, RemotePluginScope::Global).await
+}
+
+pub fn invalidate_cached_remote_plugin_catalog_scopes(
+    codex_home: &Path,
+    config: &RemotePluginServiceConfig,
+    auth: Option<&CodexAuth>,
+    scopes: &[RemotePluginScope],
+) {
+    let Ok(auth) = ensure_chatgpt_auth(auth) else {
+        return;
+    };
+    for scope in scopes {
+        catalog_cache::remove_cached_directory_plugins(codex_home, config, auth, *scope);
+    }
 }
 
 #[instrument(level = "trace", skip_all)]
@@ -975,15 +1030,39 @@ fn recommended_plugins_mode(response: RecommendedPluginsResponse) -> Recommended
     }
 }
 
-pub fn has_cached_global_remote_plugin_catalog(
+pub(crate) fn has_fresh_cached_remote_plugin_catalog(
     codex_home: &Path,
     config: &RemotePluginServiceConfig,
     auth: Option<&CodexAuth>,
+    scope: RemotePluginScope,
 ) -> bool {
     let Ok(auth) = ensure_chatgpt_auth(auth) else {
         return false;
     };
-    catalog_cache::load_cached_global_directory_plugins(codex_home, config, auth).is_some()
+    catalog_cache::load_cached_directory_plugins(codex_home, config, auth, scope).is_some_and(
+        |cached| {
+            matches!(
+                cached.freshness,
+                catalog_cache::RemotePluginCatalogCacheFreshness::Fresh
+            )
+        },
+    )
+}
+
+pub(crate) fn cached_remote_plugin_catalog_scopes(
+    codex_home: &Path,
+    config: &RemotePluginServiceConfig,
+    auth: Option<&CodexAuth>,
+) -> BTreeSet<RemotePluginScope> {
+    let Ok(auth) = ensure_chatgpt_auth(auth) else {
+        return BTreeSet::new();
+    };
+    RemotePluginScope::CATALOG_CACHE_SCOPES
+        .into_iter()
+        .filter(|scope| {
+            catalog_cache::load_cached_directory_plugins(codex_home, config, auth, *scope).is_some()
+        })
+        .collect()
 }
 
 pub fn cached_global_remote_discoverable_plugins(
@@ -991,17 +1070,25 @@ pub fn cached_global_remote_discoverable_plugins(
     config: &RemotePluginServiceConfig,
     auth: &CodexAuth,
 ) -> Vec<RemoteDiscoverablePlugin> {
-    catalog_cache::load_cached_global_directory_plugins(codex_home, config, auth)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|plugin| match remote_discoverable_plugin_from_directory_item(&plugin) {
+    catalog_cache::load_cached_directory_plugins(
+        codex_home,
+        config,
+        auth,
+        RemotePluginScope::Global,
+    )
+    .map(|cached| cached.plugins)
+    .unwrap_or_default()
+    .into_iter()
+    .filter_map(
+        |plugin| match remote_discoverable_plugin_from_directory_item(&plugin) {
             Ok(plugin) => Some(plugin),
             Err(err) => {
                 tracing::warn!(error = %err, "ignoring cached remote plugin recommendation entry");
                 None
             }
-        })
-        .collect()
+        },
+    )
+    .collect()
 }
 
 pub async fn fetch_openai_curated_remote_collection_marketplace(
@@ -1123,12 +1210,15 @@ pub fn group_remote_installed_plugins_by_marketplaces(
             name: plugin.name.clone(),
             share_context: None,
             installed: true,
+            installed_at: plugin.installed_at,
             enabled: plugin.enabled,
             install_policy: plugin.install_policy,
             install_policy_source: plugin.install_policy_source,
             must_show_installation_interstitial: plugin.must_show_installation_interstitial,
             auth_policy: plugin.auth_policy,
             availability: plugin.availability,
+            disabled_reason: plugin.disabled_reason,
+            eligible_plan_types: plugin.eligible_plan_types.clone(),
             interface: plugin.interface.clone(),
             keywords: plugin.keywords.clone(),
         };
@@ -1555,6 +1645,7 @@ fn build_remote_plugin_summary(
         name: plugin.name.clone(),
         share_context: remote_plugin_share_context(plugin)?,
         installed: installed_plugin.is_some(),
+        installed_at: installed_plugin.and_then(|installed| installed.installed_at),
         enabled: installed_plugin.is_some_and(|plugin| plugin.enabled),
         install_policy: plugin.installation_policy,
         install_policy_source: plugin
@@ -1563,6 +1654,8 @@ fn build_remote_plugin_summary(
         must_show_installation_interstitial: plugin.must_show_installation_interstitial,
         auth_policy: plugin.authentication_policy,
         availability: plugin.availability,
+        disabled_reason: plugin.disabled_reason,
+        eligible_plan_types: plugin.eligible_plan_types.clone(),
         interface: remote_plugin_interface_to_info(plugin),
         keywords: plugin.release.keywords.clone(),
     })
@@ -1621,6 +1714,7 @@ fn remote_plugin_share_context(
                         })
                         .collect()
                 }),
+                can_publish_to_workspace: plugin.can_publish_to_workspace,
             }))
         }
     }
@@ -1638,6 +1732,7 @@ fn remote_installed_plugin_to_cache_entry(
         id: plugin.id.clone(),
         version: plugin.release.version.clone(),
         name: plugin.name.clone(),
+        installed_at: installed_plugin.installed_at,
         enabled: installed_plugin.enabled,
         install_policy: plugin.installation_policy,
         install_policy_source: plugin
@@ -1646,6 +1741,8 @@ fn remote_installed_plugin_to_cache_entry(
         must_show_installation_interstitial: plugin.must_show_installation_interstitial,
         auth_policy: plugin.authentication_policy,
         availability: plugin.availability,
+        disabled_reason: plugin.disabled_reason,
+        eligible_plan_types: plugin.eligible_plan_types.clone(),
         interface: remote_plugin_interface_to_info(plugin),
         keywords: plugin.release.keywords.clone(),
     })
@@ -1713,11 +1810,15 @@ fn remote_skill_interface_to_info(
             short_description: interface.short_description,
             icon_small: None,
             icon_large: None,
+            icon_small_url: interface.icon_small_url,
+            icon_large_url: interface.icon_large_url,
             brand_color: interface.brand_color,
             default_prompt: interface.default_prompt,
         };
         let has_fields = result.display_name.is_some()
             || result.short_description.is_some()
+            || result.icon_small_url.is_some()
+            || result.icon_large_url.is_some()
             || result.brand_color.is_some()
             || result.default_prompt.is_some();
         has_fields.then_some(result)
@@ -1768,6 +1869,42 @@ fn normalize_remote_default_prompt(prompt: &str) -> Option<String> {
     Some(prompt.to_string())
 }
 
+struct DirectoryPluginsFetchOutcome {
+    plugins: Vec<RemotePluginDirectoryItem>,
+    cache_refresh_needed: bool,
+}
+
+async fn fetch_directory_plugins_for_scope_with_cache(
+    codex_home: Option<&Path>,
+    config: &RemotePluginServiceConfig,
+    auth: &CodexAuth,
+    scope: RemotePluginScope,
+    cache_mode: RemotePluginCatalogCacheMode,
+) -> Result<DirectoryPluginsFetchOutcome, RemotePluginCatalogError> {
+    if cache_mode == RemotePluginCatalogCacheMode::PreferCache
+        && let Some(codex_home) = codex_home
+        && let Some(cached) =
+            catalog_cache::load_cached_directory_plugins(codex_home, config, auth, scope)
+    {
+        return Ok(DirectoryPluginsFetchOutcome {
+            plugins: cached.plugins,
+            cache_refresh_needed: matches!(
+                cached.freshness,
+                catalog_cache::RemotePluginCatalogCacheFreshness::Stale
+            ),
+        });
+    }
+
+    let plugins = fetch_directory_plugins_for_scope(config, auth, scope).await?;
+    if let Some(codex_home) = codex_home {
+        catalog_cache::write_cached_directory_plugins(codex_home, config, auth, scope, &plugins);
+    }
+    Ok(DirectoryPluginsFetchOutcome {
+        plugins,
+        cache_refresh_needed: false,
+    })
+}
+
 async fn fetch_directory_plugins_for_scope(
     config: &RemotePluginServiceConfig,
     auth: &CodexAuth,
@@ -1800,6 +1937,15 @@ async fn fetch_directory_plugins_for_scope_with_optional_collection(
     scope: RemotePluginScope,
     collection: Option<&str>,
 ) -> Result<Vec<RemotePluginDirectoryItem>, RemotePluginCatalogError> {
+    tracing::info!(
+        operation = "plugins.remote_catalog.list",
+        http.method = "GET",
+        api.path = "ps/plugins/list",
+        plugin.scope = scope.api_value(),
+        plugin.collection = collection.unwrap_or_default(),
+        "fetching remote plugin catalog"
+    );
+
     let mut plugins = Vec::new();
     let mut page_token = None;
     loop {

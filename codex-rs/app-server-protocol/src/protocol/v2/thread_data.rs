@@ -164,6 +164,17 @@ pub struct GitInfo {
     pub origin_url: Option<String>,
 }
 
+/// An independently persisted, user-visible thread section.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSection {
+    /// Opaque UUIDv7 identity that remains stable when the section is renamed.
+    pub id: String,
+    /// The current user-visible section name.
+    pub name: String,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -183,6 +194,9 @@ pub struct Thread {
     pub preview: String,
     /// Whether the thread is ephemeral and should not be materialized on disk.
     pub ephemeral: bool,
+    /// The independently persisted section selected for this thread, if any.
+    #[serde(default)]
+    pub section: Option<ThreadSection>,
     /// Persisted thread history contract selected when this thread was created.
     #[experimental("thread.historyMode")]
     #[serde(default)]

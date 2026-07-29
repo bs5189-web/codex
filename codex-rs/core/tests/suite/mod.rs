@@ -64,6 +64,7 @@ mod exec_policy;
 mod extension_sandbox;
 mod external_auth;
 mod fork_thread;
+mod git_enrichment;
 #[cfg(not(target_os = "windows"))]
 mod guardian_review;
 #[cfg(not(target_os = "windows"))]
@@ -78,6 +79,7 @@ mod mcp_auth_elicitation;
 mod mcp_auth_refresh;
 #[cfg(unix)]
 mod mcp_refresh_cleanup;
+mod mcp_startup_refresh_http_proxy;
 mod mcp_tool_cache;
 mod mcp_tool_exposure;
 mod mcp_turn_metadata;

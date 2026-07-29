@@ -54,7 +54,7 @@ use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::WarningEvent;
 
 use codex_features::Feature;
-use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ContentItem;
 pub(crate) use compact::CompactTask;
@@ -68,6 +68,11 @@ const GRACEFULL_INTERRUPTION_TIMEOUT_MS: u64 = 100;
 const TASK_COMPACT_METRIC: &str = "codex.task.compact";
 
 pub(crate) type SessionTaskResult = CodexResult<Option<String>>;
+
+pub(crate) enum MailboxParentProvenance {
+    Ignore,
+    Attribute,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InterruptedTurnHistoryMarker {
@@ -319,7 +324,8 @@ impl Session {
     ) {
         self.abort_all_tasks(TurnAbortReason::Replaced).await;
         self.clear_connector_selection().await;
-        self.start_task(turn_context, input, task).await;
+        self.start_task(turn_context, input, task, MailboxParentProvenance::Ignore)
+            .await;
     }
 
     pub(crate) async fn start_task<T: SessionTask>(
@@ -327,6 +333,7 @@ impl Session {
         turn_context: Arc<TurnContext>,
         input: Vec<TurnInput>,
         task: T,
+        mailbox_parent_provenance: MailboxParentProvenance,
     ) {
         let task: Arc<dyn AnySessionTask> = Arc::new(task);
         let task_kind = task.kind();
@@ -350,7 +357,13 @@ impl Session {
             .await
             .clear_turn(&turn_context.sub_id);
 
-        let pending_items = self.input_queue.get_pending_input(&self.active_turn).await;
+        let (pending_items, parent_turn_id) =
+            self.input_queue.get_pending_input(&self.active_turn).await;
+        if let (MailboxParentProvenance::Attribute, Some(id)) =
+            (mailbox_parent_provenance, parent_turn_id)
+        {
+            turn_context.turn_metadata_state.set_parent_turn_id(id);
+        }
         let turn_state = {
             let mut active = self.active_turn.lock().await;
             let turn = active.get_or_insert_with(ActiveTurn::default);
@@ -451,9 +464,18 @@ impl Session {
         turn.task = Some(running_task);
     }
 
+    /// Returns whether an extension has marked this thread as durably asleep.
+    pub(crate) fn has_outstanding_durable_sleep(&self) -> bool {
+        self.services
+            .thread_extension_data
+            .get::<codex_extension_items::sleep::SleepItem>()
+            .is_some()
+    }
+
     /// Starts a regular turn when the session is idle and pending work is waiting.
     ///
-    /// Pending work currently includes mailbox mail marked with `trigger_turn`.
+    /// Pending work includes mailbox mail marked with `trigger_turn`, or any mailbox mail while
+    /// an outstanding durable sleep is attached to the thread.
     ///
     /// This helper generates a fresh sub-id for the synthetic turn before delegating to the
     /// explicit-sub-id variant.
@@ -469,13 +491,16 @@ impl Session {
     /// Starts a regular turn with the provided sub-id when pending work should wake an idle
     /// session.
     ///
-    /// The turn is created only when there is mailbox mail marked with `trigger_turn`, and only
-    /// if the session is currently idle.
+    /// The turn is created only when the session is idle and mailbox mail either requests a turn
+    /// or can wake an outstanding durable sleep.
     pub(crate) async fn maybe_start_turn_for_pending_work_with_sub_id(
         self: &Arc<Self>,
         sub_id: String,
     ) {
-        if !self.input_queue.has_trigger_turn_mailbox_items().await {
+        if !self.input_queue.has_pending_mailbox_items().await
+            || (!self.input_queue.has_trigger_turn_mailbox_items().await
+                && !self.has_outstanding_durable_sleep())
+        {
             return;
         }
 
@@ -490,8 +515,13 @@ impl Session {
         let turn_context = self.new_default_turn_with_sub_id(sub_id).await;
         self.maybe_emit_model_warnings_for_turn(turn_context.as_ref())
             .await;
-        self.start_task(turn_context, Vec::new(), RegularTask::new())
-            .await;
+        self.start_task(
+            turn_context,
+            Vec::new(),
+            RegularTask::new(),
+            MailboxParentProvenance::Attribute,
+        )
+        .await;
     }
 
     pub async fn abort_all_tasks(self: &Arc<Self>, reason: TurnAbortReason) {
@@ -572,7 +602,9 @@ impl Session {
     ) {
         let (last_agent_message, abort_reason) = match task_result {
             Ok(last_agent_message) => (last_agent_message, None),
-            Err(CodexErr::TurnAborted) => (None, Some(TurnAbortReason::Interrupted)),
+            Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted) => {
+                (None, Some(TurnAbortReason::Interrupted))
+            }
             Err(err) => {
                 warn!(%err, "session task returned an unexpected error");
                 (None, None)
@@ -758,15 +790,15 @@ impl Session {
             turn_had_memory_citation,
         );
         let started_at = turn_context.turn_timing_state.started_at_unix_secs().await;
-        let (completed_at, duration_ms) = turn_context
+        let (completed_at, duration_ms, profile) = turn_context
             .turn_timing_state
-            .completed_at_and_duration_ms()
+            .complete_profile_and_duration_ms()
             .await;
         self.services
             .analytics_events_client
             .track_turn_profile(TurnProfileFact {
                 turn_id: turn_context.sub_id.clone(),
-                profile: turn_context.turn_timing_state.complete_profile(),
+                profile,
             });
         let event = if let Some(reason) = abort_reason {
             self.emit_turn_abort_lifecycle(reason.clone(), turn_context.extension_data.as_ref())
@@ -907,16 +939,16 @@ impl Session {
             .turn_timing_state
             .started_at_unix_secs()
             .await;
-        let (completed_at, duration_ms) = task
+        let (completed_at, duration_ms, profile) = task
             .turn_context
             .turn_timing_state
-            .completed_at_and_duration_ms()
+            .complete_profile_and_duration_ms()
             .await;
         self.services
             .analytics_events_client
             .track_turn_profile(TurnProfileFact {
                 turn_id: task.turn_context.sub_id.clone(),
-                profile: task.turn_context.turn_timing_state.complete_profile(),
+                profile,
             });
         let event = EventMsg::TurnAborted(TurnAbortedEvent {
             turn_id: Some(task.turn_context.sub_id.clone()),

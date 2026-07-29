@@ -1950,10 +1950,36 @@ async fn write_stdin_returns_exit_metadata_and_clears_session() -> Result<()> {
     )
     .await?;
 
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
-    .await;
+    let mut exit_lifecycle_order = Vec::new();
+    let mut turn_completed = false;
+    loop {
+        let event = wait_for_event(&test.codex, |_| true).await;
+        match event {
+            EventMsg::TerminalInteraction(event)
+                if event.call_id == start_call_id
+                    && event.stdin
+                        == exit_args
+                            .get("chars")
+                            .and_then(Value::as_str)
+                            .expect("exit chars") =>
+            {
+                exit_lifecycle_order.push("terminal_interaction");
+            }
+            EventMsg::ExecCommandEnd(event) if event.call_id == start_call_id => {
+                exit_lifecycle_order.push("exec_command_end");
+            }
+            EventMsg::TurnComplete(_) => turn_completed = true,
+            _ => {}
+        }
+        if turn_completed && exit_lifecycle_order.len() == 2 {
+            break;
+        }
+    }
+    assert_eq!(
+        exit_lifecycle_order,
+        ["terminal_interaction", "exec_command_end"],
+        "the interaction that exits a process must precede command completion"
+    );
 
     let requests = request_log.requests();
     assert!(!requests.is_empty(), "expected at least one POST request");
@@ -2173,9 +2199,14 @@ async fn assert_write_stdin_ctrl_c_interrupts_non_tty_session(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg_attr(not(windows), ignore = "Windows-only unified exec interrupt test")]
-async fn write_stdin_ctrl_c_reports_unsupported_interrupt_to_model_on_windows() -> Result<()> {
-    skip_if_no_network!(Ok(()));
+async fn write_stdin_ctrl_c_terminates_non_tty_session_on_windows() -> Result<()> {
+    if core_test_support::test_target_os() != core_test_support::TestTargetOs::Windows {
+        return Ok(());
+    }
+    skip_if_wine_exec!(
+        Ok(()),
+        "Wine exits Windows non-TTY shell processes immediately"
+    );
     skip_if_sandbox!(Ok(()));
 
     let server = start_mock_server().await;
@@ -2192,8 +2223,7 @@ async fn write_stdin_ctrl_c_reports_unsupported_interrupt_to_model_on_windows() 
     let interrupt_call_id = "uexec-windows-interrupt";
 
     let start_args = serde_json::json!({
-        "shell": "cmd",
-        "cmd": "echo READY && ping -n 30 127.0.0.1 >NUL",
+        "cmd": "Start-Sleep -Seconds 30",
         "yield_time_ms": 250,
         "tty": false,
     });
@@ -2237,9 +2267,11 @@ async fn write_stdin_ctrl_c_reports_unsupported_interrupt_to_model_on_windows() 
     )
     .await?;
 
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
+    wait_for_event_with_timeout(
+        &test.codex,
+        |event| matches!(event, EventMsg::TurnComplete(_)),
+        Duration::from_secs(20),
+    )
     .await;
 
     let start_output = request_log
@@ -2251,23 +2283,15 @@ async fn write_stdin_ctrl_c_reports_unsupported_interrupt_to_model_on_windows() 
         Some("1000"),
         "exec_command should leave a running non-TTY session"
     );
-    assert!(
-        start_output.output.contains("READY"),
-        "start output should include command readiness marker, got {:?}",
-        start_output.output
-    );
-
     let interrupt_output = request_log
         .function_call_output_text(interrupt_call_id)
         .expect("missing interrupt output for write_stdin");
+    let interrupt_output = parse_unified_exec_output(&interrupt_output)?;
     assert!(
-        interrupt_output.contains("write_stdin failed"),
-        "model-visible write_stdin output should report failure, got {interrupt_output:?}"
+        interrupt_output.process_id.is_none(),
+        "interrupted process should be cleared from the session map"
     );
-    assert!(
-        interrupt_output.contains("process interrupt is not supported by this process backend"),
-        "model-visible write_stdin output should explain unsupported interrupt, got {interrupt_output:?}"
-    );
+    assert_eq!(interrupt_output.exit_code, Some(1));
 
     Ok(())
 }
@@ -3391,6 +3415,14 @@ async fn unified_exec_runs_on_all_platforms() -> Result<()> {
     let request_log = mount_sse_sequence(&server, responses).await;
 
     submit_unified_exec_turn(&test, "summarize large output", PermissionProfile::Disabled).await?;
+
+    let end_event = wait_for_event_match(&test.codex, |msg| match msg {
+        EventMsg::ExecCommandEnd(event) if event.call_id == call_id => Some(event.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(end_event.exit_code, 0);
+    assert_regex_match(".*hello crossplat.*", &end_event.aggregated_output);
 
     wait_for_event(&test.codex, |event| {
         matches!(event, EventMsg::TurnComplete(_))

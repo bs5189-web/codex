@@ -6,6 +6,7 @@ use super::SandboxPolicy;
 use super::Thread;
 use super::ThreadHistoryMode;
 use super::ThreadItem;
+use super::ThreadSection;
 use super::ThreadSource;
 use super::Turn;
 use super::TurnEnvironmentParams;
@@ -865,6 +866,15 @@ pub struct ThreadMetadataUpdateParams {
     /// provide a string to replace the stored value.
     #[ts(optional = nullable)]
     pub git_info: Option<ThreadMetadataGitInfoUpdateParams>,
+    /// Omit to leave the section unchanged, set to `null` to clear it, or provide a section ID.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option"
+    )]
+    #[ts(optional = nullable, type = "string | null")]
+    pub section_id: Option<Option<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -1034,7 +1044,7 @@ pub struct ThreadBackgroundTerminal {
     pub item_id: String,
     pub process_id: String,
     pub command: String,
-    pub cwd: AbsolutePathBuf,
+    pub cwd: LegacyAppPathString,
     pub os_pid: Option<u32>,
     pub cpu_percent: Option<f64>,
     pub rss_kb: Option<u64>,
@@ -1090,6 +1100,29 @@ pub struct ThreadRollbackResponse {
     pub thread: Thread,
 }
 
+/// Parameters for listing independently persisted thread sections.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSectionListParams {
+    /// Opaque pagination cursor returned by a previous call.
+    #[ts(optional = nullable)]
+    pub cursor: Option<String>,
+    /// Maximum number of sections to return.
+    #[ts(optional = nullable)]
+    pub limit: Option<u32>,
+}
+
+/// One page of independently persisted thread sections.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSectionListResponse {
+    pub data: Vec<ThreadSection>,
+    /// Opaque cursor for the next page, or `null` when no sections remain.
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -1118,6 +1151,16 @@ pub struct ThreadListParams {
     /// If false or null, only non-archived threads are returned.
     #[ts(optional = nullable)]
     pub archived: Option<bool>,
+    /// Omit to include every section, set to `null` for unsectioned threads,
+    /// or provide a section ID to return only threads in that section.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option"
+    )]
+    #[ts(optional = nullable, type = "string | null")]
+    pub section_id: Option<Option<String>>,
     /// Optional cwd filter or filters; when set, only threads whose session cwd
     /// exactly matches one of these paths are returned.
     #[ts(optional = nullable, type = "string | Array<string> | null")]
