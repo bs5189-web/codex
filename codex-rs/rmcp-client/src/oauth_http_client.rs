@@ -7,14 +7,16 @@ use codex_exec_server::HttpClient;
 use codex_exec_server::HttpHeader;
 use codex_exec_server::HttpRedirectPolicy;
 use codex_exec_server::HttpRequestParams;
+use http::HeaderMap;
 use oauth2::HttpRequest;
 use oauth2::HttpResponse;
-use reqwest::header::HeaderMap;
 use rmcp::transport::auth::OAuthHttpClient;
 use rmcp::transport::auth::OAuthHttpClientError;
 use rmcp::transport::auth::OAuthHttpClientFuture;
 use rmcp::transport::auth::OAuthHttpRedirectPolicy;
 use rmcp::transport::auth::OAuthHttpRequest;
+
+use crate::auth_status::OAuthDiscoveryTimeout;
 
 const MAX_OAUTH_HTTP_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
 static NEXT_OAUTH_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -23,6 +25,7 @@ static NEXT_OAUTH_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 pub(crate) struct OAuthHttpClientAdapter {
     http_client: Arc<dyn HttpClient>,
     default_headers: HeaderMap,
+    timeout: OAuthDiscoveryTimeout,
 }
 
 impl OAuthHttpClientAdapter {
@@ -30,6 +33,19 @@ impl OAuthHttpClientAdapter {
         Self {
             http_client,
             default_headers,
+            timeout: OAuthDiscoveryTimeout::Requested,
+        }
+    }
+
+    pub(crate) fn new_with_max_timeout(
+        http_client: Arc<dyn HttpClient>,
+        default_headers: HeaderMap,
+        max_timeout: Duration,
+    ) -> Self {
+        Self {
+            http_client,
+            default_headers,
+            timeout: OAuthDiscoveryTimeout::Capped(max_timeout),
         }
     }
 
@@ -54,6 +70,7 @@ impl OAuthHttpClientAdapter {
             headers.remove(name);
         }
         headers.extend(parts.headers);
+
         let headers = headers
             .iter()
             .map(|(name, value)| {
@@ -66,6 +83,12 @@ impl OAuthHttpClientAdapter {
                 })
             })
             .collect::<Result<Vec<_>, OAuthHttpClientError>>()?;
+        let timeout = match self.timeout {
+            OAuthDiscoveryTimeout::Requested => timeout,
+            OAuthDiscoveryTimeout::Capped(max_timeout) => {
+                Some(timeout.map_or(max_timeout, |timeout| timeout.min(max_timeout)))
+            }
+        };
         let timeout_ms = timeout.map(|timeout| {
             u64::try_from(timeout.as_millis())
                 .unwrap_or(u64::MAX)

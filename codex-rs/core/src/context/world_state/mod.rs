@@ -1,10 +1,18 @@
 mod agents_md;
 mod apps_instructions;
+mod collaboration_mode;
+mod context_window_guidance;
 mod environment;
 mod environments_instructions;
+mod model;
+mod multi_agent_mode;
+mod permissions;
+mod personality;
 mod plugins_instructions;
+mod realtime;
 #[cfg(test)]
 mod test_support;
+mod tools;
 
 use crate::context::ContextualUserFragment;
 use codex_extension_api::PreviousWorldStateSection;
@@ -17,14 +25,24 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Map;
 use serde_json::Value;
+use sha1::Digest;
+use sha1::Sha1;
 use std::collections::BTreeMap;
 use std::fmt;
 
 pub(crate) use agents_md::AgentsMdState;
 pub(crate) use apps_instructions::AppsInstructionsState;
+pub(crate) use collaboration_mode::CollaborationModeState;
+pub(crate) use context_window_guidance::ContextWindowGuidanceState;
 pub(crate) use environment::EnvironmentsState;
 pub(crate) use environments_instructions::EnvironmentsInstructionsState;
+pub(crate) use model::ModelInstructionsState;
+pub(crate) use multi_agent_mode::MultiAgentModeState;
+pub(crate) use permissions::PermissionsState;
+pub(crate) use personality::PersonalityState;
 pub(crate) use plugins_instructions::PluginsInstructionsState;
+pub(crate) use realtime::RealtimeState;
+pub(crate) use tools::ToolsState;
 
 trait ErasedWorldStateSection: Send + Sync {
     fn snapshot(&self) -> Option<Value>;
@@ -43,6 +61,9 @@ trait ErasedWorldStateSection: Send + Sync {
 
 impl<S: WorldStateSection> ErasedWorldStateSection for S {
     fn snapshot(&self) -> Option<Value> {
+        if !WorldStateSection::should_persist(self) {
+            return None;
+        }
         let mut snapshot = match serde_json::to_value(WorldStateSection::snapshot(self)) {
             Ok(snapshot) => snapshot,
             Err(err) => {
@@ -187,6 +208,11 @@ pub(crate) trait WorldStateSection: Send + Sync + 'static {
 
     fn snapshot(&self) -> Self::Snapshot;
 
+    /// Whether the section contributes comparison state to persisted rollouts.
+    fn should_persist(&self) -> bool {
+        true
+    }
+
     fn matches_legacy_fragment(_role: &str, _text: &str) -> bool {
         false
     }
@@ -205,6 +231,27 @@ pub(crate) trait WorldStateSection: Send + Sync + 'static {
         &self,
         previous: PreviousSectionState<'_, Self::Snapshot>,
     ) -> Option<Box<dyn ContextualUserFragment>>;
+}
+
+/// Stable fingerprint of a model-visible World State fragment.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub(crate) struct WorldStateHash(String);
+
+impl WorldStateHash {
+    pub(crate) fn from_fragment(fragment: &(impl ContextualUserFragment + ?Sized)) -> Self {
+        let mut hasher = Sha1::new();
+        hasher.update(b"codex-world-state-fragment-v1\0");
+        hash_component(&mut hasher, fragment.role());
+        hash_component(&mut hasher, &fragment.render());
+        Self(format!("{:x}", hasher.finalize()))
+    }
+}
+
+fn hash_component(hasher: &mut Sha1, value: &str) {
+    let value = value.replace("\r\n", "\n");
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value.as_bytes());
 }
 
 /// Live model-visible state, keyed by the same stable section IDs used in rollouts.
@@ -264,8 +311,14 @@ impl WorldState {
             !self.sections.contains_key(id),
             "duplicate world-state section ID: {id}"
         );
-        self.sections
-            .insert(id, Box::new(ExtensionWorldStateSection(section)));
+        let section = Box::new(ExtensionWorldStateSection(section));
+        if id == "host_skills"
+            && let Some(index) = self.sections.get_index_of(PermissionsState::ID)
+        {
+            self.sections.shift_insert(index, id, section);
+        } else {
+            self.sections.insert(id, section);
+        }
     }
 
     pub(crate) fn snapshot(&self) -> WorldStateSnapshot {

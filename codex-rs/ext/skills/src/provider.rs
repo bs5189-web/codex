@@ -7,6 +7,8 @@ mod host;
 mod orchestrator;
 
 use codex_core_skills::HostSkillsSnapshot;
+use codex_exec_server::ExecutorCapabilityDiscoverySnapshot;
+use codex_exec_server::ResolvedSelectedCapabilityRoot;
 use codex_mcp::McpResourceClient;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 
@@ -22,15 +24,20 @@ pub use executor::ExecutorSkillProvider;
 pub use host::HostSkillProvider;
 pub use orchestrator::OrchestratorSkillProvider;
 
+pub(crate) const MAX_SKILL_RESOURCE_CONTENT_BYTES: usize = 1024 * 1024;
+
 #[derive(Clone, Debug)]
 pub struct SkillListQuery {
     pub turn_id: String,
     pub executor_roots: Vec<SelectedCapabilityRoot>,
+    pub resolved_executor_roots: Vec<ResolvedSelectedCapabilityRoot>,
     pub host_snapshot: Option<Arc<HostSkillsSnapshot>>,
     pub include_host_skills: bool,
     pub include_bundled_skills: bool,
     pub include_orchestrator_skills: bool,
     pub mcp_resources: Option<Arc<McpResourceClient>>,
+    /// Present only when the opt-in high-level executor discovery path is selected.
+    pub executor_capability_discovery: Option<ExecutorCapabilityDiscoverySnapshot>,
 }
 
 #[derive(Clone, Debug)]
@@ -38,6 +45,7 @@ pub struct SkillReadRequest {
     pub authority: SkillAuthority,
     pub package: SkillPackageId,
     pub resource: SkillResourceId,
+    pub resolved_executor_roots: Vec<ResolvedSelectedCapabilityRoot>,
     pub host_snapshot: Option<Arc<HostSkillsSnapshot>>,
     pub mcp_resources: Option<Arc<McpResourceClient>>,
 }

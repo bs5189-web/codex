@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use chrono::DateTime;
 use chrono::Utc;
 use codex_arg0::Arg0DispatchPaths;
 use codex_core::ThreadManager;
@@ -19,7 +20,9 @@ use codex_external_agent_migration::sessions::record_completed_session_imports;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::is_persisted_rollout_item;
@@ -85,6 +88,7 @@ impl ExternalAgentSessionImporter {
             record_import_error(
                 &mut item_result,
                 "session_permit",
+                Some("failed_to_acquire_import_permit"),
                 "external agent session import permit could not be acquired",
                 /*source*/ None,
             );
@@ -109,16 +113,24 @@ impl ExternalAgentSessionImporter {
                     item_result.record_success(
                         Some(completed_import.import.source_path.display().to_string()),
                         Some(completed_import.import.imported_thread_id.to_string()),
+                        completed_import.import.title.clone(),
                     );
                     completed_imports.push(completed_import);
                 }
                 Ok(None) => {}
                 Err(failure) => {
+                    let SessionImportFailure {
+                        source_path,
+                        message,
+                        stage,
+                        sub_error_type,
+                    } = failure;
                     record_import_error(
                         &mut item_result,
-                        failure.stage,
-                        failure.message.clone(),
-                        Some(failure.source_path.display().to_string()),
+                        stage,
+                        Some(sub_error_type),
+                        message,
+                        Some(source_path.display().to_string()),
                     );
                 }
             }
@@ -141,6 +153,7 @@ impl ExternalAgentSessionImporter {
                 record_import_error(
                     &mut item_result,
                     "session_connector_detection_task",
+                    Some("session_connector_detection_task_failed"),
                     err.to_string(),
                     /*source*/ None,
                 );
@@ -163,6 +176,7 @@ impl ExternalAgentSessionImporter {
             record_import_error(
                 &mut item_result,
                 "session_ledger_update",
+                Some("failed_to_update_session_ledger"),
                 err.to_string(),
                 /*source*/ None,
             );
@@ -179,10 +193,11 @@ impl ExternalAgentSessionImporter {
         let Some(pending_import) = self
             .prepare_session_import(session, metadata_mode)
             .await
-            .map_err(|message| SessionImportFailure {
+            .map_err(|failure| SessionImportFailure {
                 source_path: source_path.clone(),
-                message,
+                message: failure.message,
                 stage: "session_prepare",
+                sub_error_type: failure.sub_error_type,
             })?
         else {
             return Ok(None);
@@ -197,13 +212,15 @@ impl ExternalAgentSessionImporter {
                 session_id: session_id.to_string(),
                 server_ids: pending_import.attributed_mcp_server_ids,
             });
+        let title = pending_import.session.title.clone();
         let imported_thread_id =
             self.persist_session(pending_import.session)
                 .await
-                .map_err(|message| SessionImportFailure {
+                .map_err(|failure| SessionImportFailure {
                     source_path: pending_import.source_path.clone(),
-                    message,
+                    message: failure.message,
                     stage: "session_persist",
+                    sub_error_type: failure.sub_error_type,
                 })?;
         Ok(Some(CompletedSessionImport {
             import: CompletedExternalAgentSessionImport {
@@ -211,6 +228,7 @@ impl ExternalAgentSessionImporter {
                 source_content_sha256: pending_import.source_content_sha256,
                 imported_thread_id,
                 connector_names: Vec::new(),
+                title,
             },
             connector_attribution,
         }))
@@ -220,20 +238,30 @@ impl ExternalAgentSessionImporter {
         &self,
         session: ExternalAgentSessionMigration,
         metadata_mode: SessionMetadataMode,
-    ) -> Result<Option<PendingSessionImport>, String> {
+    ) -> Result<Option<PendingSessionImport>, SessionImportStepFailure> {
         let codex_home = self.codex_home.clone();
         tokio::task::spawn_blocking(move || {
             prepare_validated_session_import_with_metadata_mode(&codex_home, session, metadata_mode)
         })
         .await
-        .map_err(|err| format!("external agent session preparation task failed: {err}"))?
-        .map_err(|err| format!("failed to prepare external agent session: {err}"))
+        .map_err(|err| {
+            SessionImportStepFailure::new(
+                "session_preparation_task_failed",
+                format!("external agent session preparation task failed: {err}"),
+            )
+        })?
+        .map_err(|err| {
+            SessionImportStepFailure::new(
+                "failed_to_prepare_session",
+                format!("failed to prepare external agent session: {err}"),
+            )
+        })
     }
 
     async fn persist_session(
         &self,
         session: ImportedExternalAgentSession,
-    ) -> Result<ThreadId, String> {
+    ) -> Result<ThreadId, SessionImportStepFailure> {
         let ImportedExternalAgentSession {
             cwd,
             title,
@@ -252,7 +280,12 @@ impl ExternalAgentSessionImporter {
                 },
             )
             .await
-            .map_err(|err| format!("failed to load imported session config: {err}"))?;
+            .map_err(|err| {
+                SessionImportStepFailure::new(
+                    "failed_to_load_session_config",
+                    format!("failed to load imported session config: {err}"),
+                )
+            })?;
         let models_manager = self.thread_manager.get_models_manager();
         let model = models_manager
             .get_default_model(
@@ -294,6 +327,7 @@ impl ExternalAgentSessionImporter {
             selected_capability_roots: Vec::new(),
             multi_agent_version: Some(MultiAgentVersion::V1),
             history_mode: ThreadHistoryMode::Legacy,
+            history_base: None,
             subagent_history_start_ordinal: None,
             initial_window_id: uuid::Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
@@ -303,6 +337,28 @@ impl ExternalAgentSessionImporter {
             },
         };
         rollout_items.retain(|item| is_persisted_rollout_item(item, ThreadHistoryMode::Legacy));
+        let (created_at, updated_at) = rollout_items
+            .iter()
+            .filter_map(|item| match item {
+                RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => event.started_at,
+                RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => event.completed_at,
+                _ => None,
+            })
+            .fold(None, |chronology: Option<(i64, i64)>, timestamp| {
+                Some(match chronology {
+                    Some((created_at, updated_at)) => {
+                        (created_at.min(timestamp), updated_at.max(timestamp))
+                    }
+                    None => (timestamp, timestamp),
+                })
+            })
+            .and_then(|(created_at, updated_at)| {
+                Some((
+                    DateTime::from_timestamp(created_at, /*nsecs*/ 0)?,
+                    DateTime::from_timestamp(updated_at, /*nsecs*/ 0)?,
+                ))
+            })
+            .unwrap_or((now, now));
         let title = title
             .as_deref()
             .and_then(codex_core::util::normalize_thread_name);
@@ -310,8 +366,9 @@ impl ExternalAgentSessionImporter {
             title,
             preview: first_user_message.clone(),
             model_provider: Some(model_provider),
-            created_at: Some(now),
-            updated_at: Some(now),
+            created_at: Some(created_at),
+            updated_at: Some(updated_at),
+            advance_recency_at: Some(updated_at),
             source: Some(source.clone()),
             thread_source: Some(None),
             agent_nickname: Some(source.get_nickname()),
@@ -327,7 +384,12 @@ impl ExternalAgentSessionImporter {
         self.thread_store
             .create_thread(create_params)
             .await
-            .map_err(|err| format!("failed to import session: {err}"))?;
+            .map_err(|err| {
+                SessionImportStepFailure::new(
+                    "failed_to_create_thread",
+                    format!("failed to import session: {err}"),
+                )
+            })?;
         if !rollout_items.is_empty()
             && let Err(err) = self
                 .thread_store
@@ -338,7 +400,10 @@ impl ExternalAgentSessionImporter {
                 .await
         {
             let _ = self.thread_store.discard_thread(thread_id).await;
-            return Err(format!("failed to import session: {err}"));
+            return Err(SessionImportStepFailure::new(
+                "failed_to_append_thread_items",
+                format!("failed to import session: {err}"),
+            ));
         }
 
         self.thread_store
@@ -348,15 +413,30 @@ impl ExternalAgentSessionImporter {
                 include_archived: false,
             })
             .await
-            .map_err(|err| format!("failed to update imported session: {err}"))?;
+            .map_err(|err| {
+                SessionImportStepFailure::new(
+                    "failed_to_update_thread_metadata",
+                    format!("failed to update imported session: {err}"),
+                )
+            })?;
         self.thread_store
             .persist_thread(thread_id)
             .await
-            .map_err(|err| format!("failed to persist imported session: {err}"))?;
+            .map_err(|err| {
+                SessionImportStepFailure::new(
+                    "failed_to_persist_thread",
+                    format!("failed to persist imported session: {err}"),
+                )
+            })?;
         self.thread_store
             .shutdown_thread(thread_id)
             .await
-            .map_err(|err| format!("failed to shutdown imported session: {err}"))?;
+            .map_err(|err| {
+                SessionImportStepFailure::new(
+                    "failed_to_shutdown_thread",
+                    format!("failed to shutdown imported session: {err}"),
+                )
+            })?;
         Ok(thread_id)
     }
 }
@@ -365,4 +445,19 @@ struct SessionImportFailure {
     source_path: PathBuf,
     message: String,
     stage: &'static str,
+    sub_error_type: &'static str,
+}
+
+struct SessionImportStepFailure {
+    sub_error_type: &'static str,
+    message: String,
+}
+
+impl SessionImportStepFailure {
+    fn new(sub_error_type: &'static str, message: String) -> Self {
+        Self {
+            sub_error_type,
+            message,
+        }
+    }
 }

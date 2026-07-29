@@ -75,10 +75,6 @@ impl ThreadConfigLoadError {
     pub fn code(&self) -> ThreadConfigLoadErrorCode {
         self.code
     }
-
-    pub fn status_code(&self) -> Option<u16> {
-        self.status_code
-    }
 }
 
 /// Loads typed config sources for a new thread.
@@ -290,6 +286,7 @@ mod tests {
                     supports_websockets = true
                     supports_image_generation = false
                     supports_web_search = false
+                    supports_standalone_web_search = true
 
                     [features]
                     plugins = false
@@ -322,6 +319,7 @@ mod tests {
             supports_websockets: true,
             supports_image_generation: false,
             supports_web_search: false,
+            supports_standalone_web_search: true,
         }
     }
 }

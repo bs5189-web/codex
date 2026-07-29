@@ -133,6 +133,7 @@ use codex_login::default_client::originator;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::items::is_safe_plugin_relative_path;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SkillScope;
@@ -758,6 +759,7 @@ impl AnalyticsReducer {
                         repo_url,
                         skill_scope: Some(skill_scope.to_string()),
                         plugin_id: invocation.plugin_id,
+                        remote_plugin_id: invocation.remote_plugin_id,
                     },
                 },
             ));
@@ -867,6 +869,7 @@ impl AnalyticsReducer {
                 event_params: CodexOnboardingExternalAgentImportCompleteMetadata {
                     import_id: input.import_id,
                     source: input.source,
+                    provider_id: input.provider_id,
                     item_type: input.item_type,
                     success_count: input.success_count,
                     failed_count: input.failed_count,
@@ -887,6 +890,7 @@ impl AnalyticsReducer {
                 event_params: CodexOnboardingExternalAgentImportFailureMetadata {
                     import_id: input.import_id,
                     source: input.source,
+                    provider_id: input.provider_id,
                     item_type: input.item_type,
                     failure_stage: input.failure_stage,
                     error_type: input.error_type,
@@ -1797,6 +1801,8 @@ fn tool_item_event(input: ToolItemEventInput<'_>) -> Option<TrackEventRequest> {
     match item {
         ThreadItem::CommandExecution {
             id,
+            plugin_id,
+            script_path,
             source,
             status,
             command_actions,
@@ -1830,6 +1836,11 @@ fn tool_item_event(input: ToolItemEventInput<'_>) -> Option<TrackEventRequest> {
                     event_type: "codex_command_execution_event",
                     event_params: CodexCommandExecutionEventParams {
                         base,
+                        plugin_id: plugin_id.clone(),
+                        script_path: safe_plugin_relative_script_path(
+                            plugin_id.as_deref(),
+                            script_path.as_deref(),
+                        ),
                         command_execution_source: *source,
                         exit_code: *exit_code,
                         command_total_action_count: action_counts.total,
@@ -1968,6 +1979,7 @@ fn tool_item_event(input: ToolItemEventInput<'_>) -> Option<TrackEventRequest> {
                         output_content_item_count: counts.map(|counts| counts.total),
                         output_text_item_count: counts.map(|counts| counts.text),
                         output_image_item_count: counts.map(|counts| counts.image),
+                        output_audio_item_count: counts.map(|counts| counts.audio),
                     },
                 },
             ))
@@ -2103,6 +2115,14 @@ fn tool_item_event(input: ToolItemEventInput<'_>) -> Option<TrackEventRequest> {
         }
         _ => None,
     }
+}
+
+fn safe_plugin_relative_script_path(
+    plugin_id: Option<&str>,
+    script_path: Option<&str>,
+) -> Option<String> {
+    let script_path = script_path.filter(|path| is_safe_plugin_relative_path(path))?;
+    plugin_id.map(|_| script_path.to_string())
 }
 
 struct ToolItemOutcome {
@@ -2505,26 +2525,30 @@ fn file_change_counts(changes: &[codex_app_server_protocol::FileUpdateChange]) -
     counts
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DynamicContentCounts {
     total: u64,
     text: u64,
     image: u64,
+    audio: u64,
 }
 
 fn dynamic_content_counts(items: &[DynamicToolCallOutputContentItem]) -> DynamicContentCounts {
     let mut text = 0;
     let mut image = 0;
+    let mut audio = 0;
     for item in items {
         match item {
             DynamicToolCallOutputContentItem::InputText { .. } => text += 1,
             DynamicToolCallOutputContentItem::InputImage { .. } => image += 1,
+            DynamicToolCallOutputContentItem::InputAudio { .. } => audio += 1,
         }
     }
     DynamicContentCounts {
         total: usize_to_u64(items.len()),
         text,
         image,
+        audio,
     }
 }
 
@@ -2629,6 +2653,7 @@ fn codex_turn_event_params(
     let TurnProfile {
         before_first_sampling_ms,
         sampling_ms,
+        compaction_ms,
         between_sampling_overhead_ms,
         tool_blocking_ms,
         after_last_sampling_ms,
@@ -2701,6 +2726,7 @@ fn codex_turn_event_params(
             .map(|token_usage| token_usage.total_tokens),
         before_first_sampling_ms,
         sampling_ms,
+        compaction_ms,
         between_sampling_overhead_ms,
         tool_blocking_ms,
         after_last_sampling_ms,
@@ -2830,6 +2856,7 @@ mod tests {
     use codex_protocol::models::SandboxEnforcement;
     use codex_protocol::permissions::FileSystemSandboxPolicy;
     use codex_protocol::permissions::NetworkSandboxPolicy;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn managed_full_disk_with_restricted_network_reports_external_sandbox() {
@@ -2852,5 +2879,49 @@ mod tests {
             guardian_review_result(GuardianApprovalReviewStatus::TimedOut),
             Some((ReviewStatus::TimedOut, ReviewResolution::None))
         ));
+    }
+
+    #[test]
+    fn dynamic_content_counts_include_audio() {
+        let items = vec![
+            DynamicToolCallOutputContentItem::InputText {
+                text: "ok".to_string(),
+            },
+            DynamicToolCallOutputContentItem::InputImage {
+                image_url: "data:image/png;base64,AAA".to_string(),
+            },
+            DynamicToolCallOutputContentItem::InputAudio {
+                audio_url: "data:audio/wav;base64,YXVkaW8=".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            dynamic_content_counts(&items),
+            DynamicContentCounts {
+                total: 3,
+                text: 1,
+                image: 1,
+                audio: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn command_execution_script_paths_reject_unsafe_values() {
+        assert_eq!(
+            safe_plugin_relative_script_path(
+                Some("sample@openai-curated"),
+                Some("/home/user/.codex/plugins/cache/openai-curated/sample/scripts/run.py"),
+            ),
+            None
+        );
+        assert_eq!(
+            safe_plugin_relative_script_path(Some("sample@openai-curated"), Some("scripts/run.py"),),
+            Some("scripts/run.py".to_string())
+        );
+        assert_eq!(
+            safe_plugin_relative_script_path(/*plugin_id*/ None, Some("scripts/run.py"),),
+            None
+        );
     }
 }

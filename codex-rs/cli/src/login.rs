@@ -132,7 +132,7 @@ async fn clear_existing_auth_before_login(
     codex_home: &Path,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     auth_keyring_backend_kind: AuthKeyringBackendKind,
-    auth_route_config: Option<&AuthRouteConfig>,
+    auth_route_config: &AuthRouteConfig,
 ) {
     if let Err(err) = logout_with_revoke(
         codex_home,
@@ -156,7 +156,7 @@ async fn login_server_options_from_config(
         &config.codex_home,
         config.cli_auth_credentials_store_mode,
         config.auth_keyring_backend_kind(),
-        auth_route_config.as_ref(),
+        &auth_route_config,
     )
     .await;
 
@@ -259,7 +259,7 @@ pub async fn run_login_with_access_token(
         config.forced_chatgpt_workspace_id.as_deref(),
         Some(&config.chatgpt_base_url),
         config.auth_keyring_backend_kind(),
-        auth_route_config.as_ref(),
+        &auth_route_config,
     )
     .await
     {
@@ -414,7 +414,7 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
         config.cli_auth_credentials_store_mode,
         Some(&config.chatgpt_base_url),
         config.auth_keyring_backend_kind(),
-        auth_route_config.as_ref(),
+        &auth_route_config,
     )
     .await
     {
@@ -468,7 +468,7 @@ pub async fn run_logout(cli_config_overrides: CliConfigOverrides) -> ! {
         &config.codex_home,
         config.cli_auth_credentials_store_mode,
         config.auth_keyring_backend_kind(),
-        auth_route_config.as_ref(),
+        &auth_route_config,
     )
     .await
     {
@@ -543,7 +543,7 @@ mod tests {
             codex_home.path(),
             AuthCredentialsStoreMode::File,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            &codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
 

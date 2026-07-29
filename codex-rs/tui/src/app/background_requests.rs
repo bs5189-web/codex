@@ -626,7 +626,7 @@ impl App {
             {
                 guard
                     .pending_interactive_replay
-                    .note_evicted_server_request(request);
+                    .note_evicted_server_request(request.as_ref());
             }
             guard.active
         };
@@ -1028,6 +1028,7 @@ async fn request_plugin_list_with_marketplace_kinds(
             params: PluginListParams {
                 cwds: Some(vec![cwd]),
                 marketplace_kinds,
+                force_refetch: false,
             },
         })
         .await

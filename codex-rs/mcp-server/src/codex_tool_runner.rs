@@ -11,6 +11,7 @@ use crate::outgoing_message::OutgoingNotificationMeta;
 use crate::patch_approval::handle_patch_approval_request;
 use codex_core::CodexThread;
 use codex_core::NewThread;
+use codex_core::StartThreadOptions;
 use codex_core::ThreadManager;
 use codex_core::config::Config as CodexConfig;
 use codex_protocol::ThreadId;
@@ -24,7 +25,7 @@ use codex_protocol::protocol::Submission;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::user_input::UserInput;
 use rmcp::model::CallToolResult;
-use rmcp::model::Content;
+use rmcp::model::ContentBlock;
 use rmcp::model::RequestId;
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -39,7 +40,7 @@ pub(crate) fn create_call_tool_result_with_thread_id(
     is_error: Option<bool>,
 ) -> CallToolResult {
     let content_text = text;
-    let content = vec![Content::text(content_text.clone())];
+    let content = vec![ContentBlock::text(content_text.clone())];
     let structured_content = json!({
         "threadId": thread_id,
         "content": content_text,
@@ -66,10 +67,13 @@ pub async fn run_codex_tool_session(
         thread_id,
         thread,
         session_configured,
-    } = match thread_manager.start_thread(config.clone()).await {
+    } = match thread_manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+    {
         Ok(res) => res,
         Err(e) => {
-            let result = CallToolResult::error(vec![Content::text(format!(
+            let result = CallToolResult::error(vec![ContentBlock::text(format!(
                 "Failed to start Codex session: {e}"
             ))]);
             outgoing.send_response(id.clone(), result).await;
@@ -115,6 +119,7 @@ pub async fn run_codex_tool_session(
         },
         client_user_message_id: None,
         trace: None,
+        parent_turn_id: None,
     };
 
     if let Err(e) = thread.submit_with_id(submission).await {
@@ -225,6 +230,8 @@ async fn run_codex_tool_session_inner(
                             command,
                             cwd,
                             call_id,
+                            plugin_id: _,
+                            script_path: _,
                             approval_id: _,
                             reason: _,
                             proposed_execpolicy_amendment: _,

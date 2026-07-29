@@ -68,6 +68,7 @@ async fn retries_on_early_close() {
         supports_websockets: false,
         supports_image_generation: false,
         supports_web_search: false,
+        supports_standalone_web_search: false,
     };
 
     let TestCodex { codex, .. } = test_codex()

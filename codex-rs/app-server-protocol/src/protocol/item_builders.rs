@@ -25,7 +25,6 @@ use crate::protocol::v2::ThreadItem;
 use codex_protocol::ThreadId;
 use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
-use codex_protocol::protocol::ExecApprovalRequestEvent;
 use codex_protocol::protocol::ExecCommandBeginEvent;
 use codex_protocol::protocol::ExecCommandEndEvent;
 use codex_protocol::protocol::FileChange;
@@ -76,32 +75,12 @@ pub fn build_file_change_end_item(payload: &PatchApplyEndEvent) -> ThreadItem {
     }
 }
 
-pub fn build_command_execution_approval_request_item(
-    payload: &ExecApprovalRequestEvent,
-) -> ThreadItem {
-    ThreadItem::CommandExecution {
-        id: payload.call_id.clone(),
-        command: shlex_join(&payload.command),
-        cwd: payload.cwd.clone().into(),
-        process_id: None,
-        source: CommandExecutionSource::Agent,
-        status: CommandExecutionStatus::InProgress,
-        command_actions: payload
-            .parsed_cmd
-            .iter()
-            .cloned()
-            .map(|parsed| CommandAction::from_core_with_cwd(parsed, &payload.cwd))
-            .collect(),
-        aggregated_output: None,
-        exit_code: None,
-        duration_ms: None,
-    }
-}
-
 pub fn build_command_execution_begin_item(payload: &ExecCommandBeginEvent) -> ThreadItem {
     let command_actions = command_actions_for_path_uri(&payload.parsed_cmd, &payload.cwd);
     ThreadItem::CommandExecution {
         id: payload.call_id.clone(),
+        plugin_id: payload.plugin_id.clone(),
+        script_path: payload.script_path.clone(),
         command: shlex_join(&payload.command),
         cwd: payload.cwd.clone().into(),
         process_id: payload.process_id.clone(),
@@ -125,6 +104,8 @@ pub fn build_command_execution_end_item(payload: &ExecCommandEndEvent) -> Thread
 
     ThreadItem::CommandExecution {
         id: payload.call_id.clone(),
+        plugin_id: payload.plugin_id.clone(),
+        script_path: payload.script_path.clone(),
         command: shlex_join(&payload.command),
         cwd: payload.cwd.clone().into(),
         process_id: payload.process_id.clone(),
@@ -198,6 +179,8 @@ pub fn build_item_from_guardian_event(
             }];
             Some(ThreadItem::CommandExecution {
                 id: id.clone(),
+                plugin_id: assessment.plugin_id.clone(),
+                script_path: assessment.script_path.clone(),
                 command,
                 cwd: cwd.clone().into(),
                 process_id: None,
@@ -234,6 +217,8 @@ pub fn build_item_from_guardian_event(
             };
             Some(ThreadItem::CommandExecution {
                 id: id.clone(),
+                plugin_id: assessment.plugin_id.clone(),
+                script_path: assessment.script_path.clone(),
                 command,
                 cwd: cwd.clone().into(),
                 process_id: None,

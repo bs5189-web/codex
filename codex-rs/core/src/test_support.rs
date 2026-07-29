@@ -76,8 +76,9 @@ pub fn auth_manager_from_auth_with_home(auth: CodexAuth, codex_home: PathBuf) ->
 pub fn with_code_mode_host_program(
     thread_manager: ThreadManager,
     host_program: PathBuf,
+    config: &crate::config::Config,
 ) -> ThreadManager {
-    thread_manager.with_code_mode_host_program_for_tests(host_program)
+    thread_manager.with_code_mode_host_program_for_tests(host_program, config)
 }
 
 pub fn thread_manager_with_models_provider(
@@ -98,22 +99,6 @@ pub fn thread_manager_with_models_provider_and_home(
         provider,
         codex_home,
         environment_manager,
-    )
-}
-
-pub fn thread_manager_with_models_provider_home_and_state(
-    auth: CodexAuth,
-    provider: ModelProviderInfo,
-    codex_home: PathBuf,
-    environment_manager: Arc<EnvironmentManager>,
-    state_db: Option<crate::StateDbHandle>,
-) -> ThreadManager {
-    ThreadManager::with_models_provider_home_and_state_for_tests(
-        auth,
-        provider,
-        codex_home,
-        environment_manager,
-        state_db,
     )
 }
 
@@ -208,6 +193,11 @@ pub fn responses_metadata(
             window_id,
         )
     }
+}
+
+pub fn with_parent_turn(mut metadata: CodexResponsesMetadata, id: &str) -> CodexResponsesMetadata {
+    metadata.parent_turn_id = Some(id.to_string());
+    metadata
 }
 
 pub fn all_model_presets() -> &'static Vec<ModelPreset> {

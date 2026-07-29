@@ -50,6 +50,7 @@ message ModelProvider {
   bool supports_websockets = 17;
   optional bool supports_image_generation = 18;
   optional bool supports_web_search = 19;
+  bool supports_standalone_web_search = 20;
 }
 
 message StringMap {

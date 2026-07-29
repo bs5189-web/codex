@@ -7,6 +7,7 @@ use codex_connectors::ConnectorRuntimeManager;
 use codex_connectors::ConnectorSnapshot;
 use codex_connectors::PluginConnectorSource;
 use codex_core_plugins::PluginsManager;
+use codex_exec_server::ExecutorCapabilityDiscoverySnapshot;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ExtensionRegistry;
@@ -29,6 +30,7 @@ use codex_protocol::capabilities::SelectedCapabilityRoot;
 const LEGACY_CODEX_APPS_REGISTRATION_ID: &str = "legacy_codex_apps";
 
 /// MCP configuration and capability availability derived from the same inputs.
+#[derive(Clone)]
 pub(crate) struct McpRuntimeProjection {
     pub(crate) config: McpConfig,
     pub(crate) plugins_available: bool,
@@ -109,6 +111,7 @@ impl McpManager {
         thread_store: &ExtensionData,
         originator: &str,
         ready_selected_capability_roots: &[SelectedCapabilityRoot],
+        executor_capability_discovery: Option<&ExecutorCapabilityDiscoverySnapshot>,
     ) -> McpRuntimeProjection {
         self.runtime_config_with_context(
             McpServerContributionContext::for_step(
@@ -117,6 +120,7 @@ impl McpManager {
                 thread_store,
                 originator,
                 ready_selected_capability_roots,
+                executor_capability_discovery,
             ),
             Some(originator),
         )

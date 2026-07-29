@@ -9,6 +9,7 @@ use crate::endpoint::realtime_websocket::methods_frameless_bidi::context_append_
 use crate::endpoint::realtime_websocket::methods_frameless_bidi::delegation_context_append_message as frameless_delegation_context_append_message;
 use crate::endpoint::realtime_websocket::methods_frameless_bidi::session_context_append_message as frameless_session_context_append_message;
 use crate::endpoint::realtime_websocket::protocol::RealtimeAudioFrame;
+use crate::endpoint::realtime_websocket::protocol::RealtimeContextAppendChannel;
 use crate::endpoint::realtime_websocket::protocol::RealtimeEvent;
 use crate::endpoint::realtime_websocket::protocol::RealtimeEventParser;
 use crate::endpoint::realtime_websocket::protocol::RealtimeOutboundMessage;
@@ -22,6 +23,7 @@ use crate::error::ApiError;
 use crate::provider::Provider;
 use codex_client::backoff;
 use codex_http_client::maybe_build_rustls_client_config_with_custom_ca;
+use codex_protocol::protocol::ConversationTextParams;
 use codex_protocol::protocol::ConversationTextRole;
 use codex_protocol::protocol::RealtimeTranscriptDelta;
 use codex_utils_rustls_provider::ensure_rustls_crypto_provider;
@@ -53,6 +55,7 @@ use tungstenite::protocol::WebSocketConfig;
 use url::Url;
 
 const REALTIME_WIRE_LOG_TARGET: &str = "codex_api::realtime_websocket::wire";
+const OPENAI_REALTIME_API_BASE_URL: &str = "https://api.openai.com/v1";
 
 struct WsStream {
     tx_command: mpsc::Sender<WsCommand>,
@@ -211,6 +214,7 @@ pub struct RealtimeWebsocketWriter {
     stream: Arc<WsStream>,
     is_closed: Arc<AtomicBool>,
     event_parser: RealtimeEventParser,
+    context_append_channel: Option<RealtimeContextAppendChannel>,
 }
 
 #[derive(Clone)]
@@ -281,6 +285,7 @@ impl RealtimeWebsocketConnection {
                 stream: Arc::clone(&stream),
                 is_closed: Arc::clone(&is_closed),
                 event_parser,
+                context_append_channel: None,
             },
             events: RealtimeWebsocketEvents {
                 rx_message,
@@ -294,6 +299,11 @@ impl RealtimeWebsocketConnection {
 }
 
 impl RealtimeWebsocketWriter {
+    pub fn with_context_append_channel(mut self, channel: RealtimeContextAppendChannel) -> Self {
+        self.context_append_channel = Some(channel);
+        self
+    }
+
     pub async fn send_audio_frame(&self, frame: RealtimeAudioFrame) -> Result<(), ApiError> {
         let message = match self.event_parser {
             RealtimeEventParser::V1 | RealtimeEventParser::RealtimeV2 => {
@@ -315,6 +325,7 @@ impl RealtimeWebsocketWriter {
             self.event_parser,
             text,
             role,
+            self.context_append_channel,
         ))
         .await
     }
@@ -328,6 +339,7 @@ impl RealtimeWebsocketWriter {
             self.event_parser,
             handoff_id,
             output_text,
+            self.context_append_channel,
         ))
         .await
     }
@@ -341,6 +353,7 @@ impl RealtimeWebsocketWriter {
             self.event_parser,
             handoff_id,
             output_text,
+            self.context_append_channel,
         ))
         .await
     }
@@ -354,6 +367,7 @@ impl RealtimeWebsocketWriter {
             self.event_parser,
             call_id,
             output_text,
+            self.context_append_channel,
         ))
         .await
     }
@@ -366,6 +380,7 @@ impl RealtimeWebsocketWriter {
     pub async fn send_session_update(
         &self,
         instructions: String,
+        initial_items: Vec<ConversationTextParams>,
         session_mode: RealtimeSessionMode,
         output_modality: RealtimeOutputModality,
         voice: RealtimeVoice,
@@ -374,6 +389,7 @@ impl RealtimeWebsocketWriter {
         let message = session_update_message(
             self.event_parser,
             instructions,
+            initial_items,
             session_mode,
             output_modality,
             voice,
@@ -413,6 +429,7 @@ impl RealtimeWebsocketWriter {
         match message {
             RealtimeOutboundMessage::DelegationContextAppend {
                 delegation_item_id,
+                channel,
                 content,
             } => {
                 if let Some(content) = content.first() {
@@ -420,17 +437,20 @@ impl RealtimeWebsocketWriter {
                         self.send_json_frame(&frameless_delegation_context_append_message(
                             delegation_item_id.clone(),
                             chunk,
+                            *channel,
                         ))
                         .await?;
                     }
                     return Ok(());
                 }
             }
-            RealtimeOutboundMessage::SessionContextAppend { content } => {
+            RealtimeOutboundMessage::SessionContextAppend { channel, content } => {
                 if let Some(content) = content.first() {
                     for chunk in context_append_chunks(&content.text) {
-                        self.send_json_frame(&frameless_session_context_append_message(chunk))
-                            .await?;
+                        self.send_json_frame(&frameless_session_context_append_message(
+                            chunk, *channel,
+                        ))
+                        .await?;
                     }
                     return Ok(());
                 }
@@ -677,11 +697,21 @@ fn contains_transcript_entry(entries: &[RealtimeTranscriptEntry], role: &str, te
 
 pub struct RealtimeWebsocketClient {
     provider: Provider,
+    webrtc_sideband_base_url: String,
 }
 
 impl RealtimeWebsocketClient {
     pub fn new(provider: Provider) -> Self {
-        Self { provider }
+        Self {
+            provider,
+            webrtc_sideband_base_url: OPENAI_REALTIME_API_BASE_URL.to_string(),
+        }
+    }
+
+    /// Overrides the direct WebRTC sideband URL for local development and tests.
+    pub fn with_webrtc_sideband_base_url(mut self, base_url: String) -> Self {
+        self.webrtc_sideband_base_url = base_url;
+        self
     }
 
     pub async fn connect(
@@ -756,13 +786,7 @@ impl RealtimeWebsocketClient {
     ) -> Result<RealtimeWebsocketConnection, ApiError> {
         // Keep the parser/session query shaping from standalone realtime while replacing the model
         // query with a call_id join onto an existing WebRTC session.
-        let ws_url = websocket_url_from_api_url_for_call(
-            self.provider.base_url.as_str(),
-            self.provider.query_params.as_ref(),
-            config.event_parser,
-            config.session_mode,
-            call_id,
-        )?;
+        let ws_url = self.webrtc_sideband_url(config.event_parser, config.session_mode, call_id)?;
         self.connect_realtime_websocket_url(
             ws_url,
             config,
@@ -771,6 +795,21 @@ impl RealtimeWebsocketClient {
             /*initialize_session*/ false,
         )
         .await
+    }
+
+    fn webrtc_sideband_url(
+        &self,
+        event_parser: RealtimeEventParser,
+        session_mode: RealtimeSessionMode,
+        call_id: &str,
+    ) -> Result<Url, ApiError> {
+        websocket_url_from_api_url_for_call(
+            self.webrtc_sideband_base_url.as_str(),
+            /*query_params*/ None,
+            event_parser,
+            session_mode,
+            call_id,
+        )
     }
 
     async fn connect_realtime_websocket_url(
@@ -825,6 +864,7 @@ impl RealtimeWebsocketClient {
                 .writer
                 .send_session_update(
                     config.instructions,
+                    config.initial_items,
                     config.session_mode,
                     config.output_modality,
                     config.voice,
@@ -993,6 +1033,7 @@ fn normalize_realtime_path(url: &mut Url, event_parser: RealtimeEventParser) {
 mod tests {
     use super::*;
     use crate::endpoint::realtime_websocket::protocol::RealtimeTranscriptEntry;
+    use crate::provider::RetryConfig;
     use codex_protocol::protocol::RealtimeHandoffRequested;
     use codex_protocol::protocol::RealtimeInputAudioSpeechStarted;
     use codex_protocol::protocol::RealtimeNoopRequested;
@@ -1760,6 +1801,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn webrtc_frameless_sideband_ignores_provider_base_url() {
+        let client = RealtimeWebsocketClient::new(Provider {
+            name: "chatgpt".to_string(),
+            base_url: "https://chatgpt.com/backend-api/codex".to_string(),
+            query_params: None,
+            headers: HeaderMap::new(),
+            retry: RetryConfig {
+                max_attempts: 0,
+                base_delay: Duration::ZERO,
+                retry_429: false,
+                retry_5xx: false,
+                retry_transport: false,
+            },
+            stream_idle_timeout: Duration::from_secs(5),
+        });
+
+        let url = client
+            .webrtc_sideband_url(
+                RealtimeEventParser::FramelessBidi,
+                RealtimeSessionMode::Conversational,
+                "rtc_test",
+            )
+            .expect("build ws url");
+
+        assert_eq!(url.as_str(), "wss://api.openai.com/v1/live/rtc_test");
+    }
+
     #[tokio::test]
     async fn e2e_connect_and_exchange_events_against_mock_ws_server() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -1949,6 +2018,7 @@ mod tests {
             .connect(
                 RealtimeSessionConfig {
                     instructions: "backend prompt".to_string(),
+                    initial_items: Vec::new(),
                     model: Some("realtime-test-model".to_string()),
                     session_id: Some("conv_1".to_string()),
                     event_parser: RealtimeEventParser::V1,
@@ -2273,6 +2343,7 @@ mod tests {
             .connect(
                 RealtimeSessionConfig {
                     instructions: "backend prompt".to_string(),
+                    initial_items: Vec::new(),
                     model: Some("realtime-test-model".to_string()),
                     session_id: Some("conv_1".to_string()),
                     event_parser: RealtimeEventParser::RealtimeV2,
@@ -2398,6 +2469,7 @@ mod tests {
             .connect(
                 RealtimeSessionConfig {
                     instructions: "backend prompt".to_string(),
+                    initial_items: Vec::new(),
                     model: Some("realtime-test-model".to_string()),
                     session_id: Some("conv_1".to_string()),
                     event_parser: RealtimeEventParser::RealtimeV2,
@@ -2502,6 +2574,7 @@ mod tests {
             .connect(
                 RealtimeSessionConfig {
                     instructions: "backend prompt".to_string(),
+                    initial_items: Vec::new(),
                     model: Some("realtime-test-model".to_string()),
                     session_id: Some("conv_1".to_string()),
                     event_parser: RealtimeEventParser::V1,
@@ -2592,6 +2665,7 @@ mod tests {
             .connect(
                 RealtimeSessionConfig {
                     instructions: "backend prompt".to_string(),
+                    initial_items: Vec::new(),
                     model: Some("realtime-test-model".to_string()),
                     session_id: Some("conv_1".to_string()),
                     event_parser: RealtimeEventParser::V1,

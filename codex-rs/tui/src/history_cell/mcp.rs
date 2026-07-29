@@ -3,10 +3,9 @@
 use super::*;
 
 #[derive(Debug)]
-struct CompletedMcpToolCallWithImageOutput {
-    _image: DynamicImage,
-}
-impl HistoryCell for CompletedMcpToolCallWithImageOutput {
+struct McpImageOutputCell;
+
+impl HistoryCell for McpImageOutputCell {
     fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
         vec!["tool result (image output)".into()]
     }
@@ -87,7 +86,7 @@ impl McpToolCallCell {
     }
 
     fn render_content_block(block: &serde_json::Value, width: usize) -> String {
-        let content = match serde_json::from_value::<rmcp::model::Content>(block.clone()) {
+        let content = match serde_json::from_value::<rmcp::model::ContentBlock>(block.clone()) {
             Ok(content) => content,
             Err(_) => {
                 return format_and_truncate_tool_result(
@@ -98,20 +97,22 @@ impl McpToolCallCell {
             }
         };
 
-        match content.raw {
-            rmcp::model::RawContent::Text(text) => {
+        match content {
+            rmcp::model::ContentBlock::Text(text) => {
                 format_and_truncate_tool_result(&text.text, TOOL_CALL_MAX_LINES, width)
             }
-            rmcp::model::RawContent::Image(_) => "<image content>".to_string(),
-            rmcp::model::RawContent::Audio(_) => "<audio content>".to_string(),
-            rmcp::model::RawContent::Resource(resource) => {
+            rmcp::model::ContentBlock::Image(_) => "<image content>".to_string(),
+            rmcp::model::ContentBlock::Audio(_) => "<audio content>".to_string(),
+            rmcp::model::ContentBlock::Resource(resource) => {
                 let uri = match resource.resource {
                     rmcp::model::ResourceContents::TextResourceContents { uri, .. } => uri,
                     rmcp::model::ResourceContents::BlobResourceContents { uri, .. } => uri,
+                    _ => return "<unknown embedded resource>".to_string(),
                 };
                 format!("embedded resource: {uri}")
             }
-            rmcp::model::RawContent::ResourceLink(link) => format!("link: {}", link.uri),
+            rmcp::model::ContentBlock::ResourceLink(link) => format!("link: {}", link.uri),
+            _ => format_and_truncate_tool_result(&block.to_string(), TOOL_CALL_MAX_LINES, width),
         }
     }
 }
@@ -267,15 +268,15 @@ pub(crate) fn new_active_mcp_tool_call(
 ///   even when the first block is not a valid image.
 fn try_new_completed_mcp_tool_call_with_image_output(
     result: &Result<codex_protocol::mcp::CallToolResult, String>,
-) -> Option<CompletedMcpToolCallWithImageOutput> {
-    let image = result
+) -> Option<McpImageOutputCell> {
+    result
         .as_ref()
         .ok()?
         .content
         .iter()
         .find_map(decode_mcp_image)?;
 
-    Some(CompletedMcpToolCallWithImageOutput { _image: image })
+    Some(McpImageOutputCell)
 }
 
 /// Decodes an MCP `ImageContent` block into an in-memory image.
@@ -283,8 +284,8 @@ fn try_new_completed_mcp_tool_call_with_image_output(
 /// Returns `None` when the block is not an image, when base64 decoding fails, when the format
 /// cannot be inferred, or when the image decoder rejects the bytes.
 fn decode_mcp_image(block: &serde_json::Value) -> Option<DynamicImage> {
-    let content = serde_json::from_value::<rmcp::model::Content>(block.clone()).ok()?;
-    let rmcp::model::RawContent::Image(image) = content.raw else {
+    let content = serde_json::from_value::<rmcp::model::ContentBlock>(block.clone()).ok()?;
+    let rmcp::model::ContentBlock::Image(image) = content else {
         return None;
     };
     let base64_data = if let Some(data_url) = image.data.strip_prefix("data:") {

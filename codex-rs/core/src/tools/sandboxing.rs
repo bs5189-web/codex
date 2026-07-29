@@ -474,10 +474,7 @@ impl<'a> SandboxAttempt<'a> {
         &self,
         command: SandboxCommand,
         options: ExecOptions,
-        network: Option<&NetworkProxy>,
-        environment_id: Option<&str>,
     ) -> Result<crate::sandboxing::ExecRequest, CodexErr> {
-        let network = self.network_proxy(network);
         let managed_network = command.managed_network.clone();
         let exec_server_permissions = effective_permission_profile(
             self.exec_server_permissions,
@@ -491,8 +488,8 @@ impl<'a> SandboxAttempt<'a> {
                 // The exec-server must receive the native command, not this host's wrapper.
                 sandbox: SandboxType::None,
                 enforce_managed_network: self.enforce_managed_network,
-                environment_id,
-                network,
+                environment_id: None,
+                network: None,
                 sandbox_policy_cwd: self.sandbox_cwd,
                 codex_linux_sandbox_exe: None,
                 use_legacy_landlock: self.use_legacy_landlock,
@@ -510,6 +507,7 @@ impl<'a> SandboxAttempt<'a> {
                 workspace_roots: self.workspace_roots.to_vec(),
                 windows_sandbox_level: self.windows_sandbox_level,
                 windows_sandbox_private_desktop: self.windows_sandbox_private_desktop,
+                windows_sandbox_proxy_settings_mode: None,
                 use_legacy_landlock: self.use_legacy_landlock,
             });
             exec_request.exec_server_enforce_managed_network = self.enforce_managed_network;

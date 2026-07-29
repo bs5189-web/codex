@@ -92,6 +92,19 @@ impl ModelsCacheManager {
         self.save_internal(&cache).await
     }
 
+    /// Renew the cache TTL once more than half its lifetime has elapsed.
+    pub(crate) async fn renew_cache_ttl(&self) -> io::Result<()> {
+        let mut cache = match self.load().await? {
+            Some(cache) => cache,
+            None => return Err(io::Error::new(ErrorKind::NotFound, "cache not found")),
+        };
+        if cache.is_fresh(self.cache_ttl / 2) {
+            return Ok(());
+        }
+        cache.fetched_at = Utc::now();
+        self.save_internal(&cache).await
+    }
+
     async fn load(&self) -> io::Result<Option<ModelsCache>> {
         match fs::read(&self.cache_path).await {
             Ok(contents) => {

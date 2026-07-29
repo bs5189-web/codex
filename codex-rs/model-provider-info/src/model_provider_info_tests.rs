@@ -33,6 +33,7 @@ base_url = "http://localhost:11434/v1"
         supports_websockets: false,
         supports_image_generation: false,
         supports_web_search: false,
+        supports_standalone_web_search: false,
     };
 
     let provider: ModelProviderInfo = toml::from_str(azure_provider_toml).unwrap();
@@ -71,6 +72,7 @@ query_params = { api-version = "2025-04-01-preview" }
         supports_websockets: false,
         supports_image_generation: false,
         supports_web_search: false,
+        supports_standalone_web_search: false,
     };
 
     let provider: ModelProviderInfo = toml::from_str(azure_provider_toml).unwrap();
@@ -85,6 +87,7 @@ base_url = "https://example.com"
 env_key = "API_KEY"
 http_headers = { "X-Example-Header" = "example-value" }
 env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
+supports_standalone_web_search = true
         "#;
     let expected_provider = ModelProviderInfo {
         name: "Example".into(),
@@ -112,6 +115,7 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
         supports_websockets: false,
         supports_image_generation: false,
         supports_web_search: false,
+        supports_standalone_web_search: true,
     };
 
     let provider: ModelProviderInfo = toml::from_str(azure_provider_toml).unwrap();
@@ -212,6 +216,7 @@ fn test_supports_remote_compaction_for_azure_name() {
         supports_websockets: false,
         supports_image_generation: false,
         supports_web_search: false,
+        supports_standalone_web_search: false,
     };
 
     assert!(provider.supports_remote_compaction());
@@ -241,6 +246,7 @@ fn test_supports_remote_compaction_for_non_openai_non_azure_provider() {
         supports_websockets: false,
         supports_image_generation: false,
         supports_web_search: false,
+        supports_standalone_web_search: false,
     };
 
     assert!(!provider.supports_remote_compaction());
@@ -353,6 +359,7 @@ fn test_create_amazon_bedrock_provider() {
             supports_websockets: false,
             supports_image_generation: false,
             supports_web_search: false,
+            supports_standalone_web_search: false
         }
     );
 }

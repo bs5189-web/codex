@@ -200,7 +200,7 @@ macro_rules! client_request_definitions {
         $(
             $(#[experimental($reason:expr)])?
             $(#[doc = $variant_doc:literal])*
-            $variant:ident $(=> $wire:literal)? {
+            $variant:ident => $wire:literal {
                 params: $(#[$params_meta:meta])* $params:ty,
                 $(inspect_params: $inspect_params:tt,)?
                 serialization: $serialization:ident $( ( $($serialization_args:tt)* ) )?,
@@ -215,7 +215,8 @@ macro_rules! client_request_definitions {
         pub enum ClientRequest {
             $(
                 $(#[doc = $variant_doc])*
-                $(#[serde(rename = $wire)] #[ts(rename = $wire)])?
+                #[serde(rename = $wire)]
+                #[ts(rename = $wire)]
                 $variant {
                     #[serde(rename = "id")]
                     request_id: RequestId,
@@ -232,16 +233,10 @@ macro_rules! client_request_definitions {
                 }
             }
 
-            pub fn method(&self) -> String {
-                serde_json::to_value(self)
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .get("method")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_owned)
-                    })
-                    .unwrap_or_else(|| "<unknown>".to_string())
+            pub const fn method_name(&self) -> &'static str {
+                match self {
+                    $(Self::$variant { .. } => $wire,)*
+                }
             }
 
             pub fn serialization_scope(&self) -> Option<ClientRequestSerializationScope> {
@@ -258,6 +253,26 @@ macro_rules! client_request_definitions {
             }
         }
 
+        impl TryFrom<JSONRPCRequest> for ClientRequest {
+            type Error = serde_json::Error;
+
+            fn try_from(request: JSONRPCRequest) -> Result<Self, Self::Error> {
+                let JSONRPCRequest {
+                    id: request_id,
+                    method,
+                    params,
+                    trace: _,
+                } = request;
+                let mut request = serde_json::Map::new();
+                request.insert("id".to_string(), serde_json::to_value(request_id)?);
+                request.insert("method".to_string(), serde_json::Value::String(method));
+                if let Some(params) = params {
+                    request.insert("params".to_string(), params);
+                }
+                serde_json::from_value(serde_json::Value::Object(request))
+            }
+        }
+
         /// Typed response from the server to the client.
         #[derive(Serialize, Deserialize, Debug, Clone)]
         #[allow(clippy::large_enum_variant)]
@@ -265,7 +280,7 @@ macro_rules! client_request_definitions {
         pub enum ClientResponse {
             $(
                 $(#[doc = $variant_doc])*
-                $(#[serde(rename = $wire)])?
+                #[serde(rename = $wire)]
                 $variant {
                     #[serde(rename = "id")]
                     request_id: RequestId,
@@ -282,15 +297,9 @@ macro_rules! client_request_definitions {
             }
 
             pub fn method(&self) -> String {
-                serde_json::to_value(self)
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .get("method")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_owned)
-                    })
-                    .unwrap_or_else(|| "<unknown>".to_string())
+                match self {
+                    $(Self::$variant { .. } => $wire.to_string(),)*
+                }
             }
 
             pub fn into_jsonrpc_parts(
@@ -405,7 +414,7 @@ macro_rules! client_request_definitions {
 
         pub(crate) const EXPERIMENTAL_CLIENT_METHODS: &[&str] = &[
             $(
-                experimental_method_entry!($(#[experimental($reason)])? $(=> $wire)?),
+                experimental_method_entry!($(#[experimental($reason)])? => $wire),
             )*
         ];
         pub(crate) const EXPERIMENTAL_CLIENT_METHOD_PARAM_TYPES: &[&str] = &[
@@ -470,7 +479,7 @@ macro_rules! client_response_payload_from_impl {
 }
 
 client_request_definitions! {
-    Initialize {
+    Initialize => "initialize" {
         params: v1::InitializeParams,
         serialization: None,
         response: v1::InitializeResponse,
@@ -624,11 +633,23 @@ client_request_definitions! {
         serialization: None,
         response: v2::ThreadListResponse,
     },
+    ThreadSectionList => "threadSection/list" {
+        params: v2::ThreadSectionListParams,
+        serialization: None,
+        response: v2::ThreadSectionListResponse,
+    },
     #[experimental("thread/search")]
     ThreadSearch => "thread/search" {
         params: v2::ThreadSearchParams,
         serialization: None,
         response: v2::ThreadSearchResponse,
+    },
+    #[experimental("thread/searchOccurrences")]
+    ThreadSearchOccurrences => "thread/searchOccurrences" {
+        params: v2::ThreadSearchOccurrencesParams,
+        // Explicitly concurrent: this reads persisted paginated history.
+        serialization: None,
+        response: v2::ThreadSearchOccurrencesResponse,
     },
     ThreadLoadedList => "thread/loaded/list" {
         params: v2::ThreadLoadedListParams,
@@ -744,6 +765,11 @@ client_request_definitions! {
         params: v2::AppsListParams,
         serialization: None,
         response: v2::AppsListResponse,
+    },
+    AppsInstalled => "app/installed" {
+        params: v2::AppsInstalledParams,
+        serialization: None,
+        response: v2::AppsInstalledResponse,
     },
     // File system requests are intentionally concurrent. Desktop already treats local
     // file system operations as concurrent, and app-server remote fs mirrors that model.
@@ -1134,6 +1160,11 @@ client_request_definitions! {
         serialization: global("config"),
         response: v2::ExternalAgentConfigImportResponse,
     },
+    ExternalAgentConfigImportHistoryRecord => "externalAgentConfig/import/recordHistory" {
+        params: v2::ExternalAgentConfigImportHistoryRecordParams,
+        serialization: global("config"),
+        response: v2::ExternalAgentConfigImportHistoryRecordResponse,
+    },
     ExternalAgentConfigImportHistoriesRead => "externalAgentConfig/import/readHistories" {
         params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         serialization: global_shared_read("config"),
@@ -1165,25 +1196,25 @@ client_request_definitions! {
     },
 
     /// DEPRECATED APIs below
-    GetConversationSummary {
+    GetConversationSummary => "getConversationSummary" {
         params: v1::GetConversationSummaryParams,
         serialization: None,
         response: v1::GetConversationSummaryResponse,
     },
-    GitDiffToRemote {
+    GitDiffToRemote => "gitDiffToRemote" {
         params: v1::GitDiffToRemoteParams,
         serialization: None,
         response: v1::GitDiffToRemoteResponse,
     },
     /// DEPRECATED in favor of GetAccount
-    GetAuthStatus {
+    GetAuthStatus => "getAuthStatus" {
         params: v1::GetAuthStatusParams,
         serialization: global("account-auth"),
         response: v1::GetAuthStatusResponse,
     },
     // Legacy fuzzy search cancellation is intentionally concurrent: clients reuse a
     // cancellation token so a newer request can cancel an older in-flight search.
-    FuzzyFileSearch {
+    FuzzyFileSearch => "fuzzyFileSearch" {
         params: FuzzyFileSearchParams,
         serialization: None,
         response: FuzzyFileSearchResponse,
@@ -1759,6 +1790,8 @@ mod tests {
     use codex_protocol::config_types::MultiAgentMode;
     use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY;
     use codex_protocol::parse_command::ParsedCommand;
+    use codex_protocol::protocol::CodexResponseHandoffMode;
+    use codex_protocol::protocol::ConversationTextRole;
     use codex_protocol::protocol::RealtimeConversationVersion;
     use codex_protocol::protocol::RealtimeOutputModality;
     use codex_protocol::protocol::RealtimeVoice;
@@ -1782,6 +1815,81 @@ mod tests {
     fn request_id() -> RequestId {
         const REQUEST_ID: i64 = 1;
         RequestId::Integer(REQUEST_ID)
+    }
+
+    fn decode_client_request_through_json(
+        request: &JSONRPCRequest,
+    ) -> std::result::Result<ClientRequest, String> {
+        serde_json::to_value(request)
+            .and_then(serde_json::from_value)
+            .map_err(|err| err.to_string())
+    }
+
+    #[test]
+    fn jsonrpc_request_conversion_preserves_serde_enum_decoding() {
+        let requests = [
+            JSONRPCRequest {
+                id: RequestId::Integer(1),
+                method: "thread/archive".to_string(),
+                params: Some(json!({"threadId": "thread-1"})),
+                trace: Some(codex_protocol::protocol::W3cTraceContext {
+                    traceparent: Some("traceparent".to_string()),
+                    tracestate: Some("tracestate".to_string()),
+                }),
+            },
+            // Required params preserve distinct omitted and explicit-null errors.
+            JSONRPCRequest {
+                id: RequestId::Integer(2),
+                method: "thread/archive".to_string(),
+                params: None,
+                trace: None,
+            },
+            JSONRPCRequest {
+                id: RequestId::Integer(3),
+                method: "thread/archive".to_string(),
+                params: Some(serde_json::Value::Null),
+                trace: None,
+            },
+            // Optional unit params preserve omitted, null, and empty-object behavior.
+            JSONRPCRequest {
+                id: RequestId::Integer(4),
+                method: "memory/reset".to_string(),
+                params: None,
+                trace: None,
+            },
+            JSONRPCRequest {
+                id: RequestId::Integer(5),
+                method: "memory/reset".to_string(),
+                params: Some(serde_json::Value::Null),
+                trace: None,
+            },
+            JSONRPCRequest {
+                id: RequestId::Integer(6),
+                method: "memory/reset".to_string(),
+                params: Some(json!({})),
+                trace: None,
+            },
+            JSONRPCRequest {
+                id: RequestId::Integer(7),
+                method: "getConversationSummary".to_string(),
+                params: Some(json!({
+                    "conversationId": "67e55044-10b1-426f-9247-bb680e5fe0c8"
+                })),
+                trace: None,
+            },
+            JSONRPCRequest {
+                id: RequestId::Integer(8),
+                method: "unknown/method".to_string(),
+                params: Some(json!({})),
+                trace: None,
+            },
+        ];
+
+        for request in requests {
+            let expected = decode_client_request_through_json(&request);
+            let actual = ClientRequest::try_from(request).map_err(|err| err.to_string());
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]
@@ -1924,6 +2032,7 @@ mod tests {
             params: v2::PluginListParams {
                 cwds: None,
                 marketplace_kinds: None,
+                force_refetch: false,
             },
         };
         assert_eq!(plugin_list.serialization_scope(), None);
@@ -2568,7 +2677,6 @@ mod tests {
             params: None,
         };
         assert_eq!(request.id(), &RequestId::Integer(1));
-        assert_eq!(request.method(), "account/rateLimits/read");
         assert_eq!(
             json!({
                 "method": "account/rateLimits/read",
@@ -2586,7 +2694,6 @@ mod tests {
             params: None,
         };
         assert_eq!(request.id(), &RequestId::Integer(1));
-        assert_eq!(request.method(), "account/usage/read");
         assert_eq!(
             json!({
                 "method": "account/usage/read",
@@ -2604,7 +2711,6 @@ mod tests {
             params: None,
         };
         assert_eq!(request.id(), &RequestId::Integer(1));
-        assert_eq!(request.method(), "account/workspaceMessages/read");
         assert_eq!(
             json!({
                 "method": "account/workspaceMessages/read",
@@ -2629,6 +2735,7 @@ mod tests {
                     parent_thread_id: None,
                     preview: "first prompt".to_string(),
                     ephemeral: true,
+                    section: None,
                     history_mode: Default::default(),
                     model_provider: "openai".to_string(),
                     created_at: 1,
@@ -2639,6 +2746,7 @@ mod tests {
                     cwd: cwd.clone(),
                     cli_version: "0.0.0".to_string(),
                     source: v2::SessionSource::Exec,
+                    can_accept_direct_input: None,
                     thread_source: None,
                     agent_nickname: None,
                     agent_role: None,
@@ -2680,6 +2788,7 @@ mod tests {
                         "parentThreadId": null,
                         "preview": "first prompt",
                         "ephemeral": true,
+                        "section": null,
                         "historyMode": "legacy",
                         "modelProvider": "openai",
                         "createdAt": 1,
@@ -2692,6 +2801,7 @@ mod tests {
                         "cwd": absolute_path_string("tmp"),
                         "cliVersion": "0.0.0",
                         "source": "exec",
+                        "canAcceptDirectInput": null,
                         "threadSource": null,
                         "agentNickname": null,
                         "agentRole": null,
@@ -3108,6 +3218,69 @@ mod tests {
     }
 
     #[test]
+    fn serialize_installed_apps() -> Result<()> {
+        let request = ClientRequest::AppsInstalled {
+            request_id: RequestId::Integer(9),
+            params: v2::AppsInstalledParams::default(),
+        };
+        assert_eq!(
+            json!({
+                "method": "app/installed",
+                "id": 9,
+                "params": {
+                    "threadId": null
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+
+        let force_refresh_request = ClientRequest::AppsInstalled {
+            request_id: RequestId::Integer(10),
+            params: v2::AppsInstalledParams {
+                thread_id: Some("thread-1".to_string()),
+                force_refresh: true,
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "app/installed",
+                "id": 10,
+                "params": {
+                    "threadId": "thread-1",
+                    "forceRefresh": true
+                }
+            }),
+            serde_json::to_value(&force_refresh_request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_installed_apps_response() -> Result<()> {
+        let response = v2::AppsInstalledResponse {
+            apps: vec![v2::InstalledApp {
+                id: "demo-app".to_string(),
+                runtime_name: Some("Demo App".to_string()),
+                enabled: false,
+                callable: false,
+            }],
+        };
+
+        assert_eq!(
+            json!({
+                "apps": [{
+                    "id": "demo-app",
+                    "runtimeName": "Demo App",
+                    "enabled": false,
+                    "callable": false
+                }]
+            }),
+            serde_json::to_value(response)?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn serialize_read_apps() -> Result<()> {
         let request = ClientRequest::AppsRead {
             request_id: RequestId::Integer(9),
@@ -3320,11 +3493,29 @@ mod tests {
                 flush_transcript_tail_on_session_end: Some(true),
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
-                codex_response_handoff_prefix: Some("silent context".to_string()),
+                codex_response_handoff_mode: Some(CodexResponseHandoffMode::BemTags),
+                codex_response_handoff_channel_prefixes: Some(std::collections::BTreeMap::from([
+                    ("analysis".to_string(), vec!["[THINKING]".to_string()]),
+                    (
+                        "commentary".to_string(),
+                        vec!["[PROGRESS]".to_string(), "[UPDATE]".to_string()],
+                    ),
+                    ("final".to_string(), vec!["[DONE]".to_string()]),
+                ])),
                 thread_id: "thr_123".to_string(),
                 model: Some("realtime-treatment-model".to_string()),
                 output_modality: RealtimeOutputModality::Audio,
                 include_startup_context: Some(false),
+                initial_items: Some(vec![
+                    v2::ThreadRealtimeInitialItem {
+                        role: ConversationTextRole::Developer,
+                        text: "Remember this.".to_string(),
+                    },
+                    v2::ThreadRealtimeInitialItem {
+                        role: ConversationTextRole::Assistant,
+                        text: "Understood.".to_string(),
+                    },
+                ]),
                 prompt: Some(Some("You are on a call".to_string())),
                 realtime_session_id: Some("sess_456".to_string()),
                 transport: None,
@@ -3342,10 +3533,25 @@ mod tests {
                     "flushTranscriptTailOnSessionEnd": true,
                     "codexResponsesAsItems": null,
                     "codexResponseItemPrefix": null,
-                    "codexResponseHandoffPrefix": "silent context",
+                    "codexResponseHandoffMode": "bemTags",
+                    "codexResponseHandoffChannelPrefixes": {
+                        "analysis": ["[THINKING]"],
+                        "commentary": ["[PROGRESS]", "[UPDATE]"],
+                        "final": ["[DONE]"]
+                    },
                     "model": "realtime-treatment-model",
                     "outputModality": "audio",
                     "includeStartupContext": false,
+                    "initialItems": [
+                        {
+                            "role": "developer",
+                            "text": "Remember this."
+                        },
+                        {
+                            "role": "assistant",
+                            "text": "Understood."
+                        }
+                    ],
                     "prompt": "You are on a call",
                     "realtimeSessionId": "sess_456",
                     "transport": null,
@@ -3367,11 +3573,13 @@ mod tests {
                 flush_transcript_tail_on_session_end: None,
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
-                codex_response_handoff_prefix: None,
+                codex_response_handoff_mode: None,
+                codex_response_handoff_channel_prefixes: None,
                 thread_id: "thr_123".to_string(),
                 model: None,
                 output_modality: RealtimeOutputModality::Audio,
                 include_startup_context: None,
+                initial_items: None,
                 prompt: None,
                 realtime_session_id: None,
                 transport: None,
@@ -3389,10 +3597,12 @@ mod tests {
                     "flushTranscriptTailOnSessionEnd": null,
                     "codexResponsesAsItems": null,
                     "codexResponseItemPrefix": null,
-                    "codexResponseHandoffPrefix": null,
+                    "codexResponseHandoffMode": null,
+                    "codexResponseHandoffChannelPrefixes": null,
                     "model": null,
                     "outputModality": "audio",
                     "includeStartupContext": null,
+                    "initialItems": null,
                     "realtimeSessionId": null,
                     "transport": null,
                     "version": null,
@@ -3409,11 +3619,13 @@ mod tests {
                 flush_transcript_tail_on_session_end: None,
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
-                codex_response_handoff_prefix: None,
+                codex_response_handoff_mode: None,
+                codex_response_handoff_channel_prefixes: None,
                 thread_id: "thr_123".to_string(),
                 model: None,
                 output_modality: RealtimeOutputModality::Audio,
                 include_startup_context: None,
+                initial_items: None,
                 prompt: Some(None),
                 realtime_session_id: None,
                 transport: None,
@@ -3431,10 +3643,12 @@ mod tests {
                     "flushTranscriptTailOnSessionEnd": null,
                     "codexResponsesAsItems": null,
                     "codexResponseItemPrefix": null,
-                    "codexResponseHandoffPrefix": null,
+                    "codexResponseHandoffMode": null,
+                    "codexResponseHandoffChannelPrefixes": null,
                     "model": null,
                     "outputModality": "audio",
                     "includeStartupContext": null,
+                    "initialItems": null,
                     "prompt": null,
                     "realtimeSessionId": null,
                     "transport": null,
@@ -3450,6 +3664,8 @@ mod tests {
             "id": 9,
             "params": {
                 "threadId": "thr_123",
+                // Retain runtime compatibility with clients that have not yet removed this field.
+                "codexResponseHandoffPrefix": "",
                 "outputModality": "audio",
                 "realtimeSessionId": null,
                 "transport": null,
@@ -3649,11 +3865,13 @@ mod tests {
                 flush_transcript_tail_on_session_end: None,
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
-                codex_response_handoff_prefix: None,
+                codex_response_handoff_mode: None,
+                codex_response_handoff_channel_prefixes: None,
                 thread_id: "thr_123".to_string(),
                 model: None,
                 output_modality: RealtimeOutputModality::Audio,
                 include_startup_context: None,
+                initial_items: None,
                 prompt: Some(Some("You are on a call".to_string())),
                 realtime_session_id: None,
                 transport: None,

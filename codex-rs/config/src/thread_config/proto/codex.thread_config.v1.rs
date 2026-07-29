@@ -79,6 +79,8 @@ pub struct ModelProvider {
     pub supports_image_generation: ::core::option::Option<bool>,
     #[prost(bool, optional, tag = "19")]
     pub supports_web_search: ::core::option::Option<bool>,
+    #[prost(bool, tag = "20")]
+    pub supports_standalone_web_search: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StringMap {

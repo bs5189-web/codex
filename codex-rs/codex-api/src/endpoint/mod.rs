@@ -18,6 +18,7 @@ pub use models::ModelsClient;
 pub use models::ModelsList;
 pub use realtime_call::RealtimeCallClient;
 pub use realtime_call::RealtimeCallResponse;
+pub use realtime_websocket::RealtimeContextAppendChannel;
 pub use realtime_websocket::RealtimeEventParser;
 pub use realtime_websocket::RealtimeOutputModality;
 pub use realtime_websocket::RealtimeSessionConfig;

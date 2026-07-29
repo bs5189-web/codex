@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use codex_extension_api::ExtensionMetrics;
 use codex_mcp::McpResourceClient;
 use codex_mcp::McpResourceClientCacheKey;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -26,10 +28,16 @@ use crate::sources::SkillProviders;
 const MAX_CACHED_ORCHESTRATOR_RESOURCES: usize = 100;
 const MAX_CACHED_ORCHESTRATOR_CONTENT_BYTES: usize = 8 * 1024 * 1024;
 
+pub(crate) struct SkillsSessionState {
+    pub(crate) mcp_resources: Option<Arc<McpResourceClient>>,
+    pub(crate) extension_metrics: Option<Arc<dyn ExtensionMetrics>>,
+}
+
 pub(crate) struct SkillsThreadState {
     config: Mutex<SkillsExtensionConfig>,
     orchestrator_skills_available: bool,
     executor_cache: Mutex<Vec<CachedExecutorCatalog>>,
+    executor_discovery_cache: Mutex<Option<CachedExecutorDiscoveryCatalog>>,
     orchestrator_cache: Mutex<Option<Arc<OrchestratorGenerationCache>>>,
     shadow_selection_turn: Mutex<Option<ShadowSelectionTurn>>,
 }
@@ -40,6 +48,7 @@ impl SkillsThreadState {
             config: Mutex::new(config),
             orchestrator_skills_available,
             executor_cache: Mutex::new(Vec::new()),
+            executor_discovery_cache: Mutex::new(None),
             orchestrator_cache: Mutex::new(None),
             shadow_selection_turn: Mutex::new(None),
         }
@@ -107,6 +116,11 @@ impl SkillsThreadState {
         providers: &SkillProviders,
         mut query: SkillListQuery,
     ) -> SkillCatalog {
+        if query.executor_capability_discovery.is_some() {
+            return self
+                .executor_discovery_catalog_snapshot(providers, query)
+                .await;
+        }
         let roots = std::mem::take(&mut query.executor_roots);
         let mut catalog = SkillCatalog::default();
         for root in roots {
@@ -117,6 +131,36 @@ impl SkillsThreadState {
             );
         }
         catalog
+    }
+
+    async fn executor_discovery_catalog_snapshot(
+        &self,
+        providers: &SkillProviders,
+        query: SkillListQuery,
+    ) -> SkillCatalog {
+        if let Some(cached) = self
+            .executor_discovery_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|cached| cached.roots == query.executor_roots)
+        {
+            return cached.catalog.clone();
+        }
+        let roots = query.executor_roots.clone();
+        let discovered = providers.list_executor_for_turn(query).await;
+        let mut cache = self
+            .executor_discovery_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cached) = cache.as_ref().filter(|cached| cached.roots == roots) {
+            return cached.catalog.clone();
+        }
+        *cache = Some(CachedExecutorDiscoveryCatalog {
+            roots,
+            catalog: discovered.clone(),
+        });
+        discovered
     }
 
     pub(crate) async fn orchestrator_catalog_snapshot(
@@ -236,6 +280,11 @@ struct CachedExecutorCatalog {
     catalog: SkillCatalog,
 }
 
+struct CachedExecutorDiscoveryCatalog {
+    roots: Vec<SelectedCapabilityRoot>,
+    catalog: SkillCatalog,
+}
+
 struct OrchestratorGenerationCache {
     mcp_cache_key: Option<McpResourceClientCacheKey>,
     catalog: OnceCell<SkillCatalog>,
@@ -288,6 +337,18 @@ impl OrchestratorResourceCache {
         self.contents_bytes = next_contents_bytes;
         self.entries.insert(key, result.clone());
         result
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct EmittedCatalogBudgetWarnings(Mutex<HashSet<String>>);
+
+impl EmittedCatalogBudgetWarnings {
+    pub(crate) fn insert(&self, warning: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(warning.to_string())
     }
 }
 

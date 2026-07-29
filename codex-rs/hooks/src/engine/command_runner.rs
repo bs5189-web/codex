@@ -1,3 +1,4 @@
+use std::io::ErrorKind;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -83,6 +84,7 @@ pub(crate) async fn run_command(
 
     if let Some(mut stdin) = child.stdin.take()
         && let Err(err) = stdin.write_all(input_json.as_bytes()).await
+        && err.kind() != ErrorKind::BrokenPipe
     {
         let _ = child.kill().await;
         return finish_command_run(
@@ -168,9 +170,22 @@ fn build_command(shell: &CommandShell, handler: &ConfiguredHandler) -> Command {
         Command::new(&shell.program)
     };
     if shell.program.is_empty() {
+        #[cfg(windows)]
+        command.raw_arg(format!(r#""{}""#, handler.command));
+
+        #[cfg(not(windows))]
         command.arg(&handler.command);
     } else {
         command.args(&shell.args);
+
+        #[cfg(windows)]
+        if shell.args.iter().any(|arg| arg.eq_ignore_ascii_case("/c")) {
+            command.raw_arg(format!(r#""{}""#, handler.command));
+        } else {
+            command.arg(&handler.command);
+        }
+
+        #[cfg(not(windows))]
         command.arg(&handler.command);
     }
     command.envs(&handler.env);
@@ -194,3 +209,7 @@ fn default_shell_command() -> Command {
         command
     }
 }
+
+#[cfg(test)]
+#[path = "command_runner_tests.rs"]
+mod tests;
