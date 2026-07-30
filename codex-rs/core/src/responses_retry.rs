@@ -7,6 +7,7 @@ use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::util::backoff;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::WarningEvent;
 use tracing::warn;
@@ -110,11 +111,11 @@ fn log_retry(
 /// - The gateway rejected Responses API access for the model (HTTP 400/4xx with
 ///   `code` `400005` or a message mentioning "does not allow Responses API").
 pub(crate) fn should_fallback_to_chat(err: &CodexErr) -> bool {
-    match err {
-        CodexErr::InvalidRequest(body) => {
+    match err.details() {
+        CodexErrorDetails::InvalidRequest(body) => {
             body.contains("does not allow Responses API") || body.contains("\"code\":\"400005\"")
         }
-        CodexErr::UnexpectedStatus(unexpected) => {
+        CodexErrorDetails::UnexpectedStatus(unexpected) => {
             unexpected.body.contains("does not allow Responses API")
                 || unexpected.body.contains("\"code\":\"400005\"")
         }

@@ -47,16 +47,13 @@ async fn sampling_retry_logs_stream_error_context() {
 
 #[test]
 fn stream_closed_before_completed_does_not_trigger_chat_fallback() {
-    let err = CodexErr::Stream(
-        "stream closed before response.completed".into(),
-        /*event_id*/ None,
-    );
+    let err = CodexErr::Stream("stream closed before response.completed".into());
     assert!(!should_fallback_to_chat(&err));
 }
 
 #[test]
 fn unrelated_stream_error_does_not_trigger_chat_fallback() {
-    let err = CodexErr::Stream("some other stream error".into(), /*event_id*/ None);
+    let err = CodexErr::Stream("some other stream error".into());
     assert!(!should_fallback_to_chat(&err));
 }
 
