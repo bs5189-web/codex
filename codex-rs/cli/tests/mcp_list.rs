@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::io::Write;
 use std::net::TcpListener;
@@ -165,6 +166,7 @@ async fn list_discovers_local_oauth_server_through_environment_proxy() -> Result
                     Err(error) => return Err(error.into()),
                 }
             };
+            stream.set_nonblocking(false)?;
             stream.set_read_timeout(Some(Duration::from_secs(5)))?;
             let mut request = Vec::new();
             let mut buffer = [0_u8; 1024];
@@ -228,6 +230,36 @@ async fn list_discovers_local_oauth_server_through_environment_proxy() -> Result
         "OAuth discovery failed after proxy requests {proxy_requests:?}; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_reports_unknown_auth_status_when_oauth_discovery_is_rate_limited() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/mcp"))
+        .respond_with(wiremock::ResponseTemplate::new(429))
+        .expect(1)
+        .mount(&server)
+        .await;
+    configure_http_oauth_server(codex_home.path(), &format!("{}/mcp", server.uri())).await?;
+
+    codex_command(codex_home.path())?
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost")
+        .args([
+            "-c",
+            "mcp_oauth_credentials_store=\"file\"",
+            "mcp",
+            "list",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(contains(r#""auth_status": "unknown""#));
+    server.verify().await;
+
     Ok(())
 }
 
@@ -384,6 +416,69 @@ async fn list_and_get_render_expected_output() -> Result<()> {
         .assert()
         .success()
         .stdout(contains("\"name\": \"docs\"").and(contains("\"enabled\": true")));
+
+    Ok(())
+}
+
+#[test]
+fn list_and_get_redact_http_headers_helper() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let marker = codex_home.path().join("helper-ran");
+    let helper = toml::Value::String(format!("echo invoked > \"{}\"", marker.display()));
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        format!(
+            "[mcp_servers.docs]\n\
+             url = \"https://example.com/mcp\"\n\
+             http_headers_helper = {helper}\n\
+             [mcp_servers.authenticated]\n\
+             url = \"https://example.com/mcp\"\n\
+             http_headers = {{ Authorization = \"Bearer static\" }}\n\
+             http_headers_helper = {helper}\n"
+        ),
+    )?;
+
+    let list_output = codex_command(codex_home.path())?
+        .args(["mcp", "list", "--json"])
+        .output()?;
+    assert!(list_output.status.success());
+    let stdout = String::from_utf8(list_output.stdout)?;
+    assert!(stdout.contains("http_headers_helper"));
+    assert!(stdout.contains("<redacted>"));
+    let entries: Vec<JsonValue> = serde_json::from_str(&stdout)?;
+    let auth_statuses = entries
+        .into_iter()
+        .map(|entry| {
+            (
+                entry["name"].as_str().expect("server name").to_string(),
+                entry["auth_status"]
+                    .as_str()
+                    .expect("auth status")
+                    .to_string(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        auth_statuses,
+        BTreeMap::from([
+            ("authenticated".to_string(), "bearer_token".to_string()),
+            ("docs".to_string(), "unknown".to_string()),
+        ])
+    );
+    assert!(!marker.exists());
+
+    for args in [
+        &["mcp", "get", "docs", "--json"][..],
+        &["mcp", "get", "docs"][..],
+    ] {
+        let output = codex_command(codex_home.path())?.args(args).output()?;
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout)?;
+        assert!(stdout.contains("http_headers_helper"));
+        assert!(stdout.contains("<redacted>"));
+        assert!(!stdout.contains("helper-ran"));
+        assert!(!marker.exists());
+    }
 
     Ok(())
 }

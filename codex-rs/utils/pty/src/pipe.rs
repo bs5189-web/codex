@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::io;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -126,7 +127,7 @@ enum PipeStdinMode {
 /// On Windows, process-tree containment is best-effort because Tokio returns
 /// only after the root process starts, so job assignment cannot be atomic.
 async fn spawn_process_with_stdin_mode(
-    program: &str,
+    program: &OsStr,
     args: &[String],
     cwd: &Path,
     env: &HashMap<String, String>,
@@ -320,9 +321,9 @@ async fn spawn_process_with_stdin_mode(
 }
 
 /// Spawn a process using regular pipes and preserve selected inherited file
-/// descriptors across exec on Unix.
+/// descriptors across exec on Unix. The executable path retains its native encoding.
 pub async fn spawn_process(
-    program: &str,
+    program: impl AsRef<OsStr>,
     args: &[String],
     cwd: &Path,
     env: &HashMap<String, String>,
@@ -330,7 +331,7 @@ pub async fn spawn_process(
     inherited_fds: &[i32],
 ) -> Result<SpawnedProcess> {
     spawn_process_with_stdin_mode(
-        program,
+        program.as_ref(),
         args,
         cwd,
         env,
@@ -342,9 +343,10 @@ pub async fn spawn_process(
 }
 
 /// Spawn a process using regular pipes, close stdin immediately, and preserve
-/// selected inherited file descriptors across exec on Unix.
+/// selected inherited file descriptors across exec on Unix. The executable path
+/// retains its native encoding.
 pub async fn spawn_process_no_stdin(
-    program: &str,
+    program: impl AsRef<OsStr>,
     args: &[String],
     cwd: &Path,
     env: &HashMap<String, String>,
@@ -352,7 +354,7 @@ pub async fn spawn_process_no_stdin(
     inherited_fds: &[i32],
 ) -> Result<SpawnedProcess> {
     spawn_process_with_stdin_mode(
-        program,
+        program.as_ref(),
         args,
         cwd,
         env,

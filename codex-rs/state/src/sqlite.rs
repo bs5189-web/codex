@@ -29,6 +29,7 @@ use std::time::Instant;
 const LOGS_DB_FILENAME: &str = "logs_2.sqlite";
 const GOALS_DB_FILENAME: &str = "goals_1.sqlite";
 const MEMORIES_DB_FILENAME: &str = "memories_1.sqlite";
+const QUEUE_DB_FILENAME: &str = "queue_1.sqlite";
 const STATE_DB_FILENAME: &str = "state_5.sqlite";
 const THREAD_HISTORY_DB_FILENAME: &str = "thread_history_1.sqlite";
 
@@ -79,6 +80,20 @@ const MEMORIES_DB: RuntimeDbSpec = RuntimeDbSpec {
     migrate_phase: "migrate_memories",
 };
 
+const MEMORIES_V2_DB: RuntimeDbSpec = RuntimeDbSpec {
+    label: "memories v2 DB",
+    filename: "memories_v2_1.sqlite",
+    ..MEMORIES_DB
+};
+
+const QUEUE_DB: RuntimeDbSpec = RuntimeDbSpec {
+    label: "queue DB",
+    filename: QUEUE_DB_FILENAME,
+    kind: DbKind::Queue,
+    open_phase: "open_queue",
+    migrate_phase: "migrate_queue",
+};
+
 const THREAD_HISTORY_DB: RuntimeDbSpec = RuntimeDbSpec {
     label: "thread history DB",
     filename: THREAD_HISTORY_DB_FILENAME,
@@ -87,8 +102,15 @@ const THREAD_HISTORY_DB: RuntimeDbSpec = RuntimeDbSpec {
     migrate_phase: "migrate_thread_history",
 };
 
-const RUNTIME_DBS: [RuntimeDbSpec; 5] =
-    [STATE_DB, LOGS_DB, GOALS_DB, MEMORIES_DB, THREAD_HISTORY_DB];
+const RUNTIME_DBS: [RuntimeDbSpec; 7] = [
+    STATE_DB,
+    LOGS_DB,
+    GOALS_DB,
+    MEMORIES_DB,
+    MEMORIES_V2_DB,
+    QUEUE_DB,
+    THREAD_HISTORY_DB,
+];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeDbPath {
@@ -133,6 +155,24 @@ impl SqliteConfig {
     /// Return the path to the memories database.
     pub fn memories_db_path(&self) -> PathBuf {
         MEMORIES_DB.path(self.home())
+    }
+
+    pub(crate) fn memories_v2_db_path(&self) -> PathBuf {
+        MEMORIES_V2_DB.path(self.home())
+    }
+
+    pub(crate) async fn open_memories_v2_db(&self) -> anyhow::Result<SqlitePool> {
+        self.open_runtime_db(
+            MEMORIES_V2_DB,
+            &crate::migrations::runtime_memories_migrator(),
+            /*telemetry_override*/ None,
+        )
+        .await
+    }
+
+    /// Return the path to the durable user-message queue database.
+    pub fn queue_db_path(&self) -> PathBuf {
+        QUEUE_DB.path(self.home())
     }
 
     /// Return the path to the paginated thread-history database.
@@ -187,6 +227,15 @@ impl SqliteConfig {
         telemetry_override: Option<&dyn DbTelemetry>,
     ) -> anyhow::Result<SqlitePool> {
         self.open_runtime_db(MEMORIES_DB, migrator, telemetry_override)
+            .await
+    }
+
+    pub(super) async fn open_queue_db(
+        &self,
+        migrator: &Migrator,
+        telemetry_override: Option<&dyn DbTelemetry>,
+    ) -> anyhow::Result<SqlitePool> {
+        self.open_runtime_db(QUEUE_DB, migrator, telemetry_override)
             .await
     }
 
@@ -262,12 +311,19 @@ impl SqliteConfig {
     }
 
     /// Open an existing Codex SQLite database without creating or modifying it.
-    pub async fn open_read_only_pool(&self, path: &Path) -> Result<SqlitePool, Error> {
-        let options = SqliteConnectOptions::new()
+    pub async fn open_read_only_pool(
+        &self,
+        path: &Path,
+        busy_timeout: Option<Duration>,
+    ) -> Result<SqlitePool, Error> {
+        let mut options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(false)
             .read_only(true)
             .log_statements(LevelFilter::Off);
+        if let Some(busy_timeout) = busy_timeout {
+            options = options.busy_timeout(busy_timeout);
+        }
         SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(options)

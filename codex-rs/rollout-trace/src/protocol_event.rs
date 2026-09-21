@@ -22,6 +22,7 @@ use codex_protocol::protocol::PatchApplyBeginEvent;
 use codex_protocol::protocol::PatchApplyEndEvent;
 use codex_protocol::protocol::PatchApplyStatus;
 use codex_protocol::protocol::SubAgentActivityEvent;
+use codex_protocol::protocol::SubAgentActivityKind;
 use codex_protocol::protocol::TurnAbortReason;
 use serde::Serialize;
 use std::time::Duration;
@@ -352,13 +353,18 @@ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTr
             status: ExecutionStatus::Completed,
             payload: ToolRuntimePayload::CollabCloseEnd(event),
         }),
-        EventMsg::SubAgentActivity(event) => Some(ToolRuntimeTraceEvent::Ended {
-            tool_call_id: &event.event_id,
-            status: ExecutionStatus::Completed,
-            payload: ToolRuntimePayload::SubAgentActivity(event),
-        }),
+        EventMsg::SubAgentActivity(event) if event.kind != SubAgentActivityKind::Completed => {
+            Some(ToolRuntimeTraceEvent::Ended {
+                tool_call_id: &event.event_id,
+                status: ExecutionStatus::Completed,
+                payload: ToolRuntimePayload::SubAgentActivity(event),
+            })
+        }
+        EventMsg::SubAgentActivity(_) => None,
         EventMsg::Error(_)
         | EventMsg::Warning(_)
+        | EventMsg::AuthRecoveryStarted(_)
+        | EventMsg::AuthRecoveryCompleted(_)
         | EventMsg::GuardianWarning(_)
         | EventMsg::SafetyBuffering(_)
         | EventMsg::RealtimeConversationStarted(_)
@@ -371,6 +377,7 @@ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTr
         | EventMsg::ContextCompacted(_)
         | EventMsg::ThreadRolledBack(_)
         | EventMsg::ThreadGoalUpdated(_)
+        | EventMsg::ThreadQueueChanged(_)
         | EventMsg::TurnStarted(_)
         | EventMsg::ThreadSettingsApplied(_)
         | EventMsg::TurnComplete(_)
@@ -437,7 +444,9 @@ pub(crate) fn wrapped_protocol_event_type(event: &EventMsg) -> Option<&'static s
         EventMsg::Error(_) => Some("error"),
         EventMsg::Warning(_) => Some("warning"),
         EventMsg::ShutdownComplete => Some("shutdown_complete"),
-        EventMsg::GuardianWarning(_)
+        EventMsg::AuthRecoveryStarted(_)
+        | EventMsg::AuthRecoveryCompleted(_)
+        | EventMsg::GuardianWarning(_)
         | EventMsg::SafetyBuffering(_)
         | EventMsg::RealtimeConversationStarted(_)
         | EventMsg::RealtimeConversationRealtime(_)
@@ -457,6 +466,7 @@ pub(crate) fn wrapped_protocol_event_type(event: &EventMsg) -> Option<&'static s
         | EventMsg::AgentReasoningRawContent(_)
         | EventMsg::AgentReasoningSectionBreak(_)
         | EventMsg::ThreadGoalUpdated(_)
+        | EventMsg::ThreadQueueChanged(_)
         | EventMsg::McpStartupUpdate(_)
         | EventMsg::McpStartupComplete(_)
         | EventMsg::McpToolCallBegin(_)

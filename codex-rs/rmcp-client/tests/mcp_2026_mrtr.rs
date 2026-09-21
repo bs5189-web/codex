@@ -20,6 +20,7 @@ use rmcp::model::Implementation;
 use rmcp::model::InitializeRequestParams;
 use rmcp::model::ProtocolVersion;
 use rmcp::model::ReadResourceRequestParams;
+use rmcp::model::ServerResult;
 use rmcp::model::UrlElicitationCapability;
 use serde_json::Value;
 use serde_json::json;
@@ -33,6 +34,9 @@ use wiremock::matchers::path;
 const MODERN_VERSION: &str = "2026-07-28";
 const OPAQUE_STATE: &str = " opaque/\u{2603}/=?base64?literal?=\n";
 
+#[path = "mcp_2026_mrtr/native_verification_tests.rs"]
+mod native_verification;
+
 fn discover_response(body: &Value) -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_json(json!({
         "jsonrpc": "2.0",
@@ -41,7 +45,12 @@ fn discover_response(body: &Value) -> ResponseTemplate {
             "resultType": "complete",
             "supportedVersions": [MODERN_VERSION],
             "capabilities": {"tools": {}, "resources": {}},
-            "serverInfo": {"name": "mrtr-test", "version": "1.0.0"},
+            "_meta": {
+                "io.modelcontextprotocol/serverInfo": {
+                    "name": "mrtr-test",
+                    "version": "1.0.0",
+                },
+            },
             "ttlMs": 0,
             "cacheScope": "private",
         },
@@ -163,6 +172,50 @@ async fn create_client(
         )
         .await?;
     Ok(client)
+}
+
+#[tokio::test]
+async fn modern_sse_input_required_preserves_response_metadata() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let expected_result = json!({
+        "resultType": "input_required",
+        "requestState": OPAQUE_STATE,
+        "_meta": {"responseContext": "preserved"},
+    });
+    let result = expected_result.clone();
+
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .respond_with(move |request: &Request| {
+            let body: Value = request.body_json().expect("valid JSON-RPC request");
+            match body["method"].as_str() {
+                Some("server/discover") => discover_response(&body),
+                Some("tools/call") => sse_result_response(&body, result.clone()),
+                other => panic!("unexpected MRTR request: {other:?}"),
+            }
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let client = create_client(&server, Arc::new(Mutex::new(Vec::new()))).await?;
+    let result = client
+        .send_custom_request_with_timeout(
+            "tools/call",
+            Some(json!({"name": "confirm", "arguments": {}})),
+            Some(Duration::from_secs(5)),
+        )
+        .await?;
+    let ServerResult::InputRequiredResult(result) = result else {
+        anyhow::bail!("SSE response must remain an input_required result");
+    };
+
+    assert_eq!(serde_json::to_value(result)?, expected_result);
+
+    client.shutdown().await;
+    server.verify().await;
+
+    Ok(())
 }
 
 #[tokio::test]
@@ -325,6 +378,10 @@ async fn modern_tool_mrtr_uses_recovered_protocol_after_legacy_session_expiry() 
                         body.pointer("/params/_meta/requestContext"),
                         Some(&json!("caller-context"))
                     );
+                    assert_eq!(
+                        body.pointer("/params/_meta/openai~1readOnly"),
+                        Some(&json!(true))
+                    );
                     let attempt = {
                         let mut calls = recorded_calls.lock().expect("requests lock");
                         calls.push(body.clone());
@@ -396,12 +453,14 @@ async fn modern_tool_mrtr_uses_recovered_protocol_after_legacy_session_expiry() 
         .await;
 
     let elicitation_modes = Arc::new(Mutex::new(Vec::new()));
-    let client = create_client(&server, Arc::clone(&elicitation_modes)).await?;
+    let client = create_client(&server, Arc::clone(&elicitation_modes))
+        .await?
+        .with_read_only_tools(/*requires_read_only_tools*/ true);
     let result = client
         .call_tool(
             "confirm".into(),
             Some(json!({})),
-            Some(json!({"requestContext": "caller-context"})),
+            Some(json!({"requestContext": "caller-context", "openai/readOnly": false})),
             Some(Duration::from_secs(5)),
         )
         .await?;

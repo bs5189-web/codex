@@ -3,18 +3,20 @@ use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
-use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_protocol::security_risk::SecurityRiskScore;
 use codex_protocol::user_input::UserInput;
+use codex_rollout::CompactedItem;
+use codex_rollout::RolloutItem;
+use codex_rollout::RolloutLine;
 use pretty_assertions::assert_eq;
+use std::collections::BTreeMap;
 
 use super::*;
 use crate::protocol::v2::ThreadItem;
@@ -25,6 +27,7 @@ fn projects_turn_lifecycle_without_prior_builder_state() {
     let started = project(RolloutItem::EventMsg(EventMsg::TurnStarted(
         TurnStartedEvent {
             turn_id: "turn-1".to_string(),
+            root_turn_id: Some("root-turn".into()),
             trace_id: None,
             started_at: Some(10),
             model_context_window: None,
@@ -48,10 +51,15 @@ fn projects_turn_lifecycle_without_prior_builder_state() {
     assert_eq!(started.changed_turns[0].status, TurnStatus::InProgress);
     assert_eq!(started.changed_turns[0].started_at, Some(10));
     assert_eq!(
+        started.changed_turns[0].root_turn_id.as_deref(),
+        Some("root-turn")
+    );
+    assert_eq!(
         completed,
         ThreadHistoryChangeSet {
-            changed_turns: vec![ThreadHistoryTurnChange {
+            changed_turns: vec![ThreadHistoryTurnMetadata {
                 turn_id: "turn-1".to_string(),
+                root_turn_id: None,
                 status: TurnStatus::Completed,
                 error: None,
                 started_at: Some(10),
@@ -66,6 +74,7 @@ fn projects_turn_lifecycle_without_prior_builder_state() {
 #[test]
 fn projects_failed_turn_completion_as_snapshot() {
     let error = ErrorEvent {
+        misalignment: None,
         message: "request failed".to_string(),
         codex_error_info: None,
     };
@@ -85,10 +94,12 @@ fn projects_failed_turn_completion_as_snapshot() {
     assert_eq!(
         changes,
         ThreadHistoryChangeSet {
-            changed_turns: vec![ThreadHistoryTurnChange {
+            changed_turns: vec![ThreadHistoryTurnMetadata {
                 turn_id: "turn-1".to_string(),
+                root_turn_id: None,
                 status: TurnStatus::Failed,
                 error: Some(TurnError {
+                    misalignment: None,
                     message: "request failed".to_string(),
                     codex_error_info: None,
                     additional_details: None,
@@ -120,6 +131,8 @@ fn projects_completed_canonical_turn_items() {
         }],
         phase: None,
         memory_citation: None,
+        delivery: None,
+        questions: None,
     });
 
     let user_changes = project(item_completed(thread_id, "turn-1", user_item.clone()));
@@ -195,14 +208,26 @@ fn ignores_legacy_abort_without_turn_id_and_context_only_records() {
     let compacted = project(RolloutItem::Compacted(CompactedItem {
         message: String::new(),
         replacement_history: None,
+        retained_context: None,
+        guardian_history: None,
+        mcp_resource_origins: None,
         window_number: None,
         first_window_id: None,
         previous_window_id: None,
         window_id: None,
+        compaction_response_id: None,
+        latest_token_usage_record: None,
+    }));
+    let security_risk = project(RolloutItem::SecurityRiskScore(SecurityRiskScore {
+        scores: BTreeMap::from([("action_risk".to_string(), 0.92)]),
+        call_id: None,
+        action: None,
+        sampled_at: None,
     }));
 
     assert!(aborted.is_empty());
     assert!(compacted.is_empty());
+    assert!(security_risk.is_empty());
 }
 
 #[test]
@@ -220,8 +245,9 @@ fn projects_identified_turn_aborts() {
     assert_eq!(
         changes,
         ThreadHistoryChangeSet {
-            changed_turns: vec![ThreadHistoryTurnChange {
+            changed_turns: vec![ThreadHistoryTurnMetadata {
                 turn_id: "turn-1".to_string(),
+                root_turn_id: None,
                 status: TurnStatus::Interrupted,
                 error: None,
                 started_at: Some(10),

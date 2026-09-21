@@ -1,5 +1,5 @@
 use crate::ConfigLayerMetadata;
-use crate::merge::is_multi_agent_v2_feature_path;
+use crate::merge::is_structured_feature_path;
 use serde_json::Value as JsonValue;
 use sha2::Digest;
 use sha2::Sha256;
@@ -11,25 +11,35 @@ pub(super) fn record_origins(
     meta: &ConfigLayerMetadata,
     path: &mut Vec<String>,
     origins: &mut HashMap<String, ConfigLayerMetadata>,
+    include: &impl Fn(&[String]) -> bool,
 ) {
     match value {
         TomlValue::Table(table) => {
             for (key, val) in table {
                 path.push(key.clone());
-                record_origins(val, meta, path, origins);
+                record_origins(val, meta, path, origins, include);
                 path.pop();
             }
         }
         TomlValue::Array(items) => {
             for (idx, item) in (0_i32..).zip(items.iter()) {
                 path.push(idx.to_string());
-                record_origins(item, meta, path, origins);
+                record_origins(item, meta, path, origins, include);
                 path.pop();
             }
         }
         _ => {
             if !path.is_empty() {
-                if matches!(value, TomlValue::Boolean(_)) && is_multi_agent_v2_feature_path(path) {
+                if !include(path) {
+                    return;
+                }
+                if matches!(value, TomlValue::Boolean(_)) && is_structured_feature_path(path) {
+                    if path
+                        .last()
+                        .is_some_and(|feature| feature == "network_proxy")
+                    {
+                        origins.insert(path.join("."), meta.clone());
+                    }
                     path.push("enabled".to_string());
                     origins.insert(path.join("."), meta.clone());
                     path.pop();

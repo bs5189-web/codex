@@ -25,11 +25,20 @@ pub enum PlanType {
     SelfServeBusinessUsageBased,
     Business,
     Ent26,
+    #[serde(rename = "enterprise_cbp_automation")]
+    #[ts(rename = "enterprise_cbp_automation")]
+    EnterpriseCbpAutomation,
     #[serde(rename = "enterprise_cbp_usage_based")]
     #[ts(rename = "enterprise_cbp_usage_based")]
     EnterpriseCbpUsageBased,
     Enterprise,
     Edu,
+    #[serde(rename = "edu_plus")]
+    #[ts(rename = "edu_plus")]
+    EduPlus,
+    #[serde(rename = "edu_pro")]
+    #[ts(rename = "edu_pro")]
+    EduPro,
     #[serde(other)]
     Unknown,
 }
@@ -58,22 +67,23 @@ impl PlanType {
     pub fn is_business_like(self) -> bool {
         matches!(
             self,
-            Self::Business | Self::Ent26 | Self::EnterpriseCbpUsageBased
+            Self::Business
+                | Self::Ent26
+                | Self::EnterpriseCbpAutomation
+                | Self::EnterpriseCbpUsageBased
         )
     }
 
+    /// Groups education plans by workspace capabilities without losing their SKU identity.
+    pub fn is_education_like(self) -> bool {
+        matches!(self, Self::Edu | Self::EduPlus | Self::EduPro)
+    }
+
     pub fn is_workspace_account(self) -> bool {
-        matches!(
-            self,
-            Self::Team
-                | Self::SelfServeBusinessProLite
-                | Self::SelfServeBusinessUsageBased
-                | Self::Business
-                | Self::Ent26
-                | Self::EnterpriseCbpUsageBased
-                | Self::Enterprise
-                | Self::Edu
-        )
+        self.is_team_like()
+            || self.is_business_like()
+            || self.is_education_like()
+            || self == Self::Enterprise
     }
 }
 
@@ -99,9 +109,12 @@ impl From<KnownPlan> for PlanType {
             KnownPlan::SelfServeBusinessUsageBased => Self::SelfServeBusinessUsageBased,
             KnownPlan::Business => Self::Business,
             KnownPlan::Ent26 => Self::Ent26,
+            KnownPlan::EnterpriseCbpAutomation => Self::EnterpriseCbpAutomation,
             KnownPlan::EnterpriseCbpUsageBased => Self::EnterpriseCbpUsageBased,
             KnownPlan::Enterprise => Self::Enterprise,
             KnownPlan::Edu => Self::Edu,
+            KnownPlan::EduPlus => Self::EduPlus,
+            KnownPlan::EduPro => Self::EduPro,
         }
     }
 }
@@ -131,6 +144,11 @@ mod tests {
             "\"enterprise_cbp_usage_based\""
         );
         assert_eq!(
+            serde_json::to_string(&PlanType::EnterpriseCbpAutomation)
+                .expect("enterprise cbp automation should serialize"),
+            "\"enterprise_cbp_automation\""
+        );
+        assert_eq!(
             serde_json::to_string(&PlanType::Ent26).expect("ent26 should serialize"),
             "\"ent26\""
         );
@@ -158,6 +176,11 @@ mod tests {
             PlanType::EnterpriseCbpUsageBased
         );
         assert_eq!(
+            serde_json::from_str::<PlanType>("\"enterprise_cbp_automation\"")
+                .expect("enterprise cbp automation should deserialize"),
+            PlanType::EnterpriseCbpAutomation
+        );
+        assert_eq!(
             serde_json::from_str::<PlanType>("\"ent26\"").expect("ent26 should deserialize"),
             PlanType::Ent26
         );
@@ -173,6 +196,7 @@ mod tests {
 
         assert_eq!(PlanType::Business.is_business_like(), true);
         assert_eq!(PlanType::Ent26.is_business_like(), true);
+        assert_eq!(PlanType::EnterpriseCbpAutomation.is_business_like(), true);
         assert_eq!(PlanType::EnterpriseCbpUsageBased.is_business_like(), true);
         assert_eq!(PlanType::Team.is_business_like(), false);
     }
@@ -191,11 +215,17 @@ mod tests {
         assert_eq!(PlanType::Business.is_workspace_account(), true);
         assert_eq!(PlanType::Ent26.is_workspace_account(), true);
         assert_eq!(
+            PlanType::EnterpriseCbpAutomation.is_workspace_account(),
+            true
+        );
+        assert_eq!(
             PlanType::EnterpriseCbpUsageBased.is_workspace_account(),
             true
         );
         assert_eq!(PlanType::Enterprise.is_workspace_account(), true);
         assert_eq!(PlanType::Edu.is_workspace_account(), true);
+        assert_eq!(PlanType::EduPlus.is_workspace_account(), true);
+        assert_eq!(PlanType::EduPro.is_workspace_account(), true);
         assert_eq!(PlanType::Pro.is_workspace_account(), false);
     }
 
@@ -208,6 +238,10 @@ mod tests {
         assert_eq!(
             PlanType::from(AuthPlanType::Known(KnownPlan::EnterpriseCbpUsageBased)),
             PlanType::EnterpriseCbpUsageBased
+        );
+        assert_eq!(
+            PlanType::from(AuthPlanType::Known(KnownPlan::EnterpriseCbpAutomation)),
+            PlanType::EnterpriseCbpAutomation
         );
         assert_eq!(
             PlanType::from(AuthPlanType::Known(KnownPlan::Ent26)),

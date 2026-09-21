@@ -6,7 +6,10 @@ use crate::config_values::write_toml_file;
 use crate::memory_import;
 use crate::migration_source::ExternalAgentSource;
 use crate::migration_source::InstructionSourceGroup;
+pub use crate::model::DetectedConnectorCandidate;
+pub use crate::model::DetectedConnectorSource;
 pub use crate::model::ExternalAgentConfigDetectOptions;
+pub use crate::model::ExternalAgentConfigDetection;
 pub use crate::model::ExternalAgentConfigImportItemResult;
 pub use crate::model::ExternalAgentConfigImportOutcome;
 pub use crate::model::ExternalAgentConfigImportRawError;
@@ -24,6 +27,7 @@ use crate::reporting::emit_migration_metric;
 use crate::reporting::migration_metric_tags;
 pub use crate::reporting::record_import_error;
 use crate::scope::MigrationScope;
+use crate::sessions::ExternalAgentSessionMigration;
 use crate::sessions::SessionMetadataMode;
 #[cfg(test)]
 use crate::source_cla::KNOWN_MARKETPLACES_PATH as EXTERNAL_AGENT_KNOWN_MARKETPLACES_PATH;
@@ -39,6 +43,7 @@ use codex_analytics::AnalyticsEventsClient;
 use codex_core::config::Config;
 use codex_core_plugins::PluginsManager;
 use codex_core_plugins::marketplace::MarketplacePluginInstallPolicy;
+use codex_login::AuthManager;
 use codex_protocol::protocol::Product;
 use codex_rollout::StateDbHandle;
 use serde_json::Value as JsonValue;
@@ -49,6 +54,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use toml::Value as TomlValue;
 
 #[cfg(test)]
@@ -64,6 +70,7 @@ pub struct ExternalAgentConfigService {
     pub(super) connector_metadata_roots: Vec<PathBuf>,
     pub(crate) external_agent_home: PathBuf,
     pub(crate) analytics_events_client: Option<AnalyticsEventsClient>,
+    pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) source: ExternalAgentSource,
     pub(crate) session_import_limits: ExternalAgentSessionImportLimits,
     state_db: Option<StateDbHandle>,
@@ -72,6 +79,7 @@ pub struct ExternalAgentConfigService {
 impl ExternalAgentConfigService {
     pub fn new(
         codex_home: PathBuf,
+        auth_manager: Arc<AuthManager>,
         analytics_events_client: AnalyticsEventsClient,
         state_db: Option<StateDbHandle>,
     ) -> Self {
@@ -83,6 +91,7 @@ impl ExternalAgentConfigService {
             connector_metadata_roots,
             external_agent_home,
             analytics_events_client: Some(analytics_events_client),
+            auth_manager,
             source,
             session_import_limits: ExternalAgentSessionImportLimits::default(),
             state_db,
@@ -98,6 +107,7 @@ impl ExternalAgentConfigService {
             connector_metadata_roots,
             external_agent_home,
             analytics_events_client: self.analytics_events_client.clone(),
+            auth_manager: Arc::clone(&self.auth_manager),
             source,
             session_import_limits: self.session_import_limits,
             state_db: self.state_db.clone(),
@@ -118,6 +128,28 @@ impl ExternalAgentConfigService {
         &self.connector_metadata_roots
     }
 
+    pub fn detect_session_connectors(
+        &self,
+        sessions: &[ExternalAgentSessionMigration],
+    ) -> Vec<DetectedConnectorCandidate> {
+        self.source.detect_session_connectors(
+            sessions,
+            &self.connector_metadata_roots,
+            &self.external_agent_home,
+        )
+    }
+
+    pub fn detect_session_connectors_by_source_path(
+        &self,
+        sessions: &[ExternalAgentSessionMigration],
+    ) -> BTreeMap<PathBuf, Vec<DetectedConnectorCandidate>> {
+        self.source.detect_session_connectors_by_source_path(
+            sessions,
+            &self.connector_metadata_roots,
+            &self.external_agent_home,
+        )
+    }
+
     pub fn codex_home(&self) -> &Path {
         &self.codex_home
     }
@@ -131,6 +163,9 @@ impl ExternalAgentConfigService {
             connector_metadata_roots,
             external_agent_home,
             analytics_events_client: None,
+            auth_manager: codex_login::test_support::auth_manager_from_optional_auth(
+                /*auth*/ None,
+            ),
             source,
             session_import_limits: ExternalAgentSessionImportLimits::default(),
             state_db: None,
@@ -450,8 +485,7 @@ impl ExternalAgentConfigService {
         scope: &MigrationScope,
     ) -> io::Result<Option<JsonValue>> {
         let source_settings = self.source_settings(scope);
-        self.source
-            .effective_settings(self.source_config_dir(scope).as_path(), &source_settings)
+        self.source.effective_settings(&source_settings)
     }
 
     pub(crate) fn build_mcp_config(
@@ -667,37 +701,45 @@ impl ExternalAgentConfigService {
         let Some(scope) = MigrationScope::from_cwd(cwd)? else {
             return Ok(Vec::new());
         };
-        let (source_skills, target_skills) = match scope {
+        let source_skills_dir_names = self.source.skills_dir_names(&scope);
+        let (source_config_dir, target_skills) = match scope {
             MigrationScope::Home => (
-                self.external_agent_home.join("skills"),
+                self.external_agent_home.clone(),
                 self.home_target_skills_dir(),
             ),
             MigrationScope::Repository { root } => (
-                root.join(self.source.config_dir()).join("skills"),
+                root.join(self.source.config_dir()),
                 root.join(".agents").join("skills"),
             ),
         };
-        if !source_skills.is_dir() {
+        let source_skills = source_skills_dir_names
+            .iter()
+            .map(|directory| source_config_dir.join(*directory))
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        if source_skills.is_empty() {
             return Ok(Vec::new());
         }
 
         fs::create_dir_all(&target_skills)?;
         let mut copied_names = Vec::new();
 
-        for entry in fs::read_dir(&source_skills)? {
-            let entry = entry?;
-            let file_type = entry.file_type()?;
-            if !file_type.is_dir() {
-                continue;
-            }
+        for source_skills_dir in source_skills {
+            for entry in fs::read_dir(&source_skills_dir)? {
+                let entry = entry?;
+                let file_type = entry.file_type()?;
+                if !file_type.is_dir() {
+                    continue;
+                }
 
-            let target = target_skills.join(entry.file_name());
-            if target.exists() {
-                continue;
-            }
+                let target = target_skills.join(entry.file_name());
+                if target.exists() {
+                    continue;
+                }
 
-            copy_dir_recursive(&entry.path(), &target, self.source.rewrite_profile())?;
-            copied_names.push(entry.file_name().to_string_lossy().to_string());
+                copy_dir_recursive(&entry.path(), &target, self.source.rewrite_profile())?;
+                copied_names.push(entry.file_name().to_string_lossy().to_string());
+            }
         }
 
         Ok(copied_names)

@@ -1,8 +1,10 @@
 use super::super::test_support::render_section_cases;
 use super::*;
+use crate::context::MultiAgentRoleInstructions;
 use crate::context::world_state::WorldState;
 use codex_protocol::models::ResponseItem;
 use codex_utils_output_truncation::approx_token_count;
+use pretty_assertions::assert_eq;
 
 fn state(mode: Option<MultiAgentMode>) -> MultiAgentModeState {
     MultiAgentModeState::new(mode)
@@ -62,6 +64,67 @@ fn persisted_mode_is_restored_only_when_missing_from_history() {
         world_state
             .render_history_diff(Some(&snapshot), &[retained])
             .is_empty()
+    );
+}
+
+/// Active mode instructions must follow a newly migrated multi-agent usage hint.
+#[test]
+fn unchanged_mode_is_reemitted_after_usage_hint_migration() {
+    let previous = state(Some(MultiAgentMode::Proactive));
+    let current = MultiAgentModeState::new(Some(MultiAgentMode::Proactive)).with_usage_hint(
+        &MultiAgentUsageHintState::new(MultiAgentRoleInstructions::Configured(
+            "Current usage instructions.".to_string(),
+        )),
+    );
+
+    let instructions = current
+        .render_diff(PreviousSectionState::Known(&previous))
+        .expect("unchanged mode should follow migrated usage instructions");
+
+    assert_eq!(
+        instructions.render(),
+        MultiAgentModeInstructions::from_mode(MultiAgentMode::Proactive)
+            .expect("proactive mode should render")
+            .render()
+    );
+}
+
+#[test]
+fn catalog_role_updates_remain_separate_from_active_mode() {
+    let catalog_role = |base: &str| MultiAgentRoleInstructions::Composed {
+        base: base.to_string(),
+        marked: true,
+        omit_update_plan_instructions: false,
+        max_concurrency: 2,
+        wait_agent_enabled: false,
+        expose_model_overrides: false,
+    };
+    let previous_hint = MultiAgentUsageHintState::new(catalog_role("Previous role."));
+    let previous_mode =
+        MultiAgentModeState::new(Some(MultiAgentMode::Proactive)).with_usage_hint(&previous_hint);
+    let mut previous = WorldState::default();
+    previous.add_section(previous_hint);
+    previous.add_section(previous_mode);
+
+    let current_role = catalog_role("Current role.");
+    let current_hint = MultiAgentUsageHintState::new(current_role.clone());
+    let current_mode =
+        MultiAgentModeState::new(Some(MultiAgentMode::Proactive)).with_usage_hint(&current_hint);
+    let mut current = WorldState::default();
+    current.add_section(current_hint);
+    current.add_section(current_mode);
+
+    let updates = crate::context_manager::updates::merge_contextual_fragments(
+        current.render_diff(&previous.snapshot()),
+    );
+    let expected_mode = MultiAgentModeInstructions::from_mode(MultiAgentMode::Proactive)
+        .expect("proactive mode should render");
+    assert_eq!(
+        updates,
+        vec![
+            ContextualUserFragment::into(current_role),
+            ContextualUserFragment::into(expected_mode),
+        ],
     );
 }
 

@@ -12,8 +12,11 @@ use rmcp::transport::AuthorizationManager;
 use rmcp::transport::auth::AuthError;
 use tracing::debug;
 
+use crate::http_client_adapter::StreamableHttpRedirectMode;
 use crate::oauth::StoredOAuthTokenStatus;
 use crate::oauth::oauth_token_status;
+use crate::oauth_callback::McpOAuthCallbackMode;
+use crate::oauth_callback::callback_mode;
 use crate::oauth_http_client::OAuthHttpClientAdapter;
 use crate::utils::build_default_headers;
 use codex_config::types::AuthKeyringBackendKind;
@@ -38,6 +41,7 @@ impl OAuthDiscoveryTimeout {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamableHttpOAuthDiscovery {
     pub scopes_supported: Option<Vec<String>>,
+    pub callback_mode: McpOAuthCallbackMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +53,7 @@ pub enum McpLoginRequirement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpAuthState {
     Unsupported,
+    Unknown,
     LoggedOut(McpLoginRequirement),
     BearerToken,
     OAuth,
@@ -58,6 +63,7 @@ impl From<McpAuthState> for McpAuthStatus {
     fn from(value: McpAuthState) -> Self {
         match value {
             McpAuthState::Unsupported => Self::Unsupported,
+            McpAuthState::Unknown => Self::Unknown,
             McpAuthState::LoggedOut(_) => Self::NotLoggedIn,
             McpAuthState::BearerToken => Self::BearerToken,
             McpAuthState::OAuth => Self::OAuth,
@@ -83,7 +89,9 @@ pub async fn determine_streamable_http_auth_status(
     keyring_backend_kind: AuthKeyringBackendKind,
     http_client: Arc<dyn HttpClient>,
     discovery_timeout: OAuthDiscoveryTimeout,
+    redirect_mode: StreamableHttpRedirectMode,
 ) -> Result<McpAuthState> {
+    let has_configured_headers = has_configured_headers(&http_headers, &env_http_headers);
     let default_headers = match auth_status_before_discovery(
         server_name,
         url,
@@ -104,6 +112,8 @@ pub async fn determine_streamable_http_auth_status(
             default_headers,
             http_client,
             discovery_timeout,
+            has_configured_headers,
+            redirect_mode,
         )
         .await,
     )
@@ -180,7 +190,7 @@ fn determine_auth_status_from_discovery(
             debug!(
                 "failed to detect OAuth support for MCP server `{server_name}` at {url}: {error:?}"
             );
-            Ok(McpAuthState::Unsupported)
+            Err(error)
         }
     }
 }
@@ -191,13 +201,17 @@ pub async fn discover_streamable_http_oauth(
     env_http_headers: Option<HashMap<String, String>>,
     http_client: Arc<dyn HttpClient>,
     discovery_timeout: OAuthDiscoveryTimeout,
+    redirect_mode: StreamableHttpRedirectMode,
 ) -> Result<Option<StreamableHttpOAuthDiscovery>> {
+    let has_configured_headers = has_configured_headers(&http_headers, &env_http_headers);
     let default_headers = build_default_headers(http_headers, env_http_headers)?;
     discover_streamable_http_oauth_with_headers_and_http_client(
         url,
         default_headers,
         http_client,
         discovery_timeout,
+        has_configured_headers,
+        redirect_mode,
     )
     .await
 }
@@ -207,13 +221,26 @@ async fn discover_streamable_http_oauth_with_headers_and_http_client(
     default_headers: HeaderMap,
     http_client: Arc<dyn HttpClient>,
     discovery_timeout: OAuthDiscoveryTimeout,
+    has_configured_headers: bool,
+    redirect_mode: StreamableHttpRedirectMode,
 ) -> Result<Option<StreamableHttpOAuthDiscovery>> {
     let oauth_http_client = match discovery_timeout {
-        OAuthDiscoveryTimeout::Requested => {
-            OAuthHttpClientAdapter::new(http_client, default_headers)
-        }
+        OAuthDiscoveryTimeout::Requested => OAuthHttpClientAdapter::new_with_redirect_mode(
+            http_client,
+            default_headers,
+            url,
+            has_configured_headers,
+            redirect_mode,
+        )?,
         OAuthDiscoveryTimeout::Capped(max_timeout) => {
-            OAuthHttpClientAdapter::new_with_max_timeout(http_client, default_headers, max_timeout)
+            OAuthHttpClientAdapter::new_with_max_timeout_and_redirect_mode(
+                http_client,
+                default_headers,
+                url,
+                max_timeout,
+                has_configured_headers,
+                redirect_mode,
+            )?
         }
     };
     let mut authorization_manager =
@@ -222,14 +249,31 @@ async fn discover_streamable_http_oauth_with_headers_and_http_client(
     discover_streamable_http_oauth_with_manager(&authorization_manager).await
 }
 
+fn has_configured_headers(
+    http_headers: &Option<HashMap<String, String>>,
+    env_http_headers: &Option<HashMap<String, String>>,
+) -> bool {
+    http_headers
+        .as_ref()
+        .is_some_and(|headers| !headers.is_empty())
+        || env_http_headers
+            .as_ref()
+            .is_some_and(|headers| !headers.is_empty())
+}
+
 async fn discover_streamable_http_oauth_with_manager(
     authorization_manager: &AuthorizationManager,
 ) -> Result<Option<StreamableHttpOAuthDiscovery>> {
     match authorization_manager.resolve_metadata().boxed().await {
         Ok(resolution) if !resolution.source.is_discovered() => Ok(None),
-        Ok(resolution) => Ok(Some(StreamableHttpOAuthDiscovery {
-            scopes_supported: normalize_scopes(resolution.metadata.scopes_supported),
-        })),
+        Ok(resolution) => {
+            let metadata = resolution.metadata;
+            Ok(Some(StreamableHttpOAuthDiscovery {
+                callback_mode: callback_mode(&metadata)
+                    .unwrap_or(McpOAuthCallbackMode::CallbackSpecific),
+                scopes_supported: normalize_scopes(metadata.scopes_supported),
+            }))
+        }
         Err(AuthError::NoAuthorizationSupport) => Ok(None),
         Err(err) => Err(err.into()),
     }
@@ -266,6 +310,7 @@ mod tests {
     use axum::http::header::WWW_AUTHENTICATE;
     use axum::routing::get;
     use codex_exec_server::ExecServerError;
+    use codex_exec_server::HttpRedirectPolicy;
     use codex_exec_server::HttpRequestParams;
     use codex_exec_server::HttpRequestResponse;
     use codex_exec_server::HttpResponseBodyStream;
@@ -306,6 +351,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingHttpClient {
         headers: Mutex<Option<Vec<(String, String)>>>,
+        redirect_policy: Mutex<Option<HttpRedirectPolicy>>,
         timeout_ms: Mutex<Option<Option<u64>>>,
     }
 
@@ -340,12 +386,29 @@ mod tests {
                 .timeout_ms
                 .lock()
                 .expect("timeout recorder lock should not be poisoned") = Some(params.timeout_ms);
+            *self
+                .redirect_policy
+                .lock()
+                .expect("redirect policy recorder lock should not be poisoned") =
+                Some(params.redirect_policy);
             Box::pin(async {
                 Err(ExecServerError::HttpRequest(
                     "expected discovery request failure".to_string(),
                 ))
             })
         }
+    }
+
+    fn assert_recorded_discovery_failure(discovery: Result<Option<StreamableHttpOAuthDiscovery>>) {
+        let error = discovery.expect_err("the recording HTTP client rejects OAuth discovery");
+        assert!(
+            matches!(
+                error.downcast_ref::<AuthError>(),
+                Some(AuthError::MetadataError(reason))
+                    if reason.contains("expected discovery request failure")
+            ),
+            "OAuth discovery must preserve the executor transport failure: {error:#}"
+        );
     }
 
     async fn spawn_oauth_discovery_server(metadata: serde_json::Value) -> TestServer {
@@ -426,6 +489,7 @@ mod tests {
             AuthKeyringBackendKind::default(),
             test_http_client(),
             OAuthDiscoveryTimeout::Requested,
+            StreamableHttpRedirectMode::Legacy,
         )
         .await
         .expect("status should compute");
@@ -450,6 +514,7 @@ mod tests {
             AuthKeyringBackendKind::default(),
             test_http_client(),
             OAuthDiscoveryTimeout::Requested,
+            StreamableHttpRedirectMode::Legacy,
         )
         .await
         .expect("status should compute");
@@ -504,6 +569,7 @@ mod tests {
             /*env_http_headers*/ None,
             test_http_client(),
             OAuthDiscoveryTimeout::LOCAL,
+            StreamableHttpRedirectMode::Legacy,
         )
         .await;
         assert_eq!(
@@ -517,6 +583,7 @@ mod tests {
     #[tokio::test]
     async fn oauth_discovery_does_not_follow_cross_origin_redirects() {
         let redirect_target = MockServer::start().await;
+        let redirect_url = format!("{}/redirect-target", redirect_target.uri());
         Mock::given(method("GET"))
             .and(path("/redirect-target"))
             .and(header("x-api-key", "sensitive-key"))
@@ -529,15 +596,14 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/mcp"))
             .and(header("x-api-key", "sensitive-key"))
-            .respond_with(ResponseTemplate::new(302).insert_header(
-                "location",
-                format!("{}/redirect-target", redirect_target.uri()),
-            ))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("location", redirect_url.clone()),
+            )
             .expect(1)
             .mount(&resource_server)
             .await;
 
-        let discovery = discover_streamable_http_oauth(
+        let error = discover_streamable_http_oauth(
             &format!("{}/mcp", resource_server.uri()),
             Some(HashMap::from([(
                 "x-api-key".to_string(),
@@ -546,13 +612,63 @@ mod tests {
             /*env_http_headers*/ None,
             test_http_client(),
             OAuthDiscoveryTimeout::LOCAL,
+            StreamableHttpRedirectMode::Legacy,
         )
         .await
-        .expect("discovery should complete without following the redirect");
+        .expect_err("cross-origin OAuth discovery redirects must be rejected");
 
-        assert_eq!(discovery, None);
+        assert!(
+            matches!(
+                error.downcast_ref::<AuthError>(),
+                Some(AuthError::MetadataError(reason))
+                    if reason.contains("OAuth discovery redirect to non-same-origin URL rejected")
+                        && reason.contains(&redirect_url)
+            ),
+            "OAuth discovery must preserve the cross-origin redirect rejection: {error:#}"
+        );
         redirect_target.verify().await;
         resource_server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn determine_auth_status_preserves_transient_http_errors() {
+        for status in [
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_EARLY,
+            StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/mcp"))
+                .respond_with(ResponseTemplate::new(status.as_u16()))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let error = determine_streamable_http_auth_status(
+                "transient-http-error",
+                &format!("{}/mcp", server.uri()),
+                /*bearer_token_env_var*/ None,
+                /*http_headers*/ None,
+                /*env_http_headers*/ None,
+                OAuthCredentialsStoreMode::File,
+                AuthKeyringBackendKind::default(),
+                test_http_client(),
+                OAuthDiscoveryTimeout::LOCAL,
+                StreamableHttpRedirectMode::Legacy,
+            )
+            .await
+            .expect_err("transient OAuth discovery failures must not become unsupported access");
+
+            assert!(
+                matches!(
+                    error.downcast_ref::<AuthError>(),
+                    Some(AuthError::MetadataError(reason)) if reason.contains(status.as_str())
+                ),
+                "auth-status discovery must preserve HTTP {status}: {error:#}"
+            );
+            server.verify().await;
+        }
     }
 
     #[tokio::test]
@@ -560,6 +676,7 @@ mod tests {
         let server = spawn_oauth_discovery_server(serde_json::json!({
             "authorization_endpoint": "https://example.com/authorize",
             "token_endpoint": "https://example.com/token",
+            "authorization_response_iss_parameter_supported": true,
             "scopes_supported": ["profile", " email ", "profile", "", "   "],
         }))
         .await;
@@ -570,14 +687,49 @@ mod tests {
             /*env_http_headers*/ None,
             test_http_client(),
             OAuthDiscoveryTimeout::LOCAL,
+            StreamableHttpRedirectMode::Legacy,
         )
         .await
         .expect("discovery should succeed")
         .expect("oauth support should be detected");
 
         assert_eq!(
-            discovery.scopes_supported,
-            Some(vec!["profile".to_string(), "email".to_string()])
+            discovery,
+            StreamableHttpOAuthDiscovery {
+                scopes_supported: Some(vec!["profile".to_string(), "email".to_string()]),
+                callback_mode: McpOAuthCallbackMode::IssuerBound,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn issuer_support_without_a_metadata_issuer_falls_back_to_distinct_callbacks() {
+        let server = spawn_oauth_discovery_server(serde_json::json!({
+            "issuer": null,
+            "authorization_endpoint": "https://example.com/authorize",
+            "token_endpoint": "https://example.com/token",
+            "authorization_response_iss_parameter_supported": true,
+        }))
+        .await;
+
+        let discovery = discover_streamable_http_oauth(
+            &server.url,
+            /*http_headers*/ None,
+            /*env_http_headers*/ None,
+            test_http_client(),
+            OAuthDiscoveryTimeout::LOCAL,
+            StreamableHttpRedirectMode::Legacy,
+        )
+        .await
+        .expect("discovery should succeed")
+        .expect("oauth support should be detected");
+
+        assert_eq!(
+            discovery,
+            StreamableHttpOAuthDiscovery {
+                scopes_supported: None,
+                callback_mode: McpOAuthCallbackMode::CallbackSpecific,
+            }
         );
     }
 
@@ -591,10 +743,11 @@ mod tests {
             /*env_http_headers*/ None,
             http_client.clone(),
             OAuthDiscoveryTimeout::LOCAL,
+            StreamableHttpRedirectMode::Legacy,
         )
         .await;
 
-        assert!(matches!(discovery, Ok(None)));
+        assert_recorded_discovery_failure(discovery);
         assert_eq!(
             *http_client
                 .timeout_ms
@@ -617,10 +770,11 @@ mod tests {
             /*env_http_headers*/ None,
             http_client.clone(),
             OAuthDiscoveryTimeout::Requested,
+            StreamableHttpRedirectMode::Legacy,
         )
         .await;
 
-        assert!(matches!(discovery, Ok(None)));
+        assert_recorded_discovery_failure(discovery);
         assert_eq!(
             *http_client
                 .timeout_ms
@@ -631,7 +785,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn routed_oauth_discovery_preserves_configured_headers() {
+    async fn routed_agent_plugin_oauth_discovery_stops_with_configured_headers() {
         let http_client = Arc::new(RecordingHttpClient::default());
 
         let discovery = discover_streamable_http_oauth(
@@ -643,10 +797,11 @@ mod tests {
             /*env_http_headers*/ None,
             http_client.clone(),
             OAuthDiscoveryTimeout::LOCAL,
+            StreamableHttpRedirectMode::AgentPluginV1,
         )
         .await;
 
-        assert!(matches!(discovery, Ok(None)));
+        assert_recorded_discovery_failure(discovery);
         let headers = http_client
             .headers
             .lock()
@@ -659,6 +814,13 @@ mod tests {
                 .find(|(name, _)| name.eq_ignore_ascii_case("x-mcp-discovery"))
                 .map(|(_, value)| value.as_str()),
             Some("configured-value")
+        );
+        assert_eq!(
+            *http_client
+                .redirect_policy
+                .lock()
+                .expect("redirect policy recorder lock should not be poisoned"),
+            Some(HttpRedirectPolicy::Stop)
         );
     }
 
@@ -712,6 +874,7 @@ mod tests {
             /*env_http_headers*/ None,
             test_http_client(),
             OAuthDiscoveryTimeout::LOCAL,
+            StreamableHttpRedirectMode::Legacy,
         )
         .await
         .expect("discovery should succeed")
@@ -738,6 +901,7 @@ mod tests {
             /*env_http_headers*/ None,
             test_http_client(),
             OAuthDiscoveryTimeout::LOCAL,
+            StreamableHttpRedirectMode::Legacy,
         )
         .await
         .expect("discovery should succeed")
@@ -760,6 +924,7 @@ mod tests {
             /*env_http_headers*/ None,
             test_http_client(),
             OAuthDiscoveryTimeout::LOCAL,
+            StreamableHttpRedirectMode::Legacy,
         )
         .await
         .expect("support check should succeed")

@@ -719,7 +719,6 @@ mod tests {
             SandboxType::WindowsRestrictedToken,
             vec![cwd],
             WindowsSandboxLevel::Disabled,
-            /*windows_sandbox_private_desktop*/ false,
             PermissionProfile::read_only(),
             /*arg0*/ None,
         )
@@ -837,7 +836,6 @@ mod tests {
                     SandboxType::None,
                     vec![cwd.clone()],
                     WindowsSandboxLevel::Disabled,
-                    /*windows_sandbox_private_desktop*/ false,
                     PermissionProfile::read_only(),
                     /*arg0*/ None,
                 ),
@@ -885,8 +883,11 @@ mod tests {
             panic!("expected execution response after termination");
         };
         assert_eq!(response.id, request_id.request_id);
-        let response: CommandExecResponse =
-            serde_json::from_value(response.result).expect("deserialize command/exec response");
+        let codex_app_server_protocol::ClientResponsePayload::OneOffCommandExec(response) =
+            *response.result
+        else {
+            panic!("expected command/exec response");
+        };
         assert_ne!(response.exit_code, 0);
         assert_eq!(response.stdout, "");
         // The deferred response now drains any already-emitted stderr before
@@ -928,7 +929,6 @@ mod tests {
                     SandboxType::None,
                     vec![cwd],
                     WindowsSandboxLevel::Disabled,
-                    /*windows_sandbox_private_desktop*/ false,
                     PermissionProfile::read_only(),
                     /*arg0*/ None,
                 ),
@@ -961,8 +961,11 @@ mod tests {
             panic!("expected execution response after cancellation");
         };
         assert_eq!(response.id, request_id.request_id);
-        let response: CommandExecResponse =
-            serde_json::from_value(response.result).expect("deserialize command/exec response");
+        let codex_app_server_protocol::ClientResponsePayload::OneOffCommandExec(response) =
+            *response.result
+        else {
+            panic!("expected command/exec response");
+        };
         assert_ne!(response.exit_code, EXEC_TIMEOUT_EXIT_CODE);
     }
 

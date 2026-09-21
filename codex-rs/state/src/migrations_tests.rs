@@ -102,16 +102,18 @@ INSERT INTO threads (
         .expect("legacy thread insert should succeed");
     }
 
-    let registered_sections =
-        sqlx::query_as::<_, (String, String)>("SELECT id, name FROM thread_sections ORDER BY id")
-            .fetch_all(&pool)
-            .await
-            .expect("independent thread sections should load");
+    let registered_sections = sqlx::query_as::<_, (String, String, Option<String>)>(
+        "SELECT id, name, appearance FROM thread_sections ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("independent thread sections should load");
     assert_eq!(
         registered_sections,
         vec![(
             PINNED_THREAD_SECTION_ID.to_string(),
             PINNED_THREAD_SECTION_NAME.to_string(),
+            None,
         )]
     );
 
@@ -187,6 +189,211 @@ INSERT INTO threads (
 }
 
 #[tokio::test]
+async fn thread_attachment_migration_preserves_existing_data() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let pool = sqlite
+        .open_read_write_pool(&sqlite.state_db_path())
+        .await
+        .expect("sqlite database should open");
+    migrator_through(/*version*/ 51)
+        .run(&pool)
+        .await
+        .expect("released thread migrations should apply");
+    sqlx::query("UPDATE thread_sections SET appearance = ? WHERE id = ?")
+        .bind(r#"{"icon":"pin"}"#)
+        .bind(PINNED_THREAD_SECTION_ID)
+        .execute(&pool)
+        .await
+        .expect("released section appearance should remain writable");
+
+    let thread_id = "00000000-0000-0000-0000-000000000051";
+    sqlx::query(
+        "INSERT INTO threads (id, rollout_path, created_at, updated_at, source, model_provider, cwd, title, sandbox_policy, approval_mode) VALUES (?, 'rollout.jsonl', 1, 1, 'cli', 'openai', '/tmp', '', 'read-only', 'on-request')",
+    )
+    .bind(thread_id)
+    .execute(&pool)
+    .await
+    .expect("existing thread should be inserted");
+    sqlx::query(
+        "INSERT INTO thread_artifacts (id, thread_id, artifact_type, identity_key, payload, created_at) VALUES ('attachment-1', ?, 'pull_request', 'pr-123', '{}', 1)",
+    )
+    .bind(thread_id)
+    .execute(&pool)
+    .await
+    .expect("existing attachment should be inserted using the released schema");
+
+    STATE_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("attachment migration should apply without rewriting released migrations");
+    let section = sqlx::query_as::<_, (String, String, Option<String>)>(
+        "SELECT id, name, appearance FROM thread_sections WHERE id = ?",
+    )
+    .bind(PINNED_THREAD_SECTION_ID)
+    .fetch_one(&pool)
+    .await
+    .expect("existing section metadata should remain available");
+    assert_eq!(
+        section,
+        (
+            PINNED_THREAD_SECTION_ID.to_string(),
+            PINNED_THREAD_SECTION_NAME.to_string(),
+            Some(r#"{"icon":"pin"}"#.to_string()),
+        )
+    );
+
+    let attachment = sqlx::query_as::<_, (String, String, String, String, String, i64)>(
+        "SELECT id, thread_id, attachment_type, identity_key, payload, created_at FROM thread_attachments",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("existing attachment should remain available under the renamed table and column");
+    assert_eq!(
+        attachment,
+        (
+            "attachment-1".to_string(),
+            thread_id.to_string(),
+            "pull_request".to_string(),
+            "pr-123".to_string(),
+            "{}".to_string(),
+            1,
+        )
+    );
+
+    let mut released_migrator = migrator_through(/*version*/ 50);
+    released_migrator.ignore_missing = true;
+    released_migrator
+        .run(&pool)
+        .await
+        .expect("released binaries should tolerate the attachment rename migration");
+}
+
+#[tokio::test]
+async fn thread_section_order_migration_backfills_stably() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let pool = sqlite
+        .open_read_write_pool(&sqlite.state_db_path())
+        .await
+        .expect("sqlite database should open");
+    migrator_through(/*version*/ 45)
+        .run(&pool)
+        .await
+        .expect("pre-ordering migrations should apply");
+
+    sqlx::query("INSERT INTO thread_sections (id, name) VALUES (?, ?)")
+        .bind(CUSTOM_THREAD_SECTION_ID)
+        .bind("Custom section")
+        .execute(&pool)
+        .await
+        .expect("custom section should exist before threads reference it");
+
+    let older = "00000000-0000-0000-0000-000000000071";
+    let newer = "00000000-0000-0000-0000-000000000072";
+    let pinned = "00000000-0000-0000-0000-000000000073";
+    let unsectioned = "00000000-0000-0000-0000-000000000074";
+    for (thread_id, recency_at_ms, section) in [
+        (older, 1_700_000_001_000_i64, Some(CUSTOM_THREAD_SECTION_ID)),
+        (newer, 1_700_000_002_000, Some(CUSTOM_THREAD_SECTION_ID)),
+        (pinned, 1_700_000_003_000, Some(PINNED_THREAD_SECTION_ID)),
+        (unsectioned, 1_700_000_004_000, None),
+    ] {
+        sqlx::query(
+            r#"
+INSERT INTO threads (
+    id, rollout_path, created_at, updated_at, recency_at,
+    created_at_ms, updated_at_ms, recency_at_ms, source,
+    model_provider, cwd, title, preview, sandbox_policy, approval_mode, thread_section_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(thread_id)
+        .bind("/tmp/legacy.jsonl")
+        .bind(recency_at_ms / 1000)
+        .bind(recency_at_ms / 1000)
+        .bind(recency_at_ms / 1000)
+        .bind(recency_at_ms)
+        .bind(recency_at_ms)
+        .bind(recency_at_ms)
+        .bind("cli")
+        .bind("openai")
+        .bind("/tmp")
+        .bind("")
+        .bind("preview")
+        .bind("read-only")
+        .bind("on-request")
+        .bind(section)
+        .execute(&pool)
+        .await
+        .expect("legacy section row should insert");
+    }
+
+    STATE_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("section ordering migration should apply");
+    let custom_order = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM threads WHERE thread_section_id = ? ORDER BY section_position, id",
+    )
+    .bind(CUSTOM_THREAD_SECTION_ID)
+    .fetch_all(&pool)
+    .await
+    .expect("backfilled custom order should load");
+    assert_eq!(custom_order, vec![newer.to_string(), older.to_string()]);
+    let positions =
+        sqlx::query_scalar::<_, Option<i64>>("SELECT section_position FROM threads ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .expect("section positions should load");
+    assert_eq!(
+        positions,
+        vec![Some(2_000_000), Some(1_000_000), Some(1_000_000), None]
+    );
+    let entered = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT section_entered_at_ms FROM threads ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("section entry timestamps should load");
+    assert_eq!(
+        entered,
+        vec![
+            Some(1_700_000_001_000),
+            Some(1_700_000_002_000),
+            Some(1_700_000_003_000),
+            None,
+        ]
+    );
+
+    let section_position_index = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+    )
+    .bind("idx_threads_section_position")
+    .fetch_optional(&pool)
+    .await
+    .expect("section position index should remain inspectable");
+    assert_eq!(
+        section_position_index,
+        Some("idx_threads_section_position".to_string())
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
 async fn thread_item_update_ordinals_allow_older_writers() {
     let sqlite_home = crate::runtime::test_support::unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home)
@@ -251,6 +458,109 @@ INSERT INTO thread_items (thread_id, turn_id, item_id, rollout_ordinal, created_
     .expect("old-writer items should load");
     assert_eq!(ordinals, vec![(11, 11), (12, 12), (13, 0), (14, 0)]);
 
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn realtime_items_preserve_older_thread_history_writers() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let older_migrator = Migrator {
+        migrations: Cow::Owned(
+            THREAD_HISTORY_MIGRATOR
+                .migrations
+                .iter()
+                .filter(|migration| migration.version < 5)
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: true,
+        locking: THREAD_HISTORY_MIGRATOR.locking,
+        table_name: THREAD_HISTORY_MIGRATOR.table_name.clone(),
+        create_schemas: THREAD_HISTORY_MIGRATOR.create_schemas.clone(),
+        no_tx: THREAD_HISTORY_MIGRATOR.no_tx,
+    };
+    let pool = sqlite
+        .open_thread_history_db(&older_migrator, /*telemetry_override*/ None)
+        .await
+        .expect("existing thread history migrations should apply");
+    sqlx::query(
+        "INSERT INTO thread_items (thread_id, turn_id, item_id, rollout_ordinal, created_at_ms, item_json) VALUES ('thread-1', 'turn-1', 'existing-item', 1, 100, '{}')",
+    )
+    .execute(&pool)
+    .await
+    .expect("existing turn-scoped item should be inserted");
+
+    THREAD_HISTORY_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("realtime item migration should apply");
+    let turn_id_not_null = sqlx::query_scalar::<_, i64>(
+        "SELECT \"notnull\" FROM pragma_table_info('thread_items') WHERE name = 'turn_id'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("existing thread item schema should remain inspectable");
+    assert_eq!(turn_id_not_null, 1);
+
+    sqlx::query(
+        "INSERT INTO thread_realtime_items (thread_id, item_id, rollout_ordinal, created_at_ms, item_type, item_json) VALUES ('thread-1', 'realtime-item', 2, 200, 'realtime_session_started', '{}')",
+    )
+    .execute(&pool)
+    .await
+    .expect("thread-scoped realtime item should be inserted separately");
+    sqlx::query(
+        "INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES ('thread-1', 0, 0)",
+    )
+    .execute(&pool)
+    .await
+    .expect("thread projection checkpoint should be inserted");
+
+    let older_pool = sqlite
+        .open_thread_history_db(&older_migrator, /*telemetry_override*/ None)
+        .await
+        .expect("older binaries should tolerate the additive realtime migration");
+    sqlx::query(
+        "INSERT INTO thread_items (thread_id, turn_id, item_id, rollout_ordinal, created_at_ms, item_json) VALUES ('thread-1', 'turn-1', 'older-writer-item', 3, 300, '{}')",
+    )
+    .execute(&older_pool)
+    .await
+    .expect("older binaries should continue writing ordinary turn-scoped items");
+    let ordinary_items = sqlx::query_as::<_, (String, String)>(
+        "SELECT item_id, turn_id FROM thread_items WHERE thread_id = ? ORDER BY rollout_ordinal",
+    )
+    .bind("thread-1")
+    .fetch_all(&older_pool)
+    .await
+    .expect("older binaries should never observe turnless realtime items");
+    assert_eq!(
+        ordinary_items,
+        vec![
+            ("existing-item".to_string(), "turn-1".to_string()),
+            ("older-writer-item".to_string(), "turn-1".to_string()),
+        ]
+    );
+    sqlx::query("DELETE FROM thread_history_projection_state WHERE thread_id = ?")
+        .bind("thread-1")
+        .execute(&older_pool)
+        .await
+        .expect("older binaries should delete their known projection checkpoint");
+    let remaining_realtime_items = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM thread_realtime_items WHERE thread_id = ?",
+    )
+    .bind("thread-1")
+    .fetch_one(&pool)
+    .await
+    .expect("read realtime items after an older writer deleted the thread");
+    assert_eq!(remaining_realtime_items, 0);
+
+    older_pool.close().await;
     pool.close().await;
 }
 
@@ -559,7 +869,7 @@ async fn repair_recency_migration_succeeds_while_another_connection_holds_writer
         .await
         .expect("current migrations should apply");
     let read_pool = sqlite
-        .open_read_only_pool(&state_path)
+        .open_read_only_pool(&state_path, /*busy_timeout*/ None)
         .await
         .expect("read-only pool should open");
     let mut write_connection = pool.acquire().await.expect("write connection should open");

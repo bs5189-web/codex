@@ -79,6 +79,44 @@ fn origins_attribute_multi_agent_v2_enabled_to_overriding_boolean_layer() {
 }
 
 #[test]
+fn origins_omit_displaced_credential_providers() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    for scope in ["", "profiles.work."] {
+        let user = ConfigLayerEntry::new(
+            ConfigLayerSource::User {
+                file: test_user_config_path(&temp_dir, "config.toml"),
+                profile: None,
+            },
+            toml::from_str(&format!(
+                "[{scope}features.network_proxy.credentials.user_provider]\nenv = ['VENDOR_TOKEN']\n",
+            ))
+            .expect("user config"),
+        );
+        let session = ConfigLayerEntry::new(
+            ConfigLayerSource::SessionFlags,
+            toml::from_str(&format!(
+                "[{scope}features.network_proxy.credentials.session_provider]\nenv = ['VENDOR_TOKEN']\n",
+            ))
+            .expect("session config"),
+        );
+        let metadata = session.metadata();
+        let stack = ConfigLayerStack::new(
+            vec![user, session],
+            ConfigRequirements::default(),
+            ConfigRequirementsToml::default(),
+        )
+        .expect("valid layers");
+        assert_eq!(
+            stack.origins(),
+            HashMap::from([(
+                format!("{scope}features.network_proxy.credentials.session_provider.env.0"),
+                metadata
+            )])
+        );
+    }
+}
+
+#[test]
 fn enabled_layers_validate_shell_environment_policy() {
     let layer = ConfigLayerEntry::new(
         ConfigLayerSource::SessionFlags,
@@ -247,6 +285,63 @@ approval_policy = "on-request"
             .get("approval_policy")
             .and_then(toml::Value::as_str),
         Some("on-request")
+    );
+}
+
+#[test]
+fn layer_iterators_preserve_precedence_and_disabled_layers() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let user_source = ConfigLayerSource::User {
+        file: test_user_config_path(&temp_dir, "config.toml"),
+        profile: None,
+    };
+    let project_source = ConfigLayerSource::Project {
+        dot_codex_folder: test_user_config_path(&temp_dir, ".codex"),
+    };
+    let session_source = ConfigLayerSource::SessionFlags;
+    let empty_config = TomlValue::Table(toml::map::Map::new());
+    let stack = ConfigLayerStack::new(
+        vec![
+            ConfigLayerEntry::new(user_source.clone(), empty_config.clone()),
+            ConfigLayerEntry::new_disabled(
+                project_source.clone(),
+                empty_config.clone(),
+                "project is untrusted",
+            ),
+            ConfigLayerEntry::new(session_source.clone(), empty_config),
+        ],
+        ConfigRequirements::default(),
+        ConfigRequirementsToml::default(),
+    )
+    .expect("layer stack should be valid");
+
+    assert_eq!(
+        stack
+            .layers_low_to_high()
+            .map(|layer| &layer.name)
+            .collect::<Vec<_>>(),
+        vec![&user_source, &session_source]
+    );
+    assert_eq!(
+        stack
+            .layers_high_to_low()
+            .map(|layer| &layer.name)
+            .collect::<Vec<_>>(),
+        vec![&session_source, &user_source]
+    );
+    assert_eq!(
+        stack
+            .all_layers_low_to_high()
+            .map(|layer| &layer.name)
+            .collect::<Vec<_>>(),
+        vec![&user_source, &project_source, &session_source]
+    );
+    assert_eq!(
+        stack
+            .all_layers_high_to_low()
+            .map(|layer| &layer.name)
+            .collect::<Vec<_>>(),
+        vec![&session_source, &project_source, &user_source]
     );
 }
 

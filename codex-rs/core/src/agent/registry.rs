@@ -1,3 +1,4 @@
+use crate::agent::types::AgentMetadata;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
@@ -5,6 +6,7 @@ use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::TurnEnvironmentSelection;
 use rand::prelude::IndexedRandom;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -18,7 +20,7 @@ use std::sync::atomic::Ordering;
 /// the current implementation, it limits:
 /// * Total number of sub-agents (i.e. threads) per user session
 ///
-/// This structure is shared by all agents in the same user session (because the `AgentControl`
+/// This structure is shared by all agents in the same user session (because the `LocalAgentControl`
 /// is).
 #[derive(Default)]
 pub(crate) struct AgentRegistry {
@@ -29,17 +31,23 @@ pub(crate) struct AgentRegistry {
 #[derive(Default)]
 struct ActiveAgents {
     agent_tree: HashMap<String, AgentMetadata>,
-    thread_paths: HashMap<ThreadId, String>,
+    thread_paths: HashMap<ThreadId, RegisteredAgent>,
     used_agent_nicknames: HashSet<String>,
     nickname_reset_count: usize,
 }
 
-#[derive(Clone, Debug, Default)]
-pub(crate) struct AgentMetadata {
-    pub(crate) agent_id: Option<ThreadId>,
-    pub(crate) agent_path: Option<AgentPath>,
-    pub(crate) agent_nickname: Option<String>,
-    pub(crate) agent_role: Option<String>,
+struct RegisteredAgent {
+    path: String,
+    evicted_environments: Option<Vec<TurnEnvironmentSelection>>,
+}
+
+impl RegisteredAgent {
+    fn new(path: String) -> Self {
+        Self {
+            path,
+            evicted_environments: None,
+        }
+    }
 }
 
 fn format_agent_nickname(name: &str, nickname_reset_count: usize) -> String {
@@ -108,7 +116,7 @@ impl AgentRegistry {
             active_agents
                 .thread_paths
                 .remove(&thread_id)
-                .and_then(|key| active_agents.agent_tree.remove(key.as_str()))
+                .and_then(|agent| active_agents.agent_tree.remove(agent.path.as_str()))
                 .is_some_and(|metadata| {
                     !metadata.agent_path.as_ref().is_some_and(AgentPath::is_root)
                 })
@@ -134,7 +142,9 @@ impl AgentRegistry {
             })
             .agent_id;
         if let Some(root_thread_id) = root_thread_id {
-            active_agents.thread_paths.insert(root_thread_id, root_path);
+            active_agents
+                .thread_paths
+                .insert(root_thread_id, RegisteredAgent::new(root_path));
         }
     }
 
@@ -155,8 +165,46 @@ impl AgentRegistry {
         active_agents
             .thread_paths
             .get(&thread_id)
-            .and_then(|path| active_agents.agent_tree.get(path))
+            .and_then(|agent| active_agents.agent_tree.get(&agent.path))
             .cloned()
+    }
+
+    pub(crate) fn save_evicted_environments(
+        &self,
+        thread_id: ThreadId,
+        environments: Vec<TurnEnvironmentSelection>,
+    ) {
+        let mut active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(agent) = active_agents.thread_paths.get_mut(&thread_id) {
+            agent.evicted_environments = Some(environments);
+        }
+    }
+
+    pub(crate) fn evicted_environments(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<Vec<TurnEnvironmentSelection>> {
+        let active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        active_agents
+            .thread_paths
+            .get(&thread_id)
+            .and_then(|agent| agent.evicted_environments.clone())
+    }
+
+    pub(crate) fn clear_evicted_environments(&self, thread_id: ThreadId) {
+        let mut active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(agent) = active_agents.thread_paths.get_mut(&thread_id) {
+            agent.evicted_environments = None;
+        }
     }
 
     pub(crate) fn live_agents(&self) -> Vec<AgentMetadata> {
@@ -189,10 +237,14 @@ impl AgentRegistry {
         if let Some(agent_nickname) = agent_metadata.agent_nickname.clone() {
             active_agents.used_agent_nicknames.insert(agent_nickname);
         }
-        if let Some(previous_key) = active_agents.thread_paths.insert(thread_id, key.clone())
-            && previous_key != key
+        if let Some(previous_agent) = active_agents
+            .thread_paths
+            .insert(thread_id, RegisteredAgent::new(key.clone()))
+            && previous_agent.path != key
         {
-            active_agents.agent_tree.remove(previous_key.as_str());
+            active_agents
+                .agent_tree
+                .remove(previous_agent.path.as_str());
         }
         if let Some(previous_metadata) = active_agents.agent_tree.insert(key, agent_metadata)
             && let Some(previous_thread_id) = previous_metadata.agent_id
