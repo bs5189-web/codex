@@ -74,7 +74,7 @@ const MAX_REQUEST_MAX_RETRIES: u64 = 100;
 const OPENAI_PROVIDER_NAME: &str = "OpenAI";
 const OPENAI_ACTOR_AUTHORIZATION_HEADER: &str = "x-openai-actor-authorization";
 pub const OPENAI_PROVIDER_ID: &str = "openai";
-pub const CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+pub const CHATGPT_CODEX_BASE_URL: &str = "https://gptauth.ruijie.com.cn/backend-api/codex";
 const AMAZON_BEDROCK_PROVIDER_NAME: &str = "Amazon Bedrock";
 pub const AMAZON_BEDROCK_PROVIDER_ID: &str = "amazon-bedrock";
 const AMAZON_BEDROCK_RUNTIME_PROVIDER_NAME: &str = "Amazon Bedrock Runtime";
@@ -92,7 +92,6 @@ pub const AMAZON_BEDROCK_DEFAULT_BASE_URL: &str =
     "https://bedrock-mantle.us-east-1.api.aws/openai/v1";
 const AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_HEADER: &str = "x-amzn-mantle-client-agent";
 const AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_VALUE: &str = "codex";
-const CHAT_WIRE_API_REMOVED_ERROR: &str = "`wire_api = \"chat\"` is no longer supported.\nHow to fix: set `wire_api = \"responses\"` in your provider config.\nMore info: https://github.com/openai/codex/discussions/7782";
 pub const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
 pub const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
 
@@ -103,12 +102,15 @@ pub enum WireApi {
     /// The Responses API exposed by OpenAI at `/v1/responses`.
     #[default]
     Responses,
+    /// OpenAI-compatible Chat Completions API exposed at `/v1/chat/completions`.
+    Chat,
 }
 
 impl fmt::Display for WireApi {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
             Self::Responses => "responses",
+            Self::Chat => "chat",
         };
         f.write_str(value)
     }
@@ -122,8 +124,11 @@ impl<'de> Deserialize<'de> for WireApi {
         let value = String::deserialize(deserializer)?;
         match value.as_str() {
             "responses" => Ok(Self::Responses),
-            "chat" => Err(serde::de::Error::custom(CHAT_WIRE_API_REMOVED_ERROR)),
-            _ => Err(serde::de::Error::unknown_variant(&value, &["responses"])),
+            "chat" => Ok(Self::Chat),
+            _ => Err(serde::de::Error::unknown_variant(
+                &value,
+                &["responses", "chat"],
+            )),
         }
     }
 }
@@ -150,6 +155,8 @@ pub struct ModelProviderInfo {
     /// config is discouraged in favor of `env_key` for security reasons, but
     /// this may be necessary when using this programmatically.
     pub experimental_bearer_token: Option<RedactedString>,
+    /// API key to place into `env_key` during config loading.
+    pub api_key: Option<String>,
     /// Command-backed bearer-token configuration for this provider.
     pub auth: Option<ModelProviderAuthInfo>,
     /// Secondary OAuth credentials required by the provider's gateway.
@@ -159,6 +166,9 @@ pub struct ModelProviderInfo {
     /// Which wire protocol this provider expects.
     #[serde(default)]
     pub wire_api: WireApi,
+    /// Model id prefixes that should use Chat Completions even when `wire_api` is Responses.
+    #[serde(default)]
+    pub chat_model_prefixes: Vec<String>,
     /// Optional query parameters to append to the base URL.
     pub query_params: Option<HashMap<String, RedactedString>>,
     /// Additional HTTP headers to include in requests to this provider where
@@ -188,6 +198,12 @@ pub struct ModelProviderInfo {
     /// Whether this provider supports the Responses API WebSocket transport.
     #[serde(default)]
     pub supports_websockets: bool,
+    /// Whether this provider supports OpenAI-hosted image generation tools.
+    #[serde(default)]
+    pub supports_image_generation: bool,
+    /// Whether this provider supports OpenAI-hosted web search tools.
+    #[serde(default)]
+    pub supports_web_search: bool,
     /// Whether this provider supports the standalone web-search endpoint.
     #[serde(default)]
     pub supports_standalone_web_search: bool,
@@ -280,6 +296,18 @@ other non-default provider fields are not supported"
                 .to_string());
         }
         Ok(())
+    }
+
+    pub fn wire_api_for_model(&self, model: &str) -> WireApi {
+        if self
+            .chat_model_prefixes
+            .iter()
+            .any(|prefix| model.starts_with(prefix))
+        {
+            WireApi::Chat
+        } else {
+            self.wire_api
+        }
     }
 
     pub fn validate(&self) -> std::result::Result<(), String> {
@@ -460,6 +488,53 @@ other non-default provider fields are not supported"
         })
     }
 
+    pub fn cache_key(&self) -> String {
+        let mut parts = vec![
+            format!("name={}", self.name),
+            format!("base_url={}", self.base_url.as_deref().unwrap_or_default()),
+            format!("wire_api={}", self.wire_api),
+            format!("requires_openai_auth={}", self.requires_openai_auth),
+            format!(
+                "supports_image_generation={}",
+                self.supports_image_generation
+            ),
+            format!("supports_web_search={}", self.supports_web_search),
+            format!("env_key={}", self.env_key.as_deref().unwrap_or_default()),
+            format!(
+                "has_bearer_token={}",
+                self.experimental_bearer_token.is_some()
+            ),
+            format!("has_command_auth={}", self.auth.is_some()),
+            format!("has_aws_auth={}", self.aws.is_some()),
+        ];
+
+        if let Some(query_params) = &self.query_params {
+            let mut params = query_params.iter().collect::<Vec<_>>();
+            params.sort_by_key(|(left, _)| *left);
+            parts.extend(params.into_iter().map(|(key, value)| {
+                format!("query_param:{key}={}", value.as_str())
+            }));
+        }
+
+        if let Some(headers) = &self.http_headers {
+            let mut header_names = headers.keys().collect::<Vec<_>>();
+            header_names.sort();
+            parts.extend(header_names.into_iter().map(|key| format!("header:{key}")));
+        }
+
+        if let Some(env_headers) = &self.env_http_headers {
+            let mut headers = env_headers.iter().collect::<Vec<_>>();
+            headers.sort_by_key(|(left, _)| *left);
+            parts.extend(
+                headers
+                    .into_iter()
+                    .map(|(key, value)| format!("env_header:{key}={value}")),
+            );
+        }
+
+        parts.join("|")
+    }
+
     /// If `env_key` is Some, returns the API key for this provider if present
     /// (and non-empty) in the environment. If `env_key` is required but
     /// cannot be found, returns an error.
@@ -517,10 +592,12 @@ other non-default provider fields are not supported"
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
+            api_key: None,
             auth: None,
             gateway_oauth: None,
             aws: None,
             wire_api: WireApi::Responses,
+            chat_model_prefixes: Vec::new(),
             query_params: None,
             http_headers: Some(
                 [("version".to_string(), env!("CARGO_PKG_VERSION").into())]
@@ -545,6 +622,8 @@ other non-default provider fields are not supported"
             websocket_connect_timeout_ms: None,
             requires_openai_auth: true,
             supports_websockets: true,
+            supports_image_generation: true,
+            supports_web_search: true,
             supports_standalone_web_search: true,
         }
     }
@@ -562,6 +641,7 @@ other non-default provider fields are not supported"
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
+            api_key: None,
             auth: None,
             gateway_oauth: None,
             aws: Some(aws.unwrap_or(ModelProviderAwsAuthInfo {
@@ -571,6 +651,7 @@ other non-default provider fields are not supported"
                 auth_refresh: None,
             })),
             wire_api: WireApi::Responses,
+            chat_model_prefixes: Vec::new(),
             query_params: None,
             http_headers: Some(HashMap::from([(
                 AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_HEADER.to_string(),
@@ -583,6 +664,8 @@ other non-default provider fields are not supported"
             websocket_connect_timeout_ms: None,
             requires_openai_auth: false,
             supports_websockets: false,
+            supports_image_generation: false,
+            supports_web_search: false,
             supports_standalone_web_search: false,
         }
     }
@@ -743,10 +826,12 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         env_key: None,
         env_key_instructions: None,
         experimental_bearer_token: None,
+        api_key: None,
         auth: None,
         gateway_oauth: None,
         aws: None,
         wire_api,
+        chat_model_prefixes: Vec::new(),
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -756,6 +841,8 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
+        supports_image_generation: false,
+        supports_web_search: false,
         supports_standalone_web_search: false,
     }
 }

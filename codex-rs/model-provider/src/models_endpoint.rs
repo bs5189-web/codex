@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use codex_api::AgentIdentityTelemetry;
 use codex_api::ModelsClient;
+use codex_api::ModelsList;
 use codex_api::RequestTelemetry;
 use codex_api::ReqwestTransport;
 use codex_api::TransportError;
@@ -27,9 +28,11 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::manager::ModelsEndpointClient;
 use codex_models_manager::manager::ModelsEndpointFuture;
 use codex_models_manager::manager::ModelsEndpointResponse;
+use codex_models_manager::model_info::provider_model_info_from_slug;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CoreResult;
+use codex_protocol::openai_models::ModelInfo;
 use codex_response_debug_context::extract_response_debug_context;
 use codex_response_debug_context::telemetry_transport_error_message;
 use http::HeaderMap;
@@ -78,6 +81,14 @@ impl OpenAiModelsEndpoint {
             Some(auth_manager) => auth_manager.auth().await,
             None => None,
         }
+    }
+
+    fn auth_env(&self) -> AuthEnvTelemetry {
+        let codex_api_key_env_enabled = self
+            .auth_manager
+            .as_ref()
+            .is_some_and(|auth_manager| auth_manager.codex_api_key_env_enabled());
+        collect_auth_env_telemetry(&self.provider_info, codex_api_key_env_enabled)
     }
 
     async fn uses_codex_backend(&self) -> bool {
@@ -182,18 +193,26 @@ impl OpenAiModelsEndpoint {
         .await
         .map_err(|_| CodexErr::RequestTimeout)??;
         Ok(ModelsEndpointResponse {
-            models,
+            models: model_infos_from_response(models),
             etag,
             identity,
         })
     }
+}
 
-    fn auth_env(&self) -> AuthEnvTelemetry {
-        let codex_api_key_env_enabled = self
-            .auth_manager
-            .as_ref()
-            .is_some_and(|auth_manager| auth_manager.codex_api_key_env_enabled());
-        collect_auth_env_telemetry(&self.provider_info, codex_api_key_env_enabled)
+fn model_infos_from_response(models: ModelsList) -> Vec<ModelInfo> {
+    match models {
+        ModelsList::CodexCatalog(models) => models,
+        ModelsList::OpenAiCompatible(model_ids) => model_ids
+            .into_iter()
+            .enumerate()
+            .map(|(priority, model_id)| {
+                provider_model_info_from_slug(
+                    &model_id,
+                    i32::try_from(priority).unwrap_or(i32::MAX),
+                )
+            })
+            .collect(),
     }
 }
 
@@ -218,6 +237,14 @@ impl ModelsEndpointClient for OpenAiModelsEndpoint {
 
     fn has_command_auth(&self) -> bool {
         self.provider_info.has_command_auth()
+    }
+
+    fn provider_cache_key(&self) -> String {
+        self.provider_info.cache_key()
+    }
+
+    fn has_provider_models_endpoint(&self) -> bool {
+        self.provider_info.base_url.is_some()
     }
 
     fn uses_codex_backend(&self) -> ModelsEndpointFuture<'_, bool> {

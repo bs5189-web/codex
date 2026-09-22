@@ -5,13 +5,14 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
-import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.request import urlopen
 
+from .cache import package_cache_root
 from .targets import REPO_ROOT, TargetSpec
+
 
 DOWNLOAD_TIMEOUT_SECS = 120
 V8_ARTIFACT_PROFILE = "ptrcomp_sandbox_release"
@@ -60,7 +61,7 @@ def fetch_codex_v8_artifacts(
         f"https://github.com/openai/codex/releases/download/rusty-v8-v{version}"
     )
     target = spec.target
-    cache_dir = (cache_root or default_cache_root()) / f"rusty-v8-{version}-{target}"
+    cache_dir = package_cache_root(cache_root) / f"rusty-v8-{version}-{target}"
 
     if spec.is_windows:
         archive_name = f"rusty_v8_{V8_ARTIFACT_PROFILE}_{target}.lib.gz"
@@ -102,10 +103,6 @@ def resolved_v8_crate_version() -> str:
             f"Expected exactly one resolved v8 version, found: {versions}"
         )
     return versions[0]
-
-
-def default_cache_root() -> Path:
-    return Path(tempfile.gettempdir()) / "codex-package"
 
 
 def verify_release_checksum_manifest(checksums_path: Path, *, version: str) -> None:

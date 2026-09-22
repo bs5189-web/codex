@@ -618,7 +618,7 @@ impl AuthModeWidget {
             HyperlinkLine::new(Line::from("  Uses your plan's rate limits and ").dim());
         preferences_line.push_span(
             "training data preferences".underlined(),
-            Some("https://chatgpt.com/#settings"),
+            Some("https://gptauth.ruijie.com.cn/#settings"),
         );
 
         let lines = vec![
@@ -1318,7 +1318,7 @@ mod tests {
             SignInState::ChatGptDeviceCode(ContinueWithDeviceCodeState::ready(
                 "request-1".to_string(),
                 "login-1".to_string(),
-                "https://chatgpt.com/device".to_string(),
+                "https://gptauth.ruijie.com.cn/device".to_string(),
                 "ABCD-EFGH".to_string(),
             ));
 
@@ -1460,7 +1460,7 @@ mod tests {
             SignInState::ChatGptDeviceCode(ContinueWithDeviceCodeState::ready(
                 "request-1".to_string(),
                 "login-1".to_string(),
-                "https://chatgpt.com/device".to_string(),
+                "https://gptauth.ruijie.com.cn/device".to_string(),
                 "ABCD-EFGH".to_string(),
             ));
 
@@ -1485,7 +1485,7 @@ mod tests {
             SignInState::ChatGptDeviceCode(ContinueWithDeviceCodeState::ready(
                 "request-1".to_string(),
                 "login-1".to_string(),
-                "https://chatgpt.com/device".to_string(),
+                "https://gptauth.ruijie.com.cn/device".to_string(),
                 "ABCD-EFGH".to_string(),
             ));
 

@@ -29,7 +29,6 @@ use std::fs::OpenOptions;
 use std::io::IsTerminal;
 use std::io::Read;
 use std::path::Path;
-use std::path::PathBuf;
 use tracing_appender::non_blocking;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
@@ -119,6 +118,19 @@ fn print_login_server_start(actual_port: u16, auth_url: &str) {
     );
 }
 
+fn apply_login_issuer_config(
+    opts: &mut ServerOptions,
+    configured_login_base_url: Option<&str>,
+    issuer_base_url: Option<String>,
+) {
+    if let Some(issuer) = configured_login_base_url.filter(|issuer| !issuer.trim().is_empty()) {
+        opts.issuer = issuer.to_string();
+    }
+    if let Some(issuer) = issuer_base_url {
+        opts.issuer = issuer;
+    }
+}
+
 async fn clear_existing_auth_before_login(
     codex_home: &Path,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
@@ -137,29 +149,37 @@ async fn clear_existing_auth_before_login(
     }
 }
 
-pub async fn login_with_chatgpt(
-    codex_home: PathBuf,
-    forced_chatgpt_workspace_id: Option<Vec<String>>,
-    cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
-    auth_keyring_backend_kind: AuthKeyringBackendKind,
-    auth_route_config: AuthRouteConfig,
-) -> std::io::Result<()> {
+async fn login_server_options_from_config(
+    config: &Config,
+    issuer_base_url: Option<String>,
+    client_id: String,
+) -> ServerOptions {
+    let auth_route_config = config.auth_route_config();
     clear_existing_auth_before_login(
-        &codex_home,
-        cli_auth_credentials_store_mode,
-        auth_keyring_backend_kind,
+        &config.codex_home,
+        config.cli_auth_credentials_store_mode,
+        config.auth_keyring_backend_kind(),
         &auth_route_config,
     )
     .await;
 
-    let opts = ServerOptions::new(
-        codex_home,
-        CLIENT_ID.to_string(),
-        forced_chatgpt_workspace_id,
-        cli_auth_credentials_store_mode,
-        auth_keyring_backend_kind,
+    let mut opts = ServerOptions::new(
+        config.codex_home.to_path_buf(),
+        client_id,
+        config.forced_chatgpt_workspace_id.clone(),
+        config.cli_auth_credentials_store_mode,
+        config.auth_keyring_backend_kind(),
         auth_route_config,
     );
+    apply_login_issuer_config(
+        &mut opts,
+        config.chatgpt_login_base_url.as_deref(),
+        issuer_base_url,
+    );
+    opts
+}
+
+pub async fn login_with_chatgpt(opts: ServerOptions) -> std::io::Result<()> {
     let server = run_login_server(opts)?;
 
     print_login_server_start(server.actual_port, &server.auth_url);
@@ -180,16 +200,9 @@ pub async fn run_login_with_chatgpt(cli_config_overrides: CliConfigOverrides) ->
         std::process::exit(1);
     }
 
-    let effective_chatgpt_workspaces = config.auth_config().effective_chatgpt_workspaces();
-    match login_with_chatgpt(
-        config.codex_home.to_path_buf(),
-        effective_chatgpt_workspaces,
-        config.cli_auth_credentials_store_mode,
-        config.auth_keyring_backend_kind(),
-        config.auth_route_config(),
-    )
-    .await
-    {
+    let opts = login_server_options_from_config(&config, None, CLIENT_ID.to_string()).await;
+
+    match login_with_chatgpt(opts).await {
         Ok(_) => {
             eprintln!("{LOGIN_SUCCESS_MESSAGE}");
             std::process::exit(0);
@@ -331,26 +344,12 @@ pub async fn run_login_with_device_code(
         eprintln!("{CHATGPT_LOGIN_DISABLED_MESSAGE}");
         std::process::exit(1);
     }
-    let auth_route_config = config.auth_route_config();
-    clear_existing_auth_before_login(
-        &config.codex_home,
-        config.cli_auth_credentials_store_mode,
-        config.auth_keyring_backend_kind(),
-        &auth_route_config,
+    let opts = login_server_options_from_config(
+        &config,
+        issuer_base_url,
+        client_id.unwrap_or_else(|| CLIENT_ID.to_string()),
     )
     .await;
-    let effective_chatgpt_workspaces = config.auth_config().effective_chatgpt_workspaces();
-    let mut opts = ServerOptions::new(
-        config.codex_home.to_path_buf(),
-        client_id.unwrap_or(CLIENT_ID.to_string()),
-        effective_chatgpt_workspaces,
-        config.cli_auth_credentials_store_mode,
-        config.auth_keyring_backend_kind(),
-        auth_route_config,
-    );
-    if let Some(iss) = issuer_base_url {
-        opts.issuer = iss;
-    }
     match run_device_code_login(opts).await {
         Ok(()) => {
             eprintln!("{LOGIN_SUCCESS_MESSAGE}");
@@ -382,27 +381,12 @@ pub async fn run_login_with_device_code_fallback_to_browser(
         eprintln!("{CHATGPT_LOGIN_DISABLED_MESSAGE}");
         std::process::exit(1);
     }
-    let auth_route_config = config.auth_route_config();
-    clear_existing_auth_before_login(
-        &config.codex_home,
-        config.cli_auth_credentials_store_mode,
-        config.auth_keyring_backend_kind(),
-        &auth_route_config,
+    let mut opts = login_server_options_from_config(
+        &config,
+        issuer_base_url,
+        client_id.unwrap_or_else(|| CLIENT_ID.to_string()),
     )
     .await;
-
-    let effective_chatgpt_workspaces = config.auth_config().effective_chatgpt_workspaces();
-    let mut opts = ServerOptions::new(
-        config.codex_home.to_path_buf(),
-        client_id.unwrap_or(CLIENT_ID.to_string()),
-        effective_chatgpt_workspaces,
-        config.cli_auth_credentials_store_mode,
-        config.auth_keyring_backend_kind(),
-        auth_route_config,
-    );
-    if let Some(iss) = issuer_base_url {
-        opts.issuer = iss;
-    }
     opts.open_browser = false;
 
     match run_device_code_login(opts.clone()).await {
@@ -587,15 +571,17 @@ fn safe_format_key(key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::apply_login_issuer_config;
+    use super::clear_existing_auth_before_login;
+    use super::safe_format_key;
     use codex_config::types::AuthCredentialsStoreMode;
     use codex_login::AuthKeyringBackendKind;
+    use codex_login::ServerOptions;
     use codex_login::load_auth_dot_json;
     use codex_login::login_with_api_key;
     use pretty_assertions::assert_eq;
+    use tempfile::TempDir;
     use tempfile::tempdir;
-
-    use super::clear_existing_auth_before_login;
-    use super::safe_format_key;
 
     #[tokio::test]
     async fn clears_existing_auth_before_login() {
@@ -635,5 +621,43 @@ mod tests {
     fn short_key_returns_stars() {
         let key = "sk-proj-12345";
         assert_eq!(safe_format_key(key), "***");
+    }
+
+    #[test]
+    fn login_server_options_use_configured_chatgpt_login_base_url() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let mut opts = ServerOptions::new(
+            codex_home.path().to_path_buf(),
+            super::CLIENT_ID.to_string(),
+            None,
+            AuthCredentialsStoreMode::default(),
+            AuthKeyringBackendKind::default(),
+        );
+
+        apply_login_issuer_config(&mut opts, Some("http://localhost:3000"), None);
+
+        assert_eq!(opts.issuer, "http://localhost:3000");
+        Ok(())
+    }
+
+    #[test]
+    fn experimental_issuer_overrides_configured_chatgpt_login_base_url() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let mut opts = ServerOptions::new(
+            codex_home.path().to_path_buf(),
+            super::CLIENT_ID.to_string(),
+            None,
+            AuthCredentialsStoreMode::default(),
+            AuthKeyringBackendKind::default(),
+        );
+
+        apply_login_issuer_config(
+            &mut opts,
+            Some("http://localhost:3000"),
+            Some("http://localhost:4000".to_string()),
+        );
+
+        assert_eq!(opts.issuer, "http://localhost:4000");
+        Ok(())
     }
 }

@@ -13,6 +13,7 @@ def resolve_zsh_bin(
     spec: TargetSpec,
     manifest_path: Path | None = None,
     *,
+    cache_dir: Path | None = None,
     zsh_bin: Path | None = None,
 ) -> Path | None:
     if zsh_bin is not None:
@@ -24,5 +25,6 @@ def resolve_zsh_bin(
         artifact_label="codex-zsh",
         cache_key=f"{spec.target}-zsh",
         dest_name="zsh",
+        cache_root=cache_dir,
         missing_ok=True,
     )

@@ -65,10 +65,12 @@ mod tests {
             env_key: Some("sk-should-not-leak".to_string()),
             env_key_instructions: None,
             experimental_bearer_token: None,
+            api_key: None,
             auth: None,
             gateway_oauth: None,
             aws: None,
             wire_api: WireApi::Responses,
+            chat_model_prefixes: Vec::new(),
             query_params: None,
             http_headers: None,
             env_http_headers: None,
@@ -78,6 +80,8 @@ mod tests {
             websocket_connect_timeout_ms: None,
             requires_openai_auth: false,
             supports_websockets: false,
+            supports_image_generation: false,
+            supports_web_search: false,
             supports_standalone_web_search: false,
         };
 

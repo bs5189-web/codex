@@ -46,6 +46,18 @@ pub trait ModelsEndpointClient: fmt::Debug + Send + Sync {
     /// Returns whether this provider can authenticate command-scoped requests.
     fn has_command_auth(&self) -> bool;
 
+    /// Stable provider identity for deciding whether an on-disk model cache entry
+    /// belongs to this endpoint.
+    fn provider_cache_key(&self) -> String {
+        String::new()
+    }
+
+    /// Returns whether this endpoint should be queried for provider-owned model
+    /// discovery even when the current auth is not Codex backend auth.
+    fn has_provider_models_endpoint(&self) -> bool {
+        false
+    }
+
     /// Returns whether the currently resolved auth can use Codex backend-only models.
     fn uses_codex_backend(&self) -> ModelsEndpointFuture<'_, bool>;
 
@@ -566,6 +578,7 @@ impl OpenAiModelsManager {
         self.endpoint_client.uses_codex_backend().await
             || self.endpoint_client.has_command_auth()
             || self.supports_api_key_discovery()
+            || self.endpoint_client.has_provider_models_endpoint()
     }
 
     /// Publish only while the request identity still matches, including after async storage.
@@ -574,12 +587,13 @@ impl OpenAiModelsManager {
         if entry.identity != self.endpoint_client.identity() {
             return false;
         }
-        // Visible ChatGPT and OpenAI API-key catalogs are authoritative.
+        // Visible ChatGPT, OpenAI API-key, and provider-endpoint catalogs are authoritative.
         let remote_only = entry
             .models
             .iter()
             .any(|model| model.visibility == ModelVisibility::List)
             && (self.supports_api_key_discovery()
+                || self.endpoint_client.has_provider_models_endpoint()
                 || self.auth_manager.as_ref().is_some_and(|auth_manager| {
                     auth_manager
                         .auth_mode()

@@ -66,10 +66,12 @@ base_url = "http://localhost:11434/v1"
         env_key: None,
         env_key_instructions: None,
         experimental_bearer_token: None,
+        api_key: None,
         auth: None,
         gateway_oauth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_model_prefixes: Vec::new(),
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -79,6 +81,8 @@ base_url = "http://localhost:11434/v1"
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
+        supports_image_generation: false,
+        supports_web_search: false,
         supports_standalone_web_search: false,
     };
 
@@ -101,10 +105,12 @@ query_params = { api-version = "2025-04-01-preview" }
         env_key: Some("AZURE_OPENAI_API_KEY".into()),
         env_key_instructions: None,
         experimental_bearer_token: None,
+        api_key: None,
         auth: None,
         gateway_oauth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_model_prefixes: Vec::new(),
         query_params: Some(maplit::hashmap! {
             "api-version".to_string() => "2025-04-01-preview".into(),
         }),
@@ -116,6 +122,8 @@ query_params = { api-version = "2025-04-01-preview" }
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
+        supports_image_generation: false,
+        supports_web_search: false,
         supports_standalone_web_search: false,
     };
 
@@ -140,10 +148,12 @@ supports_standalone_web_search = true
         env_key: Some("API_KEY".into()),
         env_key_instructions: None,
         experimental_bearer_token: None,
+        api_key: None,
         auth: None,
         gateway_oauth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_model_prefixes: Vec::new(),
         query_params: None,
         http_headers: Some(maplit::hashmap! {
             "X-Example-Header".to_string() => "example-value".into(),
@@ -157,6 +167,8 @@ supports_standalone_web_search = true
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
+        supports_image_generation: false,
+        supports_web_search: false,
         supports_standalone_web_search: true,
     };
 
@@ -165,7 +177,7 @@ supports_standalone_web_search = true
 }
 
 #[test]
-fn test_deserialize_chat_wire_api_shows_helpful_error() {
+fn test_deserialize_chat_wire_api() {
     let provider_toml = r#"
 name = "OpenAI using Chat Completions"
 base_url = "https://api.openai.com/v1"
@@ -173,8 +185,27 @@ env_key = "OPENAI_API_KEY"
 wire_api = "chat"
         "#;
 
-    let err = toml::from_str::<ModelProviderInfo>(provider_toml).unwrap_err();
-    assert!(err.to_string().contains(CHAT_WIRE_API_REMOVED_ERROR));
+    let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
+    assert_eq!(provider.wire_api, WireApi::Chat);
+}
+
+#[test]
+fn test_wire_api_for_model_uses_chat_model_prefixes() {
+    let provider_toml = r#"
+name = "Mixed provider"
+base_url = "https://api.example.com/v1"
+wire_api = "responses"
+chat_model_prefixes = ["glm-", "legacy-chat"]
+        "#;
+
+    let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
+    assert_eq!(provider.wire_api_for_model("glm-5"), WireApi::Chat);
+    assert_eq!(provider.wire_api_for_model("glm-5.1"), WireApi::Chat);
+    assert_eq!(
+        provider.wire_api_for_model("legacy-chat-pro"),
+        WireApi::Chat
+    );
+    assert_eq!(provider.wire_api_for_model("gpt-5.4"), WireApi::Responses);
 }
 
 #[test]
@@ -324,6 +355,7 @@ fn test_create_amazon_bedrock_provider() {
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
+            api_key: None,
             auth: None,
             gateway_oauth: None,
             aws: Some(ModelProviderAwsAuthInfo {
@@ -333,6 +365,7 @@ fn test_create_amazon_bedrock_provider() {
                 auth_refresh: None,
             }),
             wire_api: WireApi::Responses,
+            chat_model_prefixes: Vec::new(),
             query_params: None,
             http_headers: Some(maplit::hashmap! {
                 AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_HEADER.to_string() =>
@@ -345,7 +378,9 @@ fn test_create_amazon_bedrock_provider() {
             websocket_connect_timeout_ms: None,
             requires_openai_auth: false,
             supports_websockets: false,
-            supports_standalone_web_search: false,
+            supports_image_generation: false,
+            supports_web_search: false,
+            supports_standalone_web_search: false
         }
     );
 }
@@ -644,6 +679,7 @@ fn test_merge_configured_model_providers_allows_amazon_bedrock_default_fields() 
                 auth_refresh: None,
             }),
             wire_api: WireApi::Responses,
+            chat_model_prefixes: Vec::new(),
             ..ModelProviderInfo::default()
         },
     )]);
@@ -668,6 +704,8 @@ fn test_validate_provider_aws_rejects_conflicting_auth() {
         }),
         env_key: Some("AWS_BEARER_TOKEN_BEDROCK".to_string()),
         supports_websockets: false,
+        supports_image_generation: false,
+        supports_web_search: false,
         ..ModelProviderInfo::create_openai_provider(/*base_url*/ None)
     };
 
@@ -688,6 +726,8 @@ fn test_validate_provider_aws_rejects_websockets() {
         }),
         requires_openai_auth: false,
         supports_websockets: true,
+        supports_image_generation: false,
+        supports_web_search: false,
         ..ModelProviderInfo::create_openai_provider(/*base_url*/ None)
     };
 

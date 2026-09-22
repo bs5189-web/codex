@@ -481,7 +481,7 @@ fn directory_app_to_app_info(app: DirectoryApp) -> AppInfo {
 
 fn connector_install_url(name: &str, connector_id: &str) -> String {
     let chatgpt_base_url = std::env::var("CODEX_APP_SERVER_CHATGPT_BASE_URL")
-        .unwrap_or_else(|_| "https://chatgpt.com".to_string());
+        .unwrap_or_else(|_| "https://gptauth.ruijie.com.cn".to_string());
     let chatgpt_origin = chatgpt_base_url
         .trim_end_matches('/')
         .trim_end_matches("/backend-api");
@@ -577,7 +577,7 @@ mod tests {
     #[test]
     fn connector_install_url_uses_configured_origin() {
         let chatgpt_base_url = std::env::var("CODEX_APP_SERVER_CHATGPT_BASE_URL")
-            .unwrap_or_else(|_| "https://chatgpt.com".to_string());
+            .unwrap_or_else(|_| "https://gptauth.ruijie.com.cn".to_string());
         let chatgpt_origin = chatgpt_base_url
             .trim_end_matches('/')
             .trim_end_matches("/backend-api");
@@ -746,7 +746,7 @@ mod tests {
         );
         assert_eq!(
             connectors[0].install_url.as_deref(),
-            Some("https://chatgpt.com/apps/alpha/alpha")
+            Some("https://gptauth.ruijie.com.cn/apps/alpha/alpha")
         );
         assert_eq!(
             connectors[0]

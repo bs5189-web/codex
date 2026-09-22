@@ -5,13 +5,13 @@ import json
 import shutil
 import stat
 import tarfile
-import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
+from .cache import package_cache_root
 from .targets import TargetSpec
 
 
@@ -34,6 +34,7 @@ def fetch_dotslash_executable(
     artifact_label: str,
     cache_key: str,
     dest_name: str,
+    cache_root: Path | None = None,
     missing_ok: bool = False,
 ) -> Path | None:
     artifact = artifact_for_target(
@@ -45,7 +46,7 @@ def fetch_dotslash_executable(
     if artifact is None:
         return None
 
-    cache_dir = default_cache_root() / cache_key
+    cache_dir = package_cache_root(cache_root) / cache_key
     archive_path = cache_dir / archive_filename(artifact.url)
 
     if not archive_is_valid(archive_path, artifact, artifact_label):
@@ -109,10 +110,6 @@ def load_manifest(manifest_path: Path) -> dict:
     if text.startswith("#!"):
         text = "\n".join(text.splitlines()[1:])
     return json.loads(text)
-
-
-def default_cache_root() -> Path:
-    return Path(tempfile.gettempdir()) / "codex-package"
 
 
 def archive_filename(url: str) -> str:

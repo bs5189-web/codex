@@ -1,0 +1,40 @@
+{
+  "items": [
+    {
+      "id": "global_mqewa9m0_254pgm",
+      "kind": "global",
+      "status": "pending",
+      "engine": "codex",
+      "model": "gpt-5.2-codex",
+      "startedAt": "2026-06-15T07:31:44.040Z",
+      "completedAt": null,
+      "scope": "global",
+      "requestScope": {
+        "kind": "global",
+        "lensIds": []
+      },
+      "generationIntent": "global",
+      "preferredLanguage": "zh",
+      "readSources": [],
+      "storageLocation": "project",
+      "ownership": {
+        "workspaceId": "cbfae264-7fbc-4332-b64b-d6ca34bcf77a",
+        "workspacePath": "/Users/tom/work/rj/ai/codex",
+        "storageKey": "codex-a4fe7af4",
+        "storageLocation": "global"
+      },
+      "writePath": "/Users/tom/work/rj/ai/codex/.ccgui/project-map/codex-a4fe7af4",
+      "phase": "queued",
+      "progress": 5,
+      "threadId": null,
+      "logs": [
+        {
+          "at": "2026-06-15T07:31:44.040Z",
+          "phase": "queued",
+          "message": "Generation request queued."
+        }
+      ],
+      "error": null
+    }
+  ]
+}

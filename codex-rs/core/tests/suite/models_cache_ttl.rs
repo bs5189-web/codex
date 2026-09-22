@@ -1,22 +1,14 @@
-use codex_core::TurnInputRequest;
-use core_test_support::test_codex::local_selections;
-use std::path::Path;
-use std::sync::Arc;
-
 use anyhow::Result;
 use chrono::DateTime;
 use chrono::TimeZone;
 use chrono::Utc;
 use codex_core::config::Constrained;
 use codex_login::CodexAuth;
+use codex_model_provider_info::built_in_model_providers;
 use codex_models_manager::client_version_to_whole;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::config_types::ApprovalsReviewer;
-use codex_protocol::config_types::CollaborationMode;
-use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::ReasoningSummary;
-use codex_protocol::config_types::Settings;
-use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelMessages;
@@ -27,9 +19,6 @@ use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::openai_models::TruncationPolicyConfig;
 use codex_protocol::openai_models::default_input_modalities;
 use codex_protocol::protocol::AskForApproval;
-use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::ThreadSettingsOverrides;
-use codex_protocol::user_input::UserInput;
 use core_test_support::responses;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -40,12 +29,11 @@ use core_test_support::responses::sse;
 use core_test_support::responses::sse_response;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
-use core_test_support::test_codex::turn_permission_fields;
-use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
+use std::path::Path;
 use wiremock::MockServer;
 
 const ETAG: &str = "\"models-etag-ttl\"";
@@ -156,31 +144,36 @@ async fn guardian_reused_reviewer_avoids_stale_catalog_lookup() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn renews_cache_ttl_on_matching_models_etag() -> Result<()> {
+async fn does_not_renew_cache_ttl_on_matching_models_etag() -> Result<()> {
     let server = MockServer::start().await;
+    let provider_cache_key = provider_cache_key_for_server(&server);
 
     let remote_model = test_remote_model(REMOTE_MODEL, /*priority*/ 1);
-    let models_mock = responses::mount_models_once_with_etag(
-        &server,
-        ModelsResponse {
-            models: vec![remote_model.clone()],
-        },
-        ETAG,
-    )
-    .await;
+    let models_mock =
+        responses::mount_models_once(&server, ModelsResponse { models: vec![] }).await;
 
     let mut builder = test_codex().with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing());
-    builder = builder.with_config(|config| {
-        config.model = Some("gpt-5.2".to_string());
-        config.model_provider.request_max_retries = Some(0);
-        config.model_provider.stream_max_retries = Some(1);
-    });
+    builder = builder
+        .with_pre_build_hook(move |home| {
+            let cache = ModelsCache {
+                fetched_at: Utc::now(),
+                etag: Some(ETAG.to_string()),
+                client_version: Some(client_version_to_whole()),
+                provider_cache_key: Some(provider_cache_key),
+                models: vec![remote_model],
+            };
+            let cache_path = home.join(CACHE_FILE);
+            write_cache_sync(&cache_path, &cache).expect("write cache");
+        })
+        .with_config(|config| {
+            config.model = Some("gpt-5.2".to_string());
+            config.model_provider.request_max_retries = Some(0);
+            config.model_provider.stream_max_retries = Some(1);
+        });
 
     let test = builder.build(&server).await?;
-    let codex = Arc::clone(&test.codex);
     let config = test.config.clone();
 
-    // Populate cache via initial refresh.
     let models_manager = test.thread_manager.get_models_manager();
     let _ = models_manager
         .list_models(
@@ -193,54 +186,19 @@ async fn renews_cache_ttl_on_matching_models_etag() -> Result<()> {
     let stale_time = Utc.timestamp_opt(0, 0).single().expect("valid epoch");
     rewrite_cache_timestamp(&cache_path, stale_time).await?;
 
-    // Trigger responses with matching ETag, which should renew the cache TTL without another /models.
-    let response_body = sse(vec![
-        ev_response_created("resp-1"),
-        ev_assistant_message("msg-1", "done"),
-        ev_completed("resp-1"),
-    ]);
-    let _responses_mock = responses::mount_response_once(
-        &server,
-        sse_response(response_body).insert_header("X-Models-Etag", ETAG),
-    )
-    .await;
-    let (sandbox_policy, permission_profile) =
-        turn_permission_fields(PermissionProfile::Disabled, test.cwd_path());
-
-    codex
-        .start_or_steer_turn(
-            TurnInputRequest::user_input(vec![UserInput::Text {
-                text: "hi".into(),
-                text_elements: Vec::new(),
-            }])
-            .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(test.config.cwd.clone())),
-                approval_policy: Some(codex_protocol::protocol::AskForApproval::Never),
-                sandbox_policy: Some(sandbox_policy),
-                permission_profile,
-                collaboration_mode: Some(CollaborationMode {
-                    mode: ModeKind::Default,
-                    settings: Settings {
-                        model: test.session_configured.model.clone(),
-                        reasoning_effort: None,
-                        developer_instructions: None,
-                    },
-                }),
-                ..Default::default()
-            }),
+    // Trigger the matching ETag path, which should not write to the cache.
+    models_manager
+        .refresh_if_new_etag(
+            ETAG.to_string(),
+            codex_core::test_support::default_http_client_factory(),
         )
-        .await?;
+        .await;
 
-    let _ = wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
-
-    let refreshed_cache = read_cache(&cache_path).await?;
-    assert!(
-        refreshed_cache.fetched_at > stale_time,
-        "cache TTL should be renewed"
-    );
+    let cache_after_turn = read_cache(&cache_path).await?;
+    assert_eq!(cache_after_turn.fetched_at, stale_time);
     assert_eq!(
         models_mock.requests().len(),
-        1,
+        0,
         "/models should not refetch on matching etag"
     );
 
@@ -256,7 +214,7 @@ async fn renews_cache_ttl_on_matching_models_etag() -> Result<()> {
         offline_models
             .iter()
             .any(|preset| preset.model == REMOTE_MODEL),
-        "offline listing should use renewed cache"
+        "offline listing should use cached models"
     );
 
     Ok(())
@@ -380,6 +338,7 @@ async fn matching_models_etag_renews_cache_after_half_its_lifetime() -> Result<(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn uses_cache_when_version_matches() -> Result<()> {
     let server = MockServer::start().await;
+    let provider_cache_key = provider_cache_key_for_server(&server);
     let cached_model = test_remote_model(VERSIONED_MODEL, /*priority*/ 1);
     let response = responses::mount_sse_once(
         &server,
@@ -411,6 +370,7 @@ async fn uses_cache_when_version_matches() -> Result<()> {
                 fetched_at: Utc::now(),
                 etag: None,
                 client_version: Some(client_version_to_whole()),
+                provider_cache_key: Some(provider_cache_key),
                 models: vec![cached_model],
             })
             .expect("serialize cache");
@@ -460,6 +420,7 @@ async fn uses_cache_when_version_matches() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn refreshes_when_cache_version_missing() -> Result<()> {
     let server = MockServer::start().await;
+    let provider_cache_key = provider_cache_key_for_server(&server);
     let cached_model = test_remote_model(MISSING_VERSION_MODEL, /*priority*/ 1);
     let models_mock = responses::mount_models_once(
         &server,
@@ -486,6 +447,7 @@ async fn refreshes_when_cache_version_missing() -> Result<()> {
                 fetched_at: Utc::now(),
                 etag: None,
                 client_version: None,
+                provider_cache_key: Some(provider_cache_key),
                 models: vec![cached_model],
             };
             let cache_path = home.join(CACHE_FILE);
@@ -520,6 +482,7 @@ async fn refreshes_when_cache_version_missing() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn refreshes_when_cache_version_differs() -> Result<()> {
     let server = MockServer::start().await;
+    let provider_cache_key = provider_cache_key_for_server(&server);
     let cached_model = test_remote_model(DIFFERENT_VERSION_MODEL, /*priority*/ 1);
     let models_response = ModelsResponse {
         models: vec![test_remote_model("remote-different", /*priority*/ 2)],
@@ -547,6 +510,7 @@ async fn refreshes_when_cache_version_differs() -> Result<()> {
                 fetched_at: Utc::now(),
                 etag: None,
                 client_version: Some(format!("{client_version}-diff")),
+                provider_cache_key: Some(provider_cache_key),
                 models: vec![cached_model],
             };
             let cache_path = home.join(CACHE_FILE);
@@ -605,6 +569,15 @@ fn write_cache_sync(path: &Path, cache: &ModelsCache) -> Result<()> {
     Ok(())
 }
 
+fn provider_cache_key_for_server(server: &MockServer) -> String {
+    let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
+    provider.base_url = Some(format!("{}/v1", server.uri()));
+    provider.supports_image_generation = false;
+    provider.supports_web_search = false;
+    provider.supports_websockets = false;
+    provider.cache_key()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ModelsCache {
     #[serde(default)]
@@ -614,6 +587,8 @@ struct ModelsCache {
     etag: Option<String>,
     #[serde(default)]
     client_version: Option<String>,
+    #[serde(default)]
+    provider_cache_key: Option<String>,
     models: Vec<ModelInfo>,
 }
 

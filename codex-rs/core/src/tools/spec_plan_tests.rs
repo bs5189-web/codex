@@ -328,6 +328,20 @@ fn use_bedrock_provider(turn: &mut TurnContext) {
     turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
 }
 
+fn use_custom_provider(turn: &mut TurnContext) {
+    let provider_info = ModelProviderInfo {
+        name: "DeepSeek".to_string(),
+        base_url: Some("https://api.deepseek.example/v1".to_string()),
+        requires_openai_auth: true,
+        ..Default::default()
+    };
+    update_config(turn, |config| {
+        config.model_provider_id = "deepseek".to_string();
+        config.model_provider = provider_info.clone();
+    });
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+}
+
 struct TestNamespaceExtensionTool {
     namespace: &'static str,
     tool_name: &'static str,
@@ -3279,6 +3293,15 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
     .await;
     unsupported_provider.assert_visible_lacks(&["image_gen"]);
 
+    let custom_provider_image_generation = probe(|turn| {
+        use_chatgpt_auth(turn);
+        use_custom_provider(turn);
+        set_feature(turn, Feature::ImageGeneration, /*enabled*/ true);
+        turn.model_info.input_modalities = vec![InputModality::Image];
+    })
+    .await;
+    custom_provider_image_generation.assert_visible_lacks(&["image_generation"]);
+
     let live_web_search = probe(|turn| {
         set_web_search_mode(turn, WebSearchMode::Live);
         update_turn_settings_for_test(turn, |settings| {
@@ -3410,4 +3433,13 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
     .await;
     bedrock_with_standalone_web_search.assert_visible_contains(&["web_search"]);
     bedrock_with_standalone_web_search.assert_visible_lacks(&["web"]);
+
+    unsupported_provider.assert_visible_lacks(&["web_search"]);
+
+    let custom_provider_web_search = probe(|turn| {
+        set_web_search_mode(turn, WebSearchMode::Live);
+        use_custom_provider(turn);
+    })
+    .await;
+    custom_provider_web_search.assert_visible_lacks(&["web_search"]);
 }

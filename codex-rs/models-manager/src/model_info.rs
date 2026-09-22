@@ -1,6 +1,7 @@
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::openai_models::ConfigShellToolType;
+use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelMessages;
 use codex_protocol::openai_models::ModelVisibility;
@@ -98,6 +99,22 @@ fn is_h1_heading(line: &str) -> bool {
 /// Build a minimal fallback model descriptor for missing/unknown slugs.
 pub fn model_info_from_slug(slug: &str) -> ModelInfo {
     warn!("Unknown model {slug} is used. This will use fallback model metadata.");
+    model_info_from_slug_with_visibility(slug, ModelVisibility::None, /*priority*/ 99)
+}
+
+/// Build minimal model metadata for a model returned by a provider-owned
+/// OpenAI-compatible `/models` endpoint.
+pub fn provider_model_info_from_slug(slug: &str, priority: i32) -> ModelInfo {
+    let mut model = model_info_from_slug_with_visibility(slug, ModelVisibility::List, priority);
+    model.input_modalities = vec![InputModality::Text];
+    model
+}
+
+fn model_info_from_slug_with_visibility(
+    slug: &str,
+    visibility: ModelVisibility,
+    priority: i32,
+) -> ModelInfo {
     ModelInfo {
         slug: slug.to_string(),
         display_name: slug.to_string(),
@@ -105,9 +122,9 @@ pub fn model_info_from_slug(slug: &str) -> ModelInfo {
         default_reasoning_level: None,
         supported_reasoning_levels: Vec::new(),
         shell_type: ConfigShellToolType::UnifiedExec,
-        visibility: ModelVisibility::None,
+        visibility,
         supported_in_api: true,
-        priority: 99,
+        priority,
         additional_speed_tiers: Vec::new(),
         service_tiers: Vec::new(),
         default_service_tier: None,

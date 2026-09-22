@@ -598,6 +598,7 @@ mod thread_processor_behavior_tests {
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
+            api_key: None,
             auth: None,
             gateway_oauth: None,
             aws: None,
@@ -611,6 +612,8 @@ mod thread_processor_behavior_tests {
             websocket_connect_timeout_ms: None,
             requires_openai_auth: false,
             supports_websockets: true,
+            supports_image_generation: false,
+            supports_web_search: false,
             supports_standalone_web_search: false,
         };
         let config_manager = ConfigManager::new(

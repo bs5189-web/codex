@@ -825,7 +825,7 @@ async fn status_uses_server_provider_id_and_auth_requirement() {
         .collect();
     assert_eq!(
         wide_destinations,
-        vec!["https://chatgpt.com/codex/settings/usage"]
+        vec!["https://gptauth.ruijie.com.cn/codex/settings/usage"]
     );
 
     let narrow_destinations: Vec<String> = composite

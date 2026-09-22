@@ -7,6 +7,7 @@ use codex_protocol::openai_models::AutoReviewMessages;
 use codex_protocol::openai_models::CollaborationModeMessages;
 use codex_protocol::openai_models::ConfirmationPolicies;
 use codex_protocol::openai_models::GuardianV2ModelConfig;
+use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelInstructionsVariables;
 use codex_protocol::openai_models::ModelTokenBudgetConfig;
 use codex_protocol::openai_models::MultiAgentMessages;
@@ -23,6 +24,13 @@ fn config_with_personality(personality: Option<Personality>) -> ModelsManagerCon
         personality,
         ..Default::default()
     }
+}
+
+#[test]
+fn provider_model_info_from_slug_uses_text_only_input_modalities() {
+    let model = provider_model_info_from_slug("provider-model", /*priority*/ 0);
+
+    assert_eq!(model.input_modalities, vec![InputModality::Text]);
 }
 
 #[test]

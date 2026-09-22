@@ -1107,10 +1107,13 @@ mod tests {
             "https://example.test/api/codex/accounts/send_add_credits_nudge_email"
         );
 
-        let chatgpt_client = test_client("https://chatgpt.com/backend-api", PathStyle::ChatGptApi);
+        let chatgpt_client = test_client(
+            "https://gptauth.ruijie.com.cn/backend-api",
+            PathStyle::ChatGptApi,
+        );
         assert_eq!(
             chatgpt_client.send_add_credits_nudge_email_url(),
-            "https://chatgpt.com/backend-api/wham/accounts/send_add_credits_nudge_email"
+            "https://gptauth.ruijie.com.cn/backend-api/wham/accounts/send_add_credits_nudge_email"
         );
 
         assert_eq!(

@@ -583,6 +583,13 @@ impl AccountRequestProcessor {
                 config.auth_route_config(),
             )
         };
+        if let Some(issuer) = config
+            .chatgpt_login_base_url
+            .as_deref()
+            .filter(|issuer| !issuer.trim().is_empty())
+        {
+            opts.issuer = issuer.to_string();
+        }
         if let Ok(issuer) = std::env::var(LOGIN_ISSUER_OVERRIDE_ENV_VAR)
             && !issuer.trim().is_empty()
         {

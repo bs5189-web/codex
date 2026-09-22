@@ -993,6 +993,9 @@ pub struct Config {
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: String,
 
+    /// Base URL for ChatGPT OAuth login.
+    pub chatgpt_login_base_url: Option<String>,
+
     /// Whether Codex-owned clients should respect host system proxy settings.
     pub respect_system_proxy: bool,
 
@@ -2633,6 +2636,21 @@ pub fn resolve_oss_provider(
     }
 }
 
+fn set_model_provider_api_key_env(model_provider: &ModelProviderInfo) {
+    let (Some(env_key), Some(api_key)) = (&model_provider.env_key, &model_provider.api_key) else {
+        return;
+    };
+    if env_key.trim().is_empty() || api_key.trim().is_empty() {
+        return;
+    }
+
+    // SAFETY: config loading happens during startup before Codex starts worker
+    // threads that may read the provider environment.
+    unsafe {
+        std::env::set_var(env_key, api_key);
+    }
+}
+
 /// Resolve the web search mode from explicit config and feature flags.
 fn resolve_web_search_mode(config_toml: &ConfigToml, features: &Features) -> Option<WebSearchMode> {
     if let Some(mode) = config_toml.web_search {
@@ -3756,6 +3774,7 @@ impl Config {
                 std::io::Error::new(std::io::ErrorKind::NotFound, message)
             })?
             .clone();
+        set_model_provider_api_key_env(&model_provider);
 
         let shell_environment_policy = ShellEnvironmentPolicy::from(cfg.shell_environment_policy);
         let allow_login_shell = cfg.allow_login_shell.unwrap_or(true);
@@ -4316,7 +4335,10 @@ impl Config {
             model_verbosity: cfg.model_verbosity,
             chatgpt_base_url: cfg
                 .chatgpt_base_url
-                .unwrap_or("https://chatgpt.com/backend-api/".to_string()),
+                .unwrap_or("https://gptauth.ruijie.com.cn/backend-api/".to_string()),
+            chatgpt_login_base_url: cfg
+                .chatgpt_login_base_url
+                .filter(|url| !url.trim().is_empty()),
             respect_system_proxy,
             apps_mcp_product_sku: cfg.apps_mcp_product_sku.clone(),
             responses_api_metadata: cfg.responses_api_metadata.unwrap_or_default(),

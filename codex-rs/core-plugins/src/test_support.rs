@@ -495,7 +495,7 @@ pub(crate) async fn load_plugins_config(codex_home: &Path, cwd: &Path) -> Plugin
             "remote_plugin",
             /*default_enabled*/ true,
         ),
-        "https://chatgpt.com/backend-api/".to_string(),
+        "https://gptauth.ruijie.com.cn/backend-api/".to_string(),
         test_http_client_factory(),
     )
 }

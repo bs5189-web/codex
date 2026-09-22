@@ -1,3 +1,5 @@
+use crate::DEFAULT_AGENTS_MD_FILENAME;
+use crate::LOCAL_AGENTS_MD_FILENAME;
 use crate::config::edit::ConfigEdit;
 use crate::config::edit::ConfigEditsBuilder;
 use crate::config::edit::apply_blocking;
@@ -120,6 +122,7 @@ use rmcp::model::UrlElicitationCapability;
 use codex_config::test_support::CloudConfigBundleFixture;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -181,6 +184,34 @@ fn http_mcp(url: &str) -> McpServerConfig {
         oauth: None,
         oauth_resource: None,
         tools: HashMap::new(),
+    }
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn unset(key: &'static str) -> Self {
+        let original = std::env::var_os(key);
+        // SAFETY: callers use a serial_test lock while mutating process environment.
+        unsafe {
+            std::env::remove_var(key);
+        }
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        // SAFETY: the guard restores the original environment value while the serial lock is held.
+        unsafe {
+            match &self.original {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
     }
 }
 
@@ -246,7 +277,6 @@ async fn load_config_applies_optional_mcp_startup_grace() -> std::io::Result<()>
     );
     Ok(())
 }
-
 #[tokio::test]
 async fn load_config_resolves_thread_unload_delay() -> anyhow::Result<()> {
     let codex_home = tempdir()?;
@@ -265,7 +295,6 @@ async fn load_config_resolves_thread_unload_delay() -> anyhow::Result<()> {
     }
     Ok(())
 }
-
 #[tokio::test]
 async fn load_config_rejects_thread_unload_delay_overflow() -> anyhow::Result<()> {
     let codex_home = tempdir()?;
@@ -281,6 +310,87 @@ async fn load_config_rejects_thread_unload_delay_overflow() -> anyhow::Result<()
     .expect_err("idle timeout must fit in a monotonic deadline");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     assert_eq!(error.to_string(), "thread_unload_delay_secs is too large");
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_reads_chatgpt_login_base_url() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            chatgpt_login_base_url: Some("http://localhost:3000".to_string()),
+            ..Default::default()
+        },
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.chatgpt_login_base_url.as_deref(),
+        Some("http://localhost:3000")
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn load_config_ignores_empty_chatgpt_login_base_url() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            chatgpt_login_base_url: Some("  ".to_string()),
+            ..Default::default()
+        },
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.chatgpt_login_base_url, None);
+    Ok(())
+}
+#[tokio::test]
+async fn load_config_loads_global_agents_instructions() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    std::fs::write(
+        codex_home.path().join(DEFAULT_AGENTS_MD_FILENAME),
+        "\n  global instructions  \n",
+    )?;
+
+    let mut config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+    let _ = config.features.enable(Feature::MemoryTool);
+
+    assert_eq!(
+        config.base_instructions.as_deref(),
+        Some("global instructions")
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn load_config_prefers_global_agents_override_instructions() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    std::fs::write(
+        codex_home.path().join(DEFAULT_AGENTS_MD_FILENAME),
+        "global instructions",
+    )?;
+    let global_agents_override_path = codex_home.path().join(LOCAL_AGENTS_MD_FILENAME);
+    std::fs::write(&global_agents_override_path, "local override instructions")?;
+
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.base_instructions.as_deref(),
+        Some("local override instructions")
+    );
     Ok(())
 }
 
@@ -727,8 +837,6 @@ use_history_notes_extension = true
 reminder_threshold_tokens = 16000
 reminder_message_template = "Custom reminder: {n_remaining} tokens."
 guidance_message = "Preserve important state before compaction."
-auto_compact_fallback_prompt = "  Write notes immediately.  "
-auto_compact_fallback_buffer_tokens = 8000
 "#,
             Some(TokenBudgetConfig {
                 use_history_notes_extension: true,
@@ -758,26 +866,6 @@ auto_compact_fallback_buffer_tokens = 8000
         }
         assert_eq!(config.token_budget, expected);
     }
-    Ok(())
-}
-
-#[tokio::test]
-async fn load_config_rejects_overlong_auto_compact_fallback_prompt() -> std::io::Result<()> {
-    let codex_home = tempdir()?;
-    let prompt = "x".repeat(AUTO_COMPACT_FALLBACK_PROMPT_MAX_BYTES + 1);
-    let config_toml = toml::from_str(&format!(
-        "[features.token_budget]\nenabled = true\nauto_compact_fallback_prompt = {prompt:?}\n"
-    ))
-    .expect("TOML should deserialize");
-    let error = Config::load_from_base_config_with_overrides(
-        config_toml,
-        ConfigOverrides::default(),
-        codex_home.abs(),
-    )
-    .await
-    .expect_err("overlong fallback prompt should be rejected");
-
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     Ok(())
 }
 
@@ -827,55 +915,6 @@ async fn load_config_rejects_non_positive_token_budget_reminder_threshold() -> s
             "features.token_budget.reminder_threshold_tokens must be positive"
         );
     }
-    Ok(())
-}
-
-#[tokio::test]
-async fn load_config_rejects_non_positive_auto_compact_fallback_buffer() -> std::io::Result<()> {
-    for auto_compact_fallback_buffer_tokens in [-1, 0] {
-        let codex_home = tempdir()?;
-        let config_toml = toml::from_str(&format!(
-            "[features.token_budget]\nenabled = true\nauto_compact_fallback_prompt = \"Write notes.\"\nauto_compact_fallback_buffer_tokens = {auto_compact_fallback_buffer_tokens}\n"
-        ))
-        .expect("TOML should deserialize");
-        let error = Config::load_from_base_config_with_overrides(
-            config_toml,
-            ConfigOverrides::default(),
-            codex_home.abs(),
-        )
-        .await
-        .expect_err("non-positive fallback buffer should be rejected");
-
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert_eq!(
-            error.to_string(),
-            "features.token_budget.auto_compact_fallback_buffer_tokens must be positive"
-        );
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn load_config_rejects_missing_auto_compact_fallback_buffer() -> std::io::Result<()> {
-    let codex_home = tempdir()?;
-    let config_toml = toml::from_str(
-        "[features.token_budget]\nenabled = true\nauto_compact_fallback_prompt = \"Write notes.\"\n",
-    )
-    .expect("TOML should deserialize");
-
-    let error = Config::load_from_base_config_with_overrides(
-        config_toml,
-        ConfigOverrides::default(),
-        codex_home.abs(),
-    )
-    .await
-    .expect_err("missing fallback buffer should be rejected");
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-    assert_eq!(
-        error.to_string(),
-        "features.token_budget.auto_compact_fallback_buffer_tokens is required when auto_compact_fallback_prompt is set"
-    );
-
     Ok(())
 }
 
@@ -1173,6 +1212,41 @@ region = "us-west-2"
 }
 
 #[tokio::test]
+#[serial_test::serial(ruijie_uniapi_env)]
+async fn load_config_sets_ruijie_uniapi_env_from_config_api_key() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let _env_guard = EnvVarGuard::unset("CUSTOM_RUIJIE_UNIAPI_KEY");
+    let cfg: ConfigToml = toml::from_str(
+        r#"
+model_provider = "ruijie-uniapi"
+
+[model_providers.ruijie-uniapi]
+name = "ruijie-uniapi"
+env_key = "CUSTOM_RUIJIE_UNIAPI_KEY"
+base_url = "https://gptauth.ruijie.com.cn/v1"
+wire_api = "responses"
+requires_openai_auth = true
+api_key = "configured-token"
+"#,
+    )
+    .expect("ruijie provider config should parse");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, "ruijie-uniapi");
+    assert_eq!(
+        std::env::var("CUSTOM_RUIJIE_UNIAPI_KEY").ok().as_deref(),
+        Some("configured-token")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_config_applies_amazon_bedrock_transport_overrides() {
     let cfg = toml::from_str::<ConfigToml>(
         r#"
@@ -1227,8 +1301,13 @@ model_provider = "amazon-bedrock"
 
 [model_providers.amazon-bedrock]
 name = "Custom Bedrock"
+base_url = "https://bedrock.example.com/v1"
 requires_openai_auth = true
 supports_websockets = true
+
+[model_providers.amazon-bedrock.aws]
+profile = "codex-bedrock"
+region = "us-west-2"
 "#,
     )
     .expect_err("Amazon Bedrock unsupported overrides should fail validation");
@@ -1598,16 +1677,16 @@ fn permissions_profile_network_to_proxy_config_preserves_mitm_hooks() {
 
     let config = network.to_network_proxy_config();
 
-    assert_eq!(config.mode, NetworkMode::Full);
-    assert!(config.mitm);
-    assert_eq!(config.mitm_hooks.len(), 1);
-    assert_eq!(config.mitm_hooks[0].host, "api.github.com");
+    assert_eq!(config.network.mode, NetworkMode::Full);
+    assert!(config.network.mitm);
+    assert_eq!(config.network.mitm_hooks.len(), 1);
+    assert_eq!(config.network.mitm_hooks[0].host, "api.github.com");
     assert_eq!(
-        config.mitm_hooks[0].matcher.methods,
+        config.network.mitm_hooks[0].matcher.methods,
         vec!["POST".to_string()]
     );
     assert_eq!(
-        config.mitm_hooks[0].actions.strip_request_headers,
+        config.network.mitm_hooks[0].actions.strip_request_headers,
         vec!["authorization".to_string()]
     );
 }
@@ -1644,13 +1723,13 @@ action = ["noop"]
 
     let config = network.to_network_proxy_config();
 
-    assert_eq!(config.mitm_hooks.len(), 2);
+    assert_eq!(config.network.mitm_hooks.len(), 2);
     assert_eq!(
-        config.mitm_hooks[0].matcher.path_prefixes,
+        config.network.mitm_hooks[0].matcher.path_prefixes,
         vec!["/repos/openai/".to_string()]
     );
     assert_eq!(
-        config.mitm_hooks[1].matcher.path_prefixes,
+        config.network.mitm_hooks[1].matcher.path_prefixes,
         vec!["/repos/".to_string()]
     );
 }
@@ -8523,11 +8602,8 @@ async fn load_config_rejects_missing_agent_role_config_file() -> std::io::Result
     let missing_path = codex_home.path().join("agents").join("researcher.toml");
     let cfg = ConfigToml {
         agents: Some(AgentsToml {
-            enabled: None,
-            max_concurrent_threads_per_session: None,
+            max_threads: None,
             max_depth: None,
-            default_subagent_model: None,
-            default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
             roles: BTreeMap::from([(
@@ -9471,14 +9547,10 @@ job_max_runtime_seconds = 900
 }
 
 #[tokio::test]
-async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
+async fn load_config_resolves_agent_interrupt_message() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml {
         agents: Some(AgentsToml {
-            enabled: Some(false),
-            max_depth: Some(2),
-            default_subagent_model: Some("gpt-5.6-terra".to_string()),
-            default_subagent_reasoning_effort: Some(ReasoningEffort::High),
             interrupt_message: Some(false),
             ..Default::default()
         }),
@@ -9492,45 +9564,9 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
     )
     .await?;
 
-    assert_eq!(
-        (
-            config.agents_enabled,
-            config.agent_max_depth,
-            config.agent_default_subagent_model.as_deref(),
-            config.agent_default_subagent_reasoning_effort,
-            config.agent_interrupt_message_enabled,
-        ),
-        (
-            false,
-            2,
-            Some("gpt-5.6-terra"),
-            Some(ReasoningEffort::High),
-            false,
-        )
-    );
+    assert!(!config.agent_interrupt_message_enabled);
 
     Ok(())
-}
-
-#[test]
-fn agents_max_threads_alias_matches_canonical_config() {
-    let canonical: ConfigToml = toml::from_str(
-        r#"[agents]
-max_concurrent_threads_per_session = 7
-"#,
-    )
-    .expect("canonical agents thread limit should parse");
-    let legacy: ConfigToml = toml::from_str(
-        r#"[agents]
-max_threads = 7
-"#,
-    )
-    .expect("legacy agents thread limit should parse");
-
-    assert_eq!(legacy, canonical);
-    let serialized = toml::to_string(&legacy).expect("agents config should serialize");
-    assert!(serialized.contains("max_concurrent_threads_per_session = 7"));
-    assert!(!serialized.contains("max_threads"));
 }
 
 #[tokio::test]
@@ -9538,11 +9574,8 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml {
         agents: Some(AgentsToml {
-            enabled: None,
-            max_concurrent_threads_per_session: None,
+            max_threads: None,
             max_depth: None,
-            default_subagent_model: None,
-            default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
             roles: BTreeMap::from([(
@@ -9584,11 +9617,8 @@ async fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml {
         agents: Some(AgentsToml {
-            enabled: None,
-            max_concurrent_threads_per_session: None,
+            max_threads: None,
             max_depth: None,
-            default_subagent_model: None,
-            default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
             roles: BTreeMap::from([(
@@ -9624,11 +9654,8 @@ async fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml {
         agents: Some(AgentsToml {
-            enabled: None,
-            max_concurrent_threads_per_session: None,
+            max_threads: None,
             max_depth: None,
-            default_subagent_model: None,
-            default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
             roles: BTreeMap::from([(
@@ -9664,11 +9691,8 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml {
         agents: Some(AgentsToml {
-            enabled: None,
-            max_concurrent_threads_per_session: None,
+            max_threads: None,
             max_depth: None,
-            default_subagent_model: None,
-            default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
             roles: BTreeMap::from([(
@@ -11857,9 +11881,6 @@ hide_spawn_agent_metadata = true
 expose_spawn_agent_model_overrides = false
 wait_agent_enabled = false
 non_code_mode_only = true
-
-[agents]
-max_concurrent_threads_per_session = 9
 "#,
     )?;
 
@@ -11879,7 +11900,7 @@ max_concurrent_threads_per_session = 9
             config.agent_max_threads,
             config.effective_agent_max_threads(MultiAgentVersion::V2)
         ),
-        (Some(9), Some(4))
+        (None, Some(4))
     );
     assert_eq!(
         config.multi_agent_v2.usage_hint_text.as_deref(),
@@ -11932,10 +11953,7 @@ enabled = true
         .build()
         .await?;
 
-    assert_eq!(
-        config.multi_agent_v2,
-        resolve_multi_agent_v2_config(&ConfigToml::default())
-    );
+    assert_eq!(config.multi_agent_v2, MultiAgentV2Config::default());
     assert_eq!(
         (
             config.agent_max_threads,
@@ -12128,7 +12146,7 @@ subagent_developer_instructions = "  \t  "
     let expected = MultiAgentV2Config {
         subagent_developer_instructions: Some(String::new()),
         multi_agent_mode_hint_text: Some(String::new()),
-        ..resolve_multi_agent_v2_config(&ConfigToml::default())
+        ..Default::default()
     };
     assert_eq!(resolve_multi_agent_v2_config(&config_toml), expected);
 }
@@ -12173,7 +12191,7 @@ subagent_usage_hint_text = ""
 }
 
 #[tokio::test]
-async fn multi_agent_v2_uses_agents_max_concurrent_threads_per_session() -> std::io::Result<()> {
+async fn multi_agent_v2_feature_rejects_agents_max_threads() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     std::fs::write(
         codex_home.path().join(CONFIG_TOML_FILE),
@@ -12181,7 +12199,7 @@ async fn multi_agent_v2_uses_agents_max_concurrent_threads_per_session() -> std:
 enabled = true
 
 [agents]
-max_concurrent_threads_per_session = 7
+max_threads = 3
 "#,
     )?;
 
@@ -12190,19 +12208,25 @@ max_concurrent_threads_per_session = 7
         .fallback_cwd(Some(codex_home.path().to_path_buf()))
         .build()
         .await?;
+    let err = config
+        .validate_multi_agent_v2_config()
+        .expect_err("agents.max_threads should conflict with multi_agent_v2");
+
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     assert_eq!(
-        (
-            config.multi_agent_v2.max_concurrent_threads_per_session,
-            config.effective_agent_max_threads(MultiAgentVersion::V2),
-        ),
-        (8, Some(7))
+        err.to_string(),
+        "agents.max_threads cannot be set when features.multi_agent_v2 is enabled"
+    );
+    assert_eq!(
+        config.effective_agent_max_threads(MultiAgentVersion::V2),
+        Some(3)
     );
 
     Ok(())
 }
 
 #[tokio::test]
-async fn catalog_v2_allows_agents_thread_limit_when_feature_disabled() -> std::io::Result<()> {
+async fn catalog_v2_allows_agents_max_threads_when_feature_disabled() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     std::fs::write(
         codex_home.path().join(CONFIG_TOML_FILE),
@@ -12210,7 +12234,7 @@ async fn catalog_v2_allows_agents_thread_limit_when_feature_disabled() -> std::i
 enabled = false
 
 [agents]
-max_concurrent_threads_per_session = 3
+max_threads = 3
 "#,
     )?;
 
@@ -12220,12 +12244,10 @@ max_concurrent_threads_per_session = 3
         .build()
         .await?;
 
+    config.validate_multi_agent_v2_config()?;
     assert_eq!(
-        (
-            config.multi_agent_v2.max_concurrent_threads_per_session,
-            config.effective_agent_max_threads(MultiAgentVersion::V2),
-        ),
-        (4, Some(3))
+        config.effective_agent_max_threads(MultiAgentVersion::V2),
+        Some(3)
     );
 
     Ok(())

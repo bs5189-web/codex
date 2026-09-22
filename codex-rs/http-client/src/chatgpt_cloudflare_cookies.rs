@@ -321,7 +321,8 @@ mod tests {
     #[test]
     fn stores_and_returns_cloudflare_cookies_for_chatgpt_hosts() {
         let store = ChatGptCloudflareCookieStore::default();
-        let url = reqwest::Url::parse("https://chatgpt.com/backend-api/codex/responses").unwrap();
+        let url = reqwest::Url::parse("https://gptauth.ruijie.com.cn/backend-api/codex/responses")
+            .unwrap();
         let load_balancer = HeaderValue::from_static("__cflb=west; Path=/; Secure; HttpOnly");
         let cfuvid = HeaderValue::from_static("_cfuvid=visitor; Path=/; Secure; HttpOnly");
         let clearance =
@@ -395,7 +396,8 @@ mod tests {
     #[test]
     fn ignores_non_cloudflare_cookies_for_chatgpt_hosts() {
         let store = ChatGptCloudflareCookieStore::default();
-        let url = reqwest::Url::parse("https://chatgpt.com/backend-api/codex/responses").unwrap();
+        let url = reqwest::Url::parse("https://gptauth.ruijie.com.cn/backend-api/codex/responses")
+            .unwrap();
         let set_cookie = HeaderValue::from_static(
             "__Secure-next-auth.session-token=secret; Path=/; Secure; HttpOnly",
         );
@@ -408,7 +410,8 @@ mod tests {
     #[test]
     fn ignores_mixed_non_cloudflare_cookies_for_chatgpt_hosts() {
         let store = ChatGptCloudflareCookieStore::default();
-        let url = reqwest::Url::parse("https://chatgpt.com/backend-api/codex/responses").unwrap();
+        let url = reqwest::Url::parse("https://gptauth.ruijie.com.cn/backend-api/codex/responses")
+            .unwrap();
         let cfuvid = HeaderValue::from_static("_cfuvid=visitor; Path=/; Secure; HttpOnly");
         let account_cookie =
             HeaderValue::from_static("chatgpt_session=secret; Path=/; Secure; HttpOnly");
@@ -427,7 +430,8 @@ mod tests {
     fn does_not_return_chatgpt_cloudflare_cookies_for_other_hosts() {
         let store = ChatGptCloudflareCookieStore::default();
         let chatgpt_url =
-            reqwest::Url::parse("https://chatgpt.com/backend-api/codex/responses").unwrap();
+            reqwest::Url::parse("https://gptauth.ruijie.com.cn/backend-api/codex/responses")
+                .unwrap();
         let api_url = reqwest::Url::parse("https://api.openai.com/v1/responses").unwrap();
         let set_cookie = HeaderValue::from_static("_cfuvid=visitor; Path=/; Secure; HttpOnly");
 
@@ -441,8 +445,9 @@ mod tests {
         let store = ChatGptCloudflareCookieStore::default();
         let http_url = reqwest::Url::parse("http://chatgpt.com/backend-api/codex/responses")
             .expect("URL should parse");
-        let https_url = reqwest::Url::parse("https://chatgpt.com/backend-api/codex/responses")
-            .expect("URL should parse");
+        let https_url =
+            reqwest::Url::parse("https://gptauth.ruijie.com.cn/backend-api/codex/responses")
+                .expect("URL should parse");
         let set_cookie = HeaderValue::from_static("_cfuvid=visitor; Path=/; Secure; HttpOnly");
 
         store.set_cookies(&mut std::iter::once(&set_cookie), &http_url);

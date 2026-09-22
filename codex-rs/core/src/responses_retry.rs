@@ -175,6 +175,25 @@ fn log_retry(
     }
 }
 
+/// Returns `true` when the error indicates the Responses API is unusable for this
+/// model/request and the caller should immediately retry with the Chat Completions API.
+///
+/// Detected conditions:
+/// - The gateway rejected Responses API access for the model (HTTP 400/4xx with
+///   `code` `400005` or a message mentioning "does not allow Responses API").
+pub(crate) fn should_fallback_to_chat(err: &CodexErr) -> bool {
+    match err.details() {
+        CodexErrorDetails::InvalidRequest(body) => {
+            body.contains("does not allow Responses API") || body.contains("\"code\":\"400005\"")
+        }
+        CodexErrorDetails::UnexpectedStatus(unexpected) => {
+            unexpected.body.contains("does not allow Responses API")
+                || unexpected.body.contains("\"code\":\"400005\"")
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 #[path = "responses_retry_tests.rs"]
 mod tests;

@@ -1,5 +1,6 @@
 use codex_api::AuthProvider;
 use codex_api::ModelsClient;
+use codex_api::ModelsList;
 use codex_api::Provider;
 use codex_api::RetryConfig;
 use codex_client::ReqwestTransport;
@@ -199,6 +200,9 @@ async fn models_client_hits_models_endpoint() {
         .await
         .expect("models request should succeed");
 
+    let ModelsList::CodexCatalog(models) = models else {
+        panic!("expected Codex catalog response");
+    };
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].slug, "gpt-test");
     assert!(models[0].node_repl_auto_review_required);
