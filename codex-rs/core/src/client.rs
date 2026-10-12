@@ -1983,6 +1983,11 @@ impl ModelClientSession {
                 )
                 .await;
 
+            let include_internal = self
+                .client
+                .state
+                .provider
+                .include_internal_metadata(&client_setup.api_provider);
             let mut request = self.client.build_responses_request(
                 prompt,
                 model_info,
@@ -1990,12 +1995,20 @@ impl ModelClientSession {
                 summary,
                 service_tier.clone(),
                 responses_metadata,
+                include_internal,
             )?;
             let store = request.store;
             self.client
                 .prepare_response_items_for_request(&mut request.input, store);
             let request_session_telemetry =
                 session_telemetry_for_request(session_telemetry, &request);
+            let interceptors = crate::model_request::prepare(
+                &self.client.request_contributors,
+                &self.client.state.thread_id.to_string(),
+                &model_info.slug,
+                codex_extension_api::ModelRequestKind::Generation,
+                &mut request.client_metadata,
+            );
             let inference_trace_attempt = inference_trace.start_attempt();
             inference_trace_attempt.add_request_headers(&mut options.extra_headers);
             inference_trace_attempt.record_started(&request);
@@ -2014,6 +2027,7 @@ impl ModelClientSession {
                         request_session_telemetry,
                         inference_trace_attempt,
                         Arc::clone(&self.client.state.provider),
+                        interceptors,
                     );
                     return Ok(stream);
                 }

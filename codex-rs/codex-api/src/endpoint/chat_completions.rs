@@ -240,14 +240,10 @@ impl<T: HttpTransport> ChatCompletionsClient<T> {
 fn convert_request(request: ResponsesApiRequest) -> Result<ChatCompletionsRequest, ApiError> {
     let mut messages = Vec::new();
     let mut pending_tool_batch = PendingChatToolCallBatch::default();
-    if !request.instructions.is_empty() {
-        messages.push(ChatMessage {
-            role: "system".to_string(),
-            content: Some(request.instructions),
-            tool_call_id: None,
-            tool_calls: None,
-        });
-    }
+    // Base instructions no longer travel on a dedicated `instructions` field: the
+    // Responses request now carries them as a leading developer-role message inside
+    // `input`, which the loop below maps to a chat `system` message via
+    // `chat_message_role`.
 
     for item in request.input {
         match item {
@@ -449,7 +445,7 @@ fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
     let text = content
         .iter()
         .filter_map(|item| match item {
-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
                 Some(text.as_str())
             }
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
@@ -506,6 +502,7 @@ fn spawn_chat_response_stream(stream_response: StreamResponse) -> ResponseStream
     ResponseStream {
         rx_event,
         upstream_request_id,
+        interrupt: None,
     }
 }
 
@@ -609,10 +606,14 @@ async fn process_chat_sse(
             .get_or_insert_with(|| chat_assistant_message_id(response_id.as_ref()))
             .clone();
         let item = ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: Some(id),
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
                 text: assistant_message_text,
+                annotations: None,
+                logprobs: None,
             }],
             phase: None,
             internal_chat_message_metadata_passthrough: None,
@@ -645,6 +646,8 @@ async fn ensure_assistant_message_started(
         .get_or_insert_with(|| chat_assistant_message_id(response_id))
         .clone();
     let item = ResponseItem::Message {
+        encrypted_content: None,
+        status: None,
         id: Some(id),
         role: "assistant".to_string(),
         content: Vec::new(),
@@ -672,6 +675,8 @@ async fn flush_tool_calls(
             continue;
         };
         let item = ResponseItem::FunctionCall {
+            encrypted_content: None,
+            status: None,
             id: None,
             name,
             namespace: None,

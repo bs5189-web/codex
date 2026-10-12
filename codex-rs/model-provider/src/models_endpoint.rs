@@ -193,6 +193,9 @@ impl OpenAiModelsEndpoint {
         })
         .await
         .map_err(|_| CodexErr::RequestTimeout)??;
+        // The provider may return either a Codex catalog or a plain OpenAI-compatible
+        // id list; normalize to `ModelInfo` before validating the catalog.
+        let models = model_infos_from_response(models);
         if self.provider_info.model_catalog_url.is_some() {
             let mut slugs = HashSet::new();
             if models
@@ -205,7 +208,7 @@ impl OpenAiModelsEndpoint {
             }
         }
         Ok(ModelsEndpointResponse {
-            models: model_infos_from_response(models),
+            models,
             etag,
             identity,
         })
