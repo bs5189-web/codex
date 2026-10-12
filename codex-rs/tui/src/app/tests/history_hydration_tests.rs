@@ -27,7 +27,9 @@ use codex_state::SqliteConfig;
 use pretty_assertions::assert_eq;
 use pretty_assertions::assert_ne;
 
-async fn history_fixture(item_counts: &[usize]) -> Result<(App, tempfile::TempDir, SessionTarget)> {
+async fn history_fixture(
+    item_counts: &[usize],
+) -> Result<(Box<App>, tempfile::TempDir, SessionTarget)> {
     let mut app = make_test_app().await;
     let codex_home = tempdir()?;
     app.config.codex_home = codex_home.path().to_path_buf().abs();
@@ -53,6 +55,7 @@ async fn history_fixture(item_counts: &[usize]) -> Result<(App, tempfile::TempDi
     for (index, count) in item_counts.iter().enumerate() {
         let turn_id = format!("turn-{index}");
         let mut events = vec![EventMsg::TurnStarted(TurnStartedEvent {
+            turn_attribution: None,
             turn_id: turn_id.clone(),
             root_turn_id: None,
             trace_id: None,
@@ -77,6 +80,7 @@ async fn history_fixture(item_counts: &[usize]) -> Result<(App, tempfile::TempDi
             }));
         }
         events.push(EventMsg::TurnComplete(TurnCompleteEvent {
+            root_turn_id: None,
             turn_id,
             last_agent_message: None,
             error: None,
@@ -242,6 +246,7 @@ async fn history_hydration_archived_retry_uses_first_attempt_runtime_settings() 
     for action in [
         SessionStartAction::Resume(
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
+            crate::resume_permissions::ResumePermissions::default(),
         ),
         SessionStartAction::Fork(crate::app_server_session::ForkPermissionMode::InheritSaved),
     ] {
@@ -265,7 +270,7 @@ async fn history_hydration_archived_retry_uses_first_attempt_runtime_settings() 
             )
             .await?;
             let initial = match action {
-                SessionStartAction::Resume(settings) => {
+                SessionStartAction::Resume(settings, _) => {
                     server
                         .resume_thread(
                             &app.local_settings,

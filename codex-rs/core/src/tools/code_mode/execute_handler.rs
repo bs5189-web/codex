@@ -4,8 +4,12 @@ use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
+use codex_features::Feature;
+use codex_prompts::ResolvedModelMessages;
+use codex_tools::IndirectNamespacePrefixes;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use super::ExecContext;
@@ -13,6 +17,7 @@ use super::PUBLIC_TOOL_NAME;
 use super::handle_runtime_response;
 use super::is_exec_tool_name;
 use super::output::CodeModeToolOutput;
+use super::prepare_code_mode_tool_definitions;
 use super::telemetry::CodeModeToolCallGuard;
 use super::telemetry::trace_id;
 
@@ -46,26 +51,38 @@ impl CodeModeExecuteHandler {
             session,
             turn: Arc::clone(&step_context.turn),
         };
+        let code_mode_input_schema_max_bytes = step_context
+            .turn
+            .config
+            .code_mode
+            .tool_input_schema_max_bytes;
+        let tool_description_first = step_context
+            .turn
+            .config
+            .features
+            .enabled(Feature::CodeModeToolDescriptionFirst);
         let mut enabled_tools = Vec::with_capacity(self.nested_tool_specs.len());
         for (spec, cached_runtime) in &self.nested_tool_specs {
-            if let Some(cached_definitions) = cached_runtime
-                .as_ref()
-                .and_then(|runtime| runtime.cached_code_mode_definitions())
-            {
-                enabled_tools.extend_from_slice(cached_definitions);
-                continue;
+            let definitions = prepare_code_mode_tool_definitions(
+                cached_runtime.as_deref(),
+                || Cow::Borrowed(spec.as_ref()),
+                code_mode_input_schema_max_bytes,
+                tool_description_first,
+            );
+            match definitions {
+                Cow::Borrowed(definitions) => enabled_tools.extend_from_slice(definitions),
+                Cow::Owned(definitions) => enabled_tools.extend(definitions),
             }
-
-            let definitions =
-                codex_tools::collect_code_mode_tool_definitions(std::iter::once(spec.as_ref()));
-            enabled_tools.extend(definitions.into_iter().map(|mut definition| {
-                definition.input_schema = None;
-                definition.output_schema = None;
-                definition
-            }));
         }
         enabled_tools.sort_by(|left, right| left.name.cmp(&right.name));
         enabled_tools.dedup_by(|left, right| left.name == right.name);
+        let model_messages = ResolvedModelMessages::from_model(&step_context.settings.model_info);
+        IndirectNamespacePrefixes::new(
+            model_messages.indirect_description_prefixes(),
+            step_context.tool_router.mcp_namespaces(),
+        )
+        .map_err(|error| FunctionCallError::Fatal(error.to_string()))?
+        .apply_code_mode(&mut enabled_tools);
         let started_at = std::time::Instant::now();
         let started_cell = exec
             .session
@@ -205,8 +222,7 @@ impl CodeModeExecuteHandler {
         } = invocation;
 
         let mut telemetry = CodeModeToolCallGuard::new(
-            session.services.analytics_events_client.clone(),
-            session.thread_id.to_string(),
+            &session,
             turn.sub_id.clone(),
             turn.turn_metadata_state.clone(),
             call_id.clone(),

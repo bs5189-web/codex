@@ -89,7 +89,7 @@ async fn rejected_start(
             rows: 40,
             cols: 120,
         },
-        &[],
+        codex_utils_pty::ChildFds::Inherited(&[]),
     )
     .await?;
     let mut stdout = spawned.stdout_rx;
@@ -198,7 +198,7 @@ sandbox_mode = "workspace-write"
 windows.sandbox = "unelevated"
 tui.disable_paste_burst = true
 [otel]
-metrics_exporter = {{ otlp-http = {{ endpoint = "{}/metrics", protocol = "json" }} }}
+metrics_exporter = "none"
 [model_providers.local]
 name = "local test"
 base_url = "{}/v1"
@@ -210,7 +210,6 @@ trust_level = "trusted"
 "#,
             server.uri(),
             backend == "daemon",
-            server.uri(),
             server.uri(),
             serde_json::to_string(&source)?,
             serde_json::to_string(&launcher)?
@@ -234,6 +233,17 @@ trust_level = "trusted"
         codex_config::types::AuthCredentialsStoreMode::File,
     )?;
     let program = codex_utils_cargo_bin::cargo_bin("codex")?;
+    // Keep cold Rosetta translation outside the timed startup assertions.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    anyhow::ensure!(
+        Command::new(&program)
+            .env("CODEX_HOME", &home)
+            .arg("--version")
+            .output()?
+            .status
+            .success(),
+        "failed to prepare CLI test executable"
+    );
     let mut env: HashMap<String, String> = std::env::vars().collect();
     env.insert("CODEX_HOME".into(), home.display().to_string());
     env.insert("CODEX_SQLITE_HOME".into(), home.display().to_string());
@@ -266,7 +276,12 @@ trust_level = "trusted"
         let bin = home.join("packages/app-server-daemon/current/bin");
         fs::create_dir_all(&bin)?;
         let managed = bin.join(if cfg!(windows) { "codex.exe" } else { "codex" });
-        fs::hard_link(&program, &managed).or_else(|_| fs::copy(&program, &managed).map(|_| ()))?;
+        // Hard links change the executable's ctime and invalidate Rosetta's translation cache.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(program.canonicalize()?, &managed)?;
+        #[cfg(not(unix))]
+        fs::hard_link(&program, &managed)
+            .or_else(|_| codex_utils_cargo_bin::copy_executable(&program, &managed))?;
         fs::create_dir(home.join("app-server-daemon"))?;
         fs::write(
             home.join("app-server-daemon/settings.json"),
@@ -293,6 +308,7 @@ trust_level = "trusted"
     ];
     let mut owner = None;
     let mut previous: Vec<String> = Vec::new();
+    let prompt = "describe checkout";
     for (fork, explicit_cd, analytics, auth_failure) in [
         (false, false, false, false),
         (true, false, false, false),
@@ -391,9 +407,17 @@ trust_level = "trusted"
             args.extend(["--cd".into(), source.join(".codex").display().to_string()]);
         }
         if analytics {
-            args.extend(["-c".into(), "analytics.enabled=true".into()]);
+            args.extend([
+                "-c".into(),
+                "analytics.enabled=true".into(),
+                "-c".into(),
+                format!(
+                    "otel.metrics_exporter={{otlp-http={{endpoint=\"{}/metrics\",protocol=\"json\"}}}}",
+                    server.uri()
+                ),
+            ]);
         }
-        args.push("describe checkout".into());
+        args.push(prompt.into());
         if previous.is_empty() {
             let mut untrusted_args = args.clone();
             untrusted_args.extend([
@@ -423,7 +447,7 @@ trust_level = "trusted"
                 rows: 40,
                 cols: 120,
             },
-            &[],
+            codex_utils_pty::ChildFds::Inherited(&[]),
         )
         .await?;
         let session = spawned.session;
@@ -436,6 +460,18 @@ trust_level = "trusted"
                     body = rx.recv() => {
                         let (body, checkout, metadata) = body.context("model request")??;
                         let body: Value = serde_json::from_slice(&body)?;
+                        // Background title generation can reach the model before the user turn.
+                        let is_user_turn = body["input"].as_array().is_some_and(|input| {
+                            input.iter().any(|item| {
+                                item["role"] == "user"
+                                    && item["content"].as_array().is_some_and(|content| {
+                                        content.iter().any(|part| part["text"] == prompt)
+                                    })
+                            })
+                        });
+                        if !is_user_turn {
+                            continue;
+                        }
                         return Ok::<_, anyhow::Error>((body, checkout, metadata));
                     }
                     bytes = stdout.recv() => {
@@ -632,6 +668,10 @@ trust_level = "trusted"
                 ("update_interval_setting", "default"),
                 ("shutdown_grace_setting", "default"),
             ]);
+            #[cfg(windows)]
+            if codex_app_server_daemon::is_elevated()? {
+                expected_tags.insert("daemon_selection_reason", "elevated_windows");
+            }
             if backend == "daemon" {
                 expected_tags.extend([
                     ("auto_update", "disabled"),
@@ -641,7 +681,7 @@ trust_level = "trusted"
             }
             assert_eq!(tags, expected_tags);
         } else {
-            assert!(metrics.is_empty(), "analytics disabled");
+            assert!(metrics.is_empty(), "metrics exporter disabled");
         }
         let (body, checkout, metadata) = observed
             .with_context(|| {

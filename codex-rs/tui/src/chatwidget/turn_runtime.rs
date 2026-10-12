@@ -2,6 +2,7 @@
 //!
 //! This module owns task start/completion state, runtime metrics, plan updates,
 //! and completion metadata rendering.
+//! Terminal errors retain live question drafts across queued input delivery.
 
 use super::*;
 
@@ -391,18 +392,46 @@ impl ChatWidget {
     }
 
     pub(super) fn on_cyber_policy_error(&mut self) {
+        let can_enable_daybreak =
+            self.daybreak_account_eligible() && !self.side_conversation_active();
+        let notice = crate::daybreak::notice_for_setting(
+            &self.model_catalog.models,
+            self.current_model(),
+            self.daybreak_enabled && can_enable_daybreak,
+            can_enable_daybreak,
+        );
         self.input_queue.submit_pending_steers_after_interrupt = false;
         self.finalize_turn();
-        let notice = if self.config.model_provider_id == "openai" {
-            self.cyber_policy_notice
-                .get()
-                .copied()
-                .unwrap_or_default()
-                .for_model(self.current_model())
-        } else {
-            crate::daybreak::Notice::Limited
-        };
         self.add_to_history(history_cell::new_cyber_policy_error_event(notice));
+        if notice == crate::daybreak::Notice::Disabled
+            && !self.thread_usage.replaying_turn_completion
+            && !self.blocks_direct_input
+            && let Some(thread_id) = self.thread_id
+        {
+            self.bottom_pane.show_selection_view(SelectionViewParams {
+                title: Some("Turn on Daybreak for your next request?".into()),
+                items: vec![
+                    SelectionItem {
+                        name: "Enable Daybreak".into(),
+                        actions: vec![Box::new(move |tx| {
+                            tx.send(AppEvent::PersistDaybreakSelection {
+                                thread_id,
+                                enabled: true,
+                            })
+                        })],
+                        dismiss_on_select: true,
+                        ..Default::default()
+                    },
+                    SelectionItem {
+                        name: "Not now".into(),
+                        dismiss_on_select: true,
+                        ..Default::default()
+                    },
+                ],
+                ..SelectionViewParams::picker()
+            });
+            self.defer_input_until_settings_applied();
+        }
         self.request_redraw();
 
         // After an error ends the turn, try sending the next queued input.
@@ -469,12 +498,19 @@ impl ChatWidget {
         message: String,
         codex_error_info: Option<AppServerCodexErrorInfo>,
     ) {
-        if codex_error_info == Some(AppServerCodexErrorInfo::MisalignmentPolicyViolation) {
-            self.on_misalignment_policy_violation();
-        } else if codex_error_info
+        if codex_error_info
             .as_ref()
             .is_some_and(|info| self.handle_app_server_steer_rejected_error(info))
         {
+            return;
+        }
+        let question_drafts = if self.thread_usage.replaying_turn_completion {
+            None
+        } else {
+            self.take_question_drafts()
+        };
+        if codex_error_info == Some(AppServerCodexErrorInfo::MisalignmentPolicyViolation) {
+            self.on_misalignment_policy_violation();
         } else if codex_error_info
             .as_ref()
             .is_some_and(is_app_server_cyber_policy_error)
@@ -505,6 +541,13 @@ impl ChatWidget {
             }
         } else {
             self.on_error(message);
+        }
+        if let Some(drafts) = question_drafts
+            && !self.has_misalignment_policy_violation()
+        {
+            self.bottom_pane.append_question_drafts(&drafts);
+            self.refresh_pending_input_preview();
+            self.request_redraw();
         }
     }
 
@@ -540,13 +583,5 @@ impl ChatWidget {
         self.transcript.last_plan_progress = (total > 0).then_some((completed, total));
         self.refresh_status_surfaces();
         self.add_to_history(history_cell::new_plan_update(update));
-    }
-
-    pub(super) fn interrupted_turn_message(&self, reason: TurnAbortReason) -> String {
-        if reason == TurnAbortReason::BudgetLimited {
-            return "Goal budget reached - the turn was stopped.".to_string();
-        }
-
-        "Conversation interrupted - tell the model what to do differently. Something went wrong? Hit `/feedback` to report the issue.".to_string()
     }
 }

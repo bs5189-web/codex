@@ -292,6 +292,10 @@ pub enum ThreadItem {
         #[serde(skip)]
         #[schemars(skip)]
         #[ts(skip)]
+        sandbox_type: Option<codex_protocol::sandbox::SandboxType>,
+        #[serde(skip)]
+        #[schemars(skip)]
+        #[ts(skip)]
         model_context: Option<codex_protocol::items::ModelInvocationContext>,
         id: String,
         /// Trusted first-party plugin id when this command resolves to one plugin script.
@@ -391,6 +395,10 @@ pub enum ThreadItem {
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
     SubAgentActivity {
+        /// Resolved model at sub-agent creation; absent from older records and other activities.
+        model: Option<String>,
+        /// Resolved reasoning effort at sub-agent creation, when known.
+        reasoning_effort: Option<ReasoningEffort>,
         id: String,
         kind: SubAgentActivityKind,
         agent_thread_id: String,
@@ -919,6 +927,7 @@ impl From<CoreTurnItem> for ThreadItem {
                 ThreadItem::CommandExecution {
                     id: command.id,
                     model_context: command.model_context,
+                    sandbox_type: command.sandbox_type,
                     plugin_id: command.plugin_id,
                     script_path: command.script_path,
                     command: presentation.command,
@@ -973,6 +982,8 @@ impl From<CoreTurnItem> for ThreadItem {
                     .collect(),
             },
             CoreTurnItem::SubAgentActivity(activity) => ThreadItem::SubAgentActivity {
+                model: activity.model,
+                reasoning_effort: activity.reasoning_effort,
                 id: activity.id,
                 kind: activity.kind.into(),
                 agent_thread_id: activity.agent_thread_id.to_string(),

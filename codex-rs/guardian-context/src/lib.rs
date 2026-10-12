@@ -6,6 +6,8 @@
 //! Sections preserve source-specific evidence and share prompt framing, while
 //! profiles retain the consumer-specific transcript policy. Shared full/delta selection
 //! proposes cursors; hosts own their admission, compaction and request lifecycles.
+//! JSON records cache their rendering and shared-estimator cost through admission.
+//! Line mode admits rendered text to preserve its existing whole-entry truncation.
 //! Registered contributors declare their scope once and are collected only for
 //! matching context consumers. History and collection settings are borrowed for
 //! each request so the default registry can be reused without retaining state.
@@ -30,6 +32,8 @@ pub use section::ContextSection;
 
 pub use entry::ConversationTranscriptEntry;
 pub use entry::ConversationTranscriptEntryKind;
+pub use entry::RetainedTranscriptSource;
+pub use entry::TranscriptContent;
 pub use history::TranscriptHistory;
 pub use transcript::ConversationTranscriptConfig;
 pub use transcript::ConversationTranscriptOptions;
@@ -37,6 +41,7 @@ pub use transcript::MANUAL_APPROVAL_DEVELOPER_PREFIX;
 pub use transcript::TranscriptEntryLimits;
 pub use transcript::TranscriptRetentionConfig;
 pub use transcript::collect_transcript;
+pub use transcript::is_inherited_manual_approval;
 pub use truncation::truncate_text;
 
 mod verified_answers;
@@ -44,8 +49,10 @@ pub use verified_answers::RenderedVerifiedAnswers;
 pub use verified_answers::render_verified_answer;
 pub use verified_answers::render_verified_answers;
 
+mod retained_assistant_context;
 mod retained_instructions;
 mod sender_user_messages;
+pub use retained_instructions::retained_assistant_message;
 
 mod action;
 mod enforcement;
@@ -69,10 +76,11 @@ pub use cursor::TranscriptCursor;
 pub use cursor::TranscriptMode;
 pub use cursor::TranscriptSelection;
 mod profile;
+pub use codex_protocol::TranscriptFormat;
 pub use composition::CollectedContext;
 pub use composition::ComposedContext;
 pub use composition::ContextPresentation;
-pub use composition::RenderedTranscript;
+pub use composition::PreparedTranscript;
 pub use profile::ContextProfile;
 mod authorization;
 mod entry;
@@ -90,8 +98,10 @@ mod trusted_skills;
 mod trusted_tool;
 pub use trusted_skills::TrustedSkills;
 pub use trusted_tool::TrustedTool;
+pub use trusted_tool::TrustedToolSource;
 mod reviews;
 pub use reviews::MAX_PREVIOUS_REVIEWS;
+pub use reviews::PreviousReview;
 pub use reviews::PreviousReviews;
 pub use reviews::RenderedReviewEvidence;
 pub use reviews::ReviewEvidence;
@@ -100,6 +110,9 @@ pub use truncation::TruncationObservation;
 mod section;
 pub use permissions::PermissionContext;
 mod transcript;
+mod transcript_record;
+pub use transcript_record::TRANSCRIPT_JSON_INSTRUCTIONS;
+pub use transcript_record::TranscriptRecord;
 mod truncation;
 
 /// Consumer for which a Guardian context is composed.
@@ -171,9 +184,28 @@ pub trait SectionHistory: Send + Sync {
     /// Returns borrowed response items in their original conversation order.
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_>;
 
+    /// Original source metadata stays attached to the exact unshortened history item.
+    /// Legacy providers cannot establish completeness from a message ID alone.
+    fn items_with_sources(
+        &self,
+    ) -> Box<dyn Iterator<Item = (&ResponseItem, Option<&codex_history::RetainedSource>)> + Send + '_>
+    {
+        Box::new(self.items().map(|item| (item, None)))
+    }
+
     /// Bounded host-owned facts from the same snapshot as the current items.
     fn retained_context(&self) -> Option<&codex_history::RetainedContext> {
         None
+    }
+
+    /// Renders one bounded retained assistant message through the host's
+    /// contextual-fragment boundary. Hosts with no fragment layer use the
+    /// shared role-labeled rendering while preserving the same size limit.
+    fn render_retained_assistant(
+        &self,
+        message: &codex_history::RetainedUserMessage,
+    ) -> Option<GuardianRootMessage> {
+        retained_assistant_message(message)
     }
 }
 

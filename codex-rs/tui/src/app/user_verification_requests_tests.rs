@@ -19,6 +19,7 @@ fn verification_request() -> ServerRequest {
             turn_id: None,
             server_name: "deployments".to_string(),
             request: McpServerElicitationRequest::UserVerification {
+                meta: None,
                 title: "Approve deployment?".to_string(),
                 description: "Deploy the reviewed change.".to_string(),
                 challenge: "AQID".to_string(),
@@ -61,7 +62,7 @@ fn user_verification_cancellation_invalidates_the_inflight_result() {
         resolution,
         Some(AppServerRequestResolution {
             request_id: request.id().clone(),
-            result: serde_json::json!({ "action": "cancel", "content": null, "_meta": null }),
+            result: serde_json::json!({ "action": "cancel", "content": null, "_meta": {"openai/userVerificationReason": "userCancelled"} }),
         })
     );
     assert!(

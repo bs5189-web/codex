@@ -115,26 +115,18 @@ def test_root_fmt_recipes_use_shared_formatter_driver() -> None:
     )
     actual = {
         "working_directory": lines[0],
-        "fmt_comment": next(line for line in reversed(lines[:fmt_index]) if line.startswith("#")),
         "fmt_commands": [
             line.strip()
             for line in lines[fmt_index + 1 : fmt_check_index]
             if line.strip() and not line.startswith("#")
         ],
-        "fmt_check_comment": next(
-            line for line in reversed(lines[:fmt_check_index]) if line.startswith("#")
-        ),
         "fmt_check_commands": [
             line.strip() for line in lines[fmt_check_index + 1 : next_recipe_index] if line.strip()
         ],
     }
     expected = {
         "working_directory": 'set working-directory := "codex-rs"',
-        "fmt_comment": (
-            "# Format the justfile, Rust, Bazel/Starlark, Python SDK code, and Python scripts."
-        ),
         "fmt_commands": ["@{{ python }} ../scripts/format.py"],
-        "fmt_check_comment": "# Check formatting without modifying files.",
         "fmt_check_commands": ["@{{ python }} ../scripts/format.py --check"],
     }
 
@@ -534,6 +526,18 @@ def test_generated_chatgpt_account_email_is_required_nullable() -> None:
 
     with pytest.raises(ValidationError):
         ChatgptAccount.model_validate({"planType": "pro", "type": "chatgpt"})
+
+
+@pytest.mark.parametrize("link_id", ["link_calendar", None])
+def test_generated_resource_read_target_requires_explicit_account(link_id: str | None) -> None:
+    from openai_codex.generated.v2_all import McpResourceReadTarget
+
+    payload = {"connectorId": "calendar", "linkId": link_id}
+    target = McpResourceReadTarget.model_validate(payload)
+    assert target.model_dump(by_alias=True) == payload
+
+    with pytest.raises(ValidationError):
+        McpResourceReadTarget.model_validate({"connectorId": "calendar"})
 
 
 def test_generated_inline_image_class_names_remain_stable() -> None:

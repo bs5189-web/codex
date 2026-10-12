@@ -7,6 +7,8 @@ use tokio::time::Instant;
 
 #[derive(Debug)]
 pub enum GuardianReviewOutcome {
+    /// Approved by current async evidence after the redundant attempt was drained.
+    CachedApproval,
     Completed(GuardianAssessment),
     Error(GuardianReviewError),
 }
@@ -27,6 +29,8 @@ pub enum GuardianReviewError {
     },
     Timeout,
     Cancelled,
+    /// The action is still pending, but its authorization evidence changed during review.
+    StaleAuthorization,
 }
 
 impl GuardianReviewError {
@@ -68,6 +72,7 @@ impl GuardianReviewError {
             Self::Parse { .. } => GuardianReviewFailureReason::ParseError,
             Self::Timeout => GuardianReviewFailureReason::Timeout,
             Self::Cancelled => GuardianReviewFailureReason::Cancelled,
+            Self::StaleAuthorization => GuardianReviewFailureReason::StaleAuthorization,
         }
     }
 }
@@ -84,13 +89,14 @@ pub enum GuardianReviewSessionOutcome {
     },
     TimedOut,
     Aborted,
+    StaleAuthorization,
 }
 
 impl From<GuardianReviewSessionOutcome> for GuardianReviewOutcome {
     fn from(outcome: GuardianReviewSessionOutcome) -> Self {
         match outcome {
             GuardianReviewSessionOutcome::Completed(Ok(Some(message))) => {
-                match crate::parse_guardian_assessment(Some(&message)) {
+                match crate::parse_guardian_assessment(&message) {
                     Ok(assessment) => Self::Completed(assessment),
                     Err(error) => Self::Error(GuardianReviewError::parse(error)),
                 }
@@ -120,6 +126,9 @@ impl From<GuardianReviewSessionOutcome> for GuardianReviewOutcome {
             }),
             GuardianReviewSessionOutcome::TimedOut => Self::Error(GuardianReviewError::Timeout),
             GuardianReviewSessionOutcome::Aborted => Self::Error(GuardianReviewError::Cancelled),
+            GuardianReviewSessionOutcome::StaleAuthorization => {
+                Self::Error(GuardianReviewError::StaleAuthorization)
+            }
         }
     }
 }

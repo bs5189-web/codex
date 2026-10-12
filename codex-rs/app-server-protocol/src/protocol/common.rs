@@ -225,6 +225,7 @@ macro_rules! client_request_definitions {
     ) => {
         /// Request from the client to the server.
         #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+        #[allow(clippy::large_enum_variant)]
         #[serde(tag = "method", rename_all = "camelCase")]
         pub enum ClientRequest {
             $(
@@ -319,13 +320,14 @@ macro_rules! client_request_definitions {
             pub fn into_jsonrpc_parts(
                 self,
             ) -> std::result::Result<(RequestId, crate::Result), serde_json::Error> {
-                match self {
+                let (request_id, response) = match self {
                     $(
                         Self::$variant { request_id, response } => {
-                            serde_json::to_value(response).map(|result| (request_id, result))
+                            (request_id, ClientResponsePayload::$variant(response))
                         }
                     )*
-                }
+                };
+                serde_json::to_value(response).map(|result| (request_id, result))
             }
         }
 
@@ -363,16 +365,7 @@ macro_rules! client_request_definitions {
                 &self,
                 request_id: RequestId,
             ) -> std::result::Result<(RequestId, crate::Result), serde_json::Error> {
-                match self {
-                    $(
-                        Self::$variant(response) => {
-                            serde_json::to_value(response).map(|result| (request_id, result))
-                        }
-                    )*
-                    Self::InterruptConversation(response) => {
-                        serde_json::to_value(response).map(|result| (request_id, result))
-                    }
-                }
+                serde_json::to_value(self).map(|result| (request_id, result))
             }
         }
 
@@ -613,6 +606,12 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadSetNameResponse,
     },
+    #[experimental("thread/prediction/request")]
+    ThreadPredictionRequest => "thread/prediction/request" {
+        params: v2::ThreadPredictionRequestParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadPredictionRequestResponse,
+    },
     ThreadGoalSet => "thread/goal/set" {
         params: v2::ThreadGoalSetParams,
         serialization: thread_id(params.thread_id),
@@ -679,6 +678,11 @@ client_request_definitions! {
         params: v2::ThreadAttachmentListParams,
         serialization: None,
         response: v2::ThreadAttachmentListResponse,
+    },
+    ThreadAttachmentOwnerList => "thread/attachmentOwner/list" {
+        params: v2::ThreadAttachmentOwnerListParams,
+        serialization: None,
+        response: v2::ThreadAttachmentOwnerListResponse,
     },
     ThreadAttachmentRemove => "thread/attachment/remove" {
         params: v2::ThreadAttachmentRemoveParams,
@@ -856,6 +860,12 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadReadResponse,
     },
+    #[experimental("thread/readState/update")]
+    ThreadReadStateUpdate => "thread/readState/update" {
+        params: v2::ThreadReadStateUpdateParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadReadStateUpdateResponse,
+    },
     ThreadTurnsList => "thread/turns/list" {
         params: v2::ThreadTurnsListParams,
         // Explicitly concurrent: this primarily reads append-only rollout storage.
@@ -867,6 +877,13 @@ client_request_definitions! {
         // Explicitly concurrent: this primarily reads append-only rollout storage.
         serialization: None,
         response: v2::ThreadItemsListResponse,
+    },
+    #[experimental("thread/items/read")]
+    ThreadItemsRead => "thread/items/read" {
+        params: v2::ThreadItemsReadParams,
+        // Explicitly concurrent: this primarily reads append-only rollout storage.
+        serialization: None,
+        response: v2::ThreadItemsReadResponse,
     },
     /// Append raw Responses API items to the thread history without starting a user turn.
     ThreadInjectItems => "thread/inject_items" {
@@ -1113,6 +1130,21 @@ client_request_definitions! {
         serialization: None,
         response: v2::ModelListResponse,
     },
+    GatewayOAuthRead => "account/gatewayOAuth/read" {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        serialization: None,
+        response: v2::GatewayOAuthReadResponse,
+    },
+    GatewayOAuthLogin => "account/gatewayOAuth/login" {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        serialization: None,
+        response: v2::GatewayOAuthLoginResponse,
+    },
+    GatewayOAuthCancel => "account/gatewayOAuth/cancel" {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        serialization: None,
+        response: v2::GatewayOAuthCancelResponse,
+    },
     ModelProviderCapabilitiesRead => "modelProvider/capabilities/read" {
         params: v2::ModelProviderCapabilitiesReadParams,
         serialization: None,
@@ -1285,6 +1317,13 @@ client_request_definitions! {
         params: v2::BedrockSetupParams,
         serialization: global("account-auth"),
         response: v2::BedrockSetupResponse,
+    },
+
+    #[experimental("account/bedrock/checkGovCloudRequirements")]
+    BedrockCheckGovCloudRequirements => "account/bedrock/checkGovCloudRequirements" {
+        params: v2::BedrockCheckGovCloudRequirementsParams,
+        serialization: global("account-auth"),
+        response: v2::BedrockCheckGovCloudRequirementsResponse,
     },
 
     CancelLoginAccount => "account/login/cancel" {
@@ -1911,6 +1950,8 @@ server_notification_definitions! {
     Error => "error" (v2::ErrorNotification),
     ThreadStarted => "thread/started" (v2::ThreadStartedNotification),
     ThreadStatusChanged => "thread/status/changed" (v2::ThreadStatusChangedNotification),
+    #[experimental("thread/readState/changed")]
+    ThreadReadStateChanged => "thread/readState/changed" (v2::ThreadReadStateChangedNotification),
     ThreadArchived => "thread/archived" (v2::ThreadArchivedNotification),
     ThreadDeleted => "thread/deleted" (v2::ThreadDeletedNotification),
     ThreadUnarchived => "thread/unarchived" (v2::ThreadUnarchivedNotification),
@@ -1920,6 +1961,8 @@ server_notification_definitions! {
     ThreadNameUpdated => "thread/name/updated" (v2::ThreadNameUpdatedNotification),
     ThreadAttachmentUpdated => "thread/attachment/updated" (v2::ThreadAttachmentUpdatedNotification),
     ThreadGoalUpdated => "thread/goal/updated" (v2::ThreadGoalUpdatedNotification),
+    #[experimental("thread/prediction/updated")]
+    ThreadPredictionUpdated => "thread/prediction/updated" (v2::ThreadPredictionUpdatedNotification),
     ThreadGoalCleared => "thread/goal/cleared" (v2::ThreadGoalClearedNotification),
     #[experimental("thread/queue/changed")]
     ThreadQueueChanged => "thread/queue/changed" (v2::ThreadQueueChangedNotification),
@@ -1973,6 +2016,7 @@ server_notification_definitions! {
     #[experimental("mcpServer/event/stream/notification")]
     McpServerEventStream => "mcpServer/event/stream/notification" (v2::McpServerEventStreamNotification),
     AccountUpdated => "account/updated" (v2::AccountUpdatedNotification),
+    GatewayOAuthChanged => "account/gatewayOAuth/changed" (v2::GatewayOAuthChangedNotification),
     AccountRateLimitsUpdated => "account/rateLimits/updated" (v2::AccountRateLimitsUpdatedNotification),
     AppListUpdated => "app/list/updated" (v2::AppListUpdatedNotification),
     RemoteControlStatusChanged => "remoteControl/status/changed" (v2::RemoteControlStatusChangedNotification),
@@ -2461,6 +2505,7 @@ mod tests {
                 server: "server-a".to_string(),
                 uri: "file:///tmp/resource".to_string(),
                 connector_id: None,
+                target: None,
             },
         };
         assert_eq!(
@@ -2505,6 +2550,7 @@ mod tests {
         let thread_goal_set = ClientRequest::ThreadGoalSet {
             request_id: request_id(),
             params: v2::ThreadGoalSetParams {
+                origin: None,
                 thread_id: "goal-thread".to_string(),
                 objective: Some("ship it".to_string()),
                 status: None,
@@ -2557,6 +2603,9 @@ mod tests {
         let environment_add = ClientRequest::EnvironmentAdd {
             request_id: request_id(),
             params: v2::EnvironmentAddParams {
+                skills: None,
+                auth_bearer_token: None,
+                websocket_request_id: None,
                 environment_id: "remote-a".to_string(),
                 exec_server_url: "ws://127.0.0.1:8765".to_string(),
                 connect_timeout_ms: None,
@@ -2650,6 +2699,7 @@ mod tests {
                 server: "server-a".to_string(),
                 uri: "file:///tmp/resource".to_string(),
                 connector_id: None,
+                target: None,
             },
         };
         assert_eq!(mcp_resource_read.serialization_scope(), None);
@@ -2734,6 +2784,7 @@ mod tests {
                     version: "0.1.0".to_string(),
                 },
                 capabilities: Some(v1::InitializeCapabilities {
+                    explicit_gateway_oauth: false,
                     experimental_api: true,
                     request_attestation: true,
                     mcp_server_openai_form_elicitation: true,
@@ -2821,6 +2872,7 @@ mod tests {
                         version: "0.1.0".to_string(),
                     },
                     capabilities: Some(v1::InitializeCapabilities {
+                        explicit_gateway_oauth: false,
                         experimental_api: true,
                         request_attestation: true,
                         mcp_server_openai_form_elicitation: true,
@@ -3807,11 +3859,15 @@ mod tests {
         let request = ClientRequest::EnvironmentAdd {
             request_id: RequestId::Integer(9),
             params: v2::EnvironmentAddParams {
+                skills: None,
+                auth_bearer_token: Some("private-executor-token".into()),
+                websocket_request_id: Some("caller-sample-id".to_string()),
                 environment_id: "remote-a".to_string(),
                 exec_server_url: "ws://127.0.0.1:8765".to_string(),
                 connect_timeout_ms: Some(300_000),
             },
         };
+        assert!(!format!("{request:?}").contains("private-executor-token"));
         assert_eq!(
             json!({
                 "method": "environment/add",
@@ -3819,7 +3875,10 @@ mod tests {
                 "params": {
                     "environmentId": "remote-a",
                     "execServerUrl": "ws://127.0.0.1:8765",
-                    "connectTimeoutMs": 300000
+                    "connectTimeoutMs": 300000,
+                    "authBearerToken": "private-executor-token",
+                    "websocketRequestId": "caller-sample-id",
+                    "skills": null
                 }
             }),
             serde_json::to_value(&request)?,
@@ -3997,6 +4056,7 @@ mod tests {
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
                 codex_response_handoff_mode: Some(CodexResponseHandoffMode::BemTags),
+                backend_reasoning_status: false,
                 codex_response_handoff_channel_prefixes: Some(std::collections::BTreeMap::from([
                     ("analysis".to_string(), vec!["[THINKING]".to_string()]),
                     (
@@ -4083,6 +4143,7 @@ mod tests {
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
                 codex_response_handoff_mode: None,
+                backend_reasoning_status: false,
                 codex_response_handoff_channel_prefixes: None,
                 thread_id: "thr_123".to_string(),
                 model: None,
@@ -4135,6 +4196,7 @@ mod tests {
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
                 codex_response_handoff_mode: None,
+                backend_reasoning_status: false,
                 codex_response_handoff_channel_prefixes: None,
                 thread_id: "thr_123".to_string(),
                 model: None,
@@ -4341,6 +4403,9 @@ mod tests {
         let request = ClientRequest::EnvironmentAdd {
             request_id: RequestId::Integer(1),
             params: v2::EnvironmentAddParams {
+                skills: None,
+                auth_bearer_token: None,
+                websocket_request_id: None,
                 environment_id: "remote-a".to_string(),
                 exec_server_url: "ws://127.0.0.1:8765".to_string(),
                 connect_timeout_ms: None,
@@ -4387,6 +4452,7 @@ mod tests {
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
                 codex_response_handoff_mode: None,
+                backend_reasoning_status: false,
                 codex_response_handoff_channel_prefixes: None,
                 thread_id: "thr_123".to_string(),
                 model: None,
@@ -4411,6 +4477,7 @@ mod tests {
         let set_request = ClientRequest::ThreadGoalSet {
             request_id: RequestId::Integer(1),
             params: v2::ThreadGoalSetParams {
+                origin: None,
                 thread_id: "thr_123".to_string(),
                 objective: Some("ship goal mode".to_string()),
                 status: Some(v2::ThreadGoalStatus::Active),
@@ -4426,6 +4493,7 @@ mod tests {
         let clear_request = ClientRequest::ThreadGoalClear {
             request_id: RequestId::Integer(3),
             params: v2::ThreadGoalClearParams {
+                origin: None,
                 thread_id: "thr_123".to_string(),
             },
         };

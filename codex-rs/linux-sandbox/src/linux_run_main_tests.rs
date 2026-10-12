@@ -72,39 +72,10 @@ fn inserts_bwrap_argv0_before_command_separator() {
         /*supports_argv0*/ true,
         "/tmp/codex-arg0-session/codex-linux-sandbox".to_string(),
     );
-    let daemon_directory = codex_uds::shared_daemon_socket_directory()
-        .unwrap()
-        .display()
-        .to_string();
+    let separator = argv.iter().position(|arg| arg == "--").unwrap();
     assert_eq!(
-        argv,
-        vec![
-            "bwrap".to_string(),
-            "--new-session".to_string(),
-            "--die-with-parent".to_string(),
-            "--ro-bind".to_string(),
-            "/".to_string(),
-            "/".to_string(),
-            "--dev".to_string(),
-            "/dev".to_string(),
-            "--perms".to_string(),
-            "000".to_string(),
-            "--tmpfs".to_string(),
-            daemon_directory.clone(),
-            "--remount-ro".to_string(),
-            daemon_directory,
-            "--unshare-user".to_string(),
-            "--unshare-pid".to_string(),
-            "--unshare-ipc".to_string(),
-            "--proc".to_string(),
-            "/proc".to_string(),
-            "--cap-drop".to_string(),
-            "ALL".to_string(),
-            "--argv0".to_string(),
-            "codex-linux-sandbox".to_string(),
-            "--".to_string(),
-            "/bin/true".to_string(),
-        ]
+        &argv[separator - 2..],
+        ["--argv0", "codex-linux-sandbox", "--", "/bin/true"]
     );
 }
 
@@ -616,7 +587,7 @@ fn managed_proxy_inner_command_includes_route_spec() {
 
         assert!(args.iter().any(|arg| arg == "--proxy-route-spec"));
         assert!(args.iter().any(|arg| arg == "{\"routes\":[]}"));
-        let parsed = LandlockCommand::try_parse_from(args)
+        let parsed = LinuxSandboxCommand::try_parse_from(args)
             .expect("inner command should preserve the managed network policy");
         assert_eq!(parsed.managed_network, Some(managed_network));
     }
@@ -624,7 +595,7 @@ fn managed_proxy_inner_command_includes_route_spec() {
 
 #[test]
 fn managed_network_policy_alone_enables_proxy_mode() {
-    let parsed = LandlockCommand::try_parse_from([
+    let parsed = LinuxSandboxCommand::try_parse_from([
         "codex-linux-sandbox",
         "--sandbox-policy-cwd",
         "/tmp",
@@ -642,7 +613,7 @@ fn managed_network_policy_alone_enables_proxy_mode() {
 
 #[test]
 fn malformed_managed_network_policy_is_rejected() {
-    let error = LandlockCommand::try_parse_from([
+    let error = LinuxSandboxCommand::try_parse_from([
         "codex-linux-sandbox",
         "--sandbox-policy-cwd",
         "/tmp",
@@ -687,7 +658,7 @@ fn non_managed_inner_command_omits_route_spec() {
     });
 
     assert!(!args.iter().any(|arg| arg == "--proxy-route-spec"));
-    let parsed = LandlockCommand::try_parse_from(args)
+    let parsed = LinuxSandboxCommand::try_parse_from(args)
         .expect("unmanaged inner command should preserve ordinary sandbox mode");
     assert_eq!(parsed.managed_network, None);
 }

@@ -2,27 +2,36 @@
 //! Callers select policy overrides, output contracts, calibration, and truncation limits.
 
 use codex_context_fragments::ContextualUserFragment;
+use codex_guardian_context::TRANSCRIPT_JSON_INSTRUCTIONS;
+use codex_guardian_context::TranscriptFormat;
 use codex_guardian_context::truncate_text;
 use codex_protocol::models::ContentItemKind;
 
 const TENANT_POLICY_CONFIG_PLACEHOLDER: &str = "{{ tenant_policy_config }}";
+const EXTRA_POLICY_PLACEHOLDER: &str = "{{ extra_policy }}";
 
 /// Reviewer base instructions composed from the effective policy and caller-owned output contract.
 #[derive(Debug, Clone, Copy)]
 pub struct GuardianPolicyInstructions<'a> {
+    transcript_format: TranscriptFormat,
     tenant_policy_config: &'a str,
+    extra_policy: &'a str,
     policy_template: &'a str,
     output_contract: &'a str,
 }
 
 impl<'a> GuardianPolicyInstructions<'a> {
     pub fn new(
+        transcript_format: TranscriptFormat,
         tenant_policy_config: &'a str,
+        extra_policy: &'a str,
         policy_template: &'a str,
         output_contract: &'a str,
     ) -> Self {
         Self {
+            transcript_format,
             tenant_policy_config,
+            extra_policy,
             policy_template,
             output_contract,
         }
@@ -48,22 +57,32 @@ impl ContextualUserFragment for GuardianPolicyInstructions<'_> {
 
     fn body(&self) -> String {
         let Self {
+            transcript_format,
             tenant_policy_config,
+            extra_policy,
             policy_template,
             output_contract,
         } = *self;
-        let prompt = policy_template.trim_end().replace(
-            TENANT_POLICY_CONFIG_PLACEHOLDER,
-            tenant_policy_config.trim(),
-        );
-        format!("{prompt}\n\n{output_contract}\n")
+        // Substitute only template text, leaving placeholder-like text in either policy literal.
+        let prompt = policy_template
+            .trim_end()
+            .split(TENANT_POLICY_CONFIG_PLACEHOLDER)
+            .map(|part| part.replace(EXTRA_POLICY_PLACEHOLDER, extra_policy.trim()))
+            .collect::<Vec<_>>()
+            .join(tenant_policy_config.trim());
+        let instructions = format!("{prompt}\n\n{output_contract}\n");
+        match transcript_format {
+            TranscriptFormat::Line => instructions,
+            TranscriptFormat::Json => format!("{TRANSCRIPT_JSON_INSTRUCTIONS}\n\n{instructions}"),
+        }
     }
 }
 
 /// Classifier instructions composed from selected text, policy, and the caller-owned output contract.
-/// A supplied token limit applies after the complete instructions are composed.
+/// A supplied token limit applies before the fixed transcript provenance instructions.
 #[derive(Debug, Clone, Copy)]
 pub struct GuardianClassifierInstructions<'a> {
+    transcript_format: TranscriptFormat,
     classifier_instructions: &'a str,
     policy: &'a str,
     output_contract: &'a str,
@@ -72,12 +91,14 @@ pub struct GuardianClassifierInstructions<'a> {
 
 impl<'a> GuardianClassifierInstructions<'a> {
     pub fn new(
+        transcript_format: TranscriptFormat,
         classifier_instructions: &'a str,
         policy: &'a str,
         output_contract: &'a str,
         max_tokens: Option<usize>,
     ) -> Self {
         Self {
+            transcript_format,
             classifier_instructions,
             policy,
             output_contract,
@@ -105,6 +126,7 @@ impl ContextualUserFragment for GuardianClassifierInstructions<'_> {
 
     fn body(&self) -> String {
         let Self {
+            transcript_format,
             classifier_instructions,
             policy,
             output_contract,
@@ -120,9 +142,14 @@ impl ContextualUserFragment for GuardianClassifierInstructions<'_> {
         } else {
             format!("{instructions}\n\n{output_contract}")
         };
-        match max_tokens {
+        let instructions = match max_tokens {
             Some(max_tokens) => truncate_text(&instructions, max_tokens),
             None => instructions,
+        };
+        // Fixed host provenance must survive even the smallest configured prompt cap.
+        match transcript_format {
+            TranscriptFormat::Line => instructions,
+            TranscriptFormat::Json => format!("{TRANSCRIPT_JSON_INSTRUCTIONS}\n\n{instructions}"),
         }
     }
 }

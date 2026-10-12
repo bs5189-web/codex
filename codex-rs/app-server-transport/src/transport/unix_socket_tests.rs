@@ -5,6 +5,10 @@ use super::TransportEvent;
 use super::acquire_app_server_startup_lock;
 use super::app_server_control_socket_path;
 use super::start_control_socket_acceptor;
+#[cfg(unix)]
+use super::unix_socket::acquire_removable_app_server_startup_lock;
+#[cfg(unix)]
+use super::unix_socket::try_acquire_removable_app_server_startup_lock;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCNotification;
 use codex_core::config::find_codex_home;
@@ -53,6 +57,48 @@ fn listen_unix_socket_accepts_relative_custom_path() {
                 .expect("relative path should resolve")
         })
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn long_control_socket_paths_connect_to_distinct_daemons() {
+    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let long_parent = temp_dir.path().join("x".repeat(120));
+    let mut sockets = Vec::new();
+    let mut acceptors = Vec::new();
+
+    for name in ["first", "second"] {
+        let codex_home = long_parent.join(name);
+        std::fs::create_dir_all(&codex_home).expect("codex home");
+        let socket_path = app_server_control_socket_path(&codex_home).expect("socket path");
+        let (transport_event_tx, _transport_event_rx) =
+            mpsc::channel::<TransportEvent>(CHANNEL_CAPACITY);
+        let shutdown_token = CancellationToken::new();
+        let acceptor = start_control_socket_acceptor(
+            socket_path.clone(),
+            transport_event_tx,
+            shutdown_token.clone(),
+            DaemonShutdownAccess::Disabled,
+        )
+        .await
+        .expect("control socket acceptor should start");
+        sockets.push(socket_path);
+        acceptors.push((shutdown_token, acceptor));
+    }
+
+    assert_ne!(
+        std::fs::read_link(sockets[0].as_path()).expect("first socket target"),
+        std::fs::read_link(sockets[1].as_path()).expect("second socket target")
+    );
+    for socket in &sockets {
+        connect_to_socket(socket.as_path())
+            .await
+            .expect("client should connect through long path");
+    }
+    for (shutdown_token, acceptor) in acceptors {
+        shutdown_token.cancel();
+        acceptor.await.expect("acceptor should stop");
+    }
 }
 
 #[tokio::test]
@@ -269,6 +315,44 @@ async fn app_server_startup_lock_serializes_waiters() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn removable_startup_lock_attempt_is_nonblocking() {
+    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let lock_path = AbsolutePathBuf::from_absolute_path(temp_dir.path().join("socket.lock"))
+        .expect("lock path should resolve");
+    let _lock = try_acquire_removable_app_server_startup_lock(lock_path.clone())
+        .expect("first lock should succeed");
+    let error = timeout(
+        Duration::from_secs(1),
+        tokio::task::spawn_blocking(move || {
+            try_acquire_removable_app_server_startup_lock(lock_path)
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .err()
+    .unwrap();
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn removable_startup_lock_rejects_a_dangling_symlink_collision() {
+    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let lock_path = AbsolutePathBuf::from_absolute_path(temp_dir.path().join("socket.lock"))
+        .expect("lock path should resolve");
+    std::os::unix::fs::symlink(temp_dir.path().join("missing/target"), lock_path.as_path())
+        .expect("dangling symlink should be created");
+
+    let error = acquire_removable_app_server_startup_lock(lock_path)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn control_socket_rejects_writable_parent_without_changing_permissions() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -335,10 +419,12 @@ async fn control_socket_file_is_private_after_bind() {
                 .as_path()
         )
     );
+    assert!(physical_path.with_extension("lock").exists());
 
     shutdown_token.cancel();
     accept_handle.await.expect("acceptor should join");
     assert!(!physical_path.exists());
+    assert!(!physical_path.with_extension("lock").exists());
     assert!(std::fs::symlink_metadata(socket_path.as_path()).is_err());
 
     // Simulate a dangling rendezvous left by an interrupted cleanup.

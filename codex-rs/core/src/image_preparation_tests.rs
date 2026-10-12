@@ -67,6 +67,8 @@ fn decoded_image(image_url: &str) -> (Vec<u8>, DynamicImage) {
 async fn preparation_preserves_small_image_bytes_and_replaces_remote_urls() {
     let (data_url, original_bytes) = png_data_url(/*width*/ 64, /*height*/ 32);
     let mut items = vec![ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![
@@ -87,6 +89,8 @@ async fn preparation_preserves_small_image_bytes_and_replaces_remote_urls() {
         internal_chat_message_metadata_passthrough: None,
     }];
     items.push(ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "developer".to_string(),
         content: vec![ContentItem::InputImage {
@@ -100,6 +104,8 @@ async fn preparation_preserves_small_image_bytes_and_replaces_remote_urls() {
     });
 
     prepare_response_items(
+        "image-preparation-thread",
+        /*ephemeral*/ false,
         &mut items,
         ImagePreparationMode::DetailBased,
         ImageResizeNoticeMode::Disabled,
@@ -125,6 +131,8 @@ async fn preparation_preserves_small_image_bytes_and_replaces_remote_urls() {
     assert_eq!(
         &items[1],
         &ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "developer".to_string(),
             content: vec![ContentItem::InputText {
@@ -174,6 +182,8 @@ async fn detail_policies_apply_the_expected_budgets() {
     ] {
         let (image_url, _) = png_data_url(input_dimensions.0, input_dimensions.1);
         let mut items = vec![ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputImage {
@@ -185,6 +195,8 @@ async fn detail_policies_apply_the_expected_budgets() {
         }];
 
         let metadata = prepare_response_items(
+            "image-preparation-thread",
+            /*ephemeral*/ false,
             &mut items,
             ImagePreparationMode::DetailBased,
             ImageResizeNoticeMode::Disabled,
@@ -238,6 +250,8 @@ async fn preparation_reports_tool_output_item_id() {
         internal_chat_message_metadata_passthrough: None,
     }];
     let metadata = prepare_response_items(
+        "image-preparation-thread",
+        /*ephemeral*/ false,
         &mut items,
         ImagePreparationMode::DetailBased,
         ImageResizeNoticeMode::Disabled,
@@ -263,6 +277,8 @@ async fn preparation_reports_tool_output_item_id() {
 async fn upload_failure_keeps_resized_image_inline() {
     let (image_url, _) = png_data_url(/*width*/ 2048, /*height*/ 2048);
     let mut items = vec![ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputImage {
@@ -274,6 +290,8 @@ async fn upload_failure_keeps_resized_image_inline() {
     }];
 
     prepare_response_items(
+        "image-preparation-thread",
+        /*ephemeral*/ false,
         &mut items,
         ImagePreparationMode::DetailBased,
         ImageResizeNoticeMode::Disabled,
@@ -303,6 +321,8 @@ async fn resize_notices_count_file_backed_images_and_skip_failed_images() {
     let (small_image_url, _) = png_data_url(/*width*/ 64, /*height*/ 32);
     let mut items = vec![
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![
@@ -374,6 +394,8 @@ async fn resize_notices_count_file_backed_images_and_skip_failed_images() {
     ];
 
     prepare_response_items(
+        "image-preparation-thread",
+        /*ephemeral*/ false,
         &mut items,
         ImagePreparationMode::DetailBased,
         ImageResizeNoticeMode::Enabled,
@@ -446,6 +468,8 @@ async fn resize_notices_count_file_backed_images_and_skip_failed_images() {
     assert_eq!(
         &items[1],
         &ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "developer".to_string(),
             content: vec![ContentItem::InputText {
@@ -494,6 +518,8 @@ async fn resize_notices_count_file_backed_images_and_skip_failed_images() {
     assert_eq!(
         &items[3],
         &ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "developer".to_string(),
             content: vec![ContentItem::InputText {
@@ -561,6 +587,8 @@ async fn preparation_replaces_only_failed_tool_images_and_preserves_metadata() {
     }];
 
     prepare_response_items(
+        "image-preparation-thread",
+        /*ephemeral*/ false,
         &mut items,
         ImagePreparationMode::DetailBased,
         ImageResizeNoticeMode::Disabled,

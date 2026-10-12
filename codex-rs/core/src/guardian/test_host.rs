@@ -58,7 +58,7 @@ pub(crate) fn install(session: &Session, config: &Config) {
                 let runtime = Arc::clone(&runtime);
                 Box::pin(async move {
                     let history_reset = context.history_reset.clone();
-                    let (mut options, state) = context.thread_options(snapshot).await;
+                    let (mut options, state) = context.thread_options(kind, snapshot).await;
                     if matches!(
                         kind,
                         codex_analytics::GuardianReviewSessionKind::EphemeralForked
@@ -73,7 +73,7 @@ pub(crate) fn install(session: &Session, config: &Config) {
                         .insert(SessionIsolation::Isolated);
                     options
                         .thread_extension_init
-                        .insert(codex_guardian_reviewer::reviewer_allowed_tools());
+                        .insert(codex_guardian_reviewer::reviewer_tool_policy());
                     let session_cancel = cancel.clone();
                     let until = async move {
                         let _cancel_on_exit = cancel.clone().drop_guard();

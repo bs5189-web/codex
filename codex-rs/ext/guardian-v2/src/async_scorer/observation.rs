@@ -16,16 +16,18 @@ use codex_extension_api::ToolPayload;
 use codex_extension_api::ToolStartInput;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
-use codex_protocol::mcp::is_node_repl_backed_server;
+use codex_protocol::mcp::is_node_repl_backed_connector;
 use codex_protocol::openai_models::GuardianReviewMode;
 use codex_protocol::openai_models::GuardianScope;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::turn_input::CyberAccessProgram;
 
 use super::action::ActionRenderError;
 use super::action::GuardianAction;
 use super::authorization::ScoreAuthorization;
 use super::classification::Classification;
 use super::config::GuardianV2Config;
+use super::conversation::ConversationBackend;
 use super::coverage::scores_tool;
 use super::extension::GuardianV2Extension;
 use super::metrics::record_classification;
@@ -36,6 +38,18 @@ use super::score::GuardianV2ScoreProgress;
 use codex_protocol::openai_models::GuardianUnscoredAction as UnscoredAction;
 
 impl GuardianV2Extension {
+    #[tracing::instrument(
+        name = "guardian_scoring_observation",
+        level = "debug",
+        skip_all,
+        fields(
+            thread_id = input.thread_store.level_id(),
+            turn_id = input.turn_id,
+            call_id = input.call_id,
+            tool_name = %input.tool_name,
+            tool_call_index = tracing::field::Empty,
+        )
+    )]
     pub(super) async fn score_tool(&self, input: ToolStartInput<'_>) {
         // Polling a code cell does not introduce another action or age its score.
         if input.tool_name.is_default_namespace() && input.tool_name.name == "wait" {
@@ -56,11 +70,12 @@ impl GuardianV2Extension {
         if !policy.scoring_enabled() {
             input.thread_store.remove::<GuardianV2Enabled>();
         }
-        let mcp_server = input
+        let scope = input
             .mcp_tool
-            .map(|tool| tool.tool_info().server_name.as_str());
-        let scope = mcp_server
-            .map(GuardianScope::for_mcp_server)
+            .map(|tool| {
+                let info = tool.tool_info();
+                GuardianScope::for_mcp_connector(&info.server_name, info.connector_id.as_deref())
+            })
             .or_else(|| GuardianScope::for_tool(input.tool_name));
         // Model policies review nested actions; the Code Mode wrapper leaves their scores alone.
         // The legacy all-tools policy still scores wrappers through `other_tools`.
@@ -100,18 +115,57 @@ impl GuardianV2Extension {
         }
         if input.mcp_tool.is_some_and(|tool| {
             let info = tool.tool_info();
-            is_node_repl_backed_server(&info.server_name) && info.tool.name == "js"
+            is_node_repl_backed_connector(&info.server_name, info.connector_id.as_deref())
+                && if info.server_name == "codex_apps" {
+                    info.tool
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.get("_codex_apps"))
+                        .and_then(|meta| meta.get("resource_uri"))
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|uri| uri.trim_matches('/').rsplit('/').next())
+                        == Some("js")
+                } else {
+                    info.tool.name == "js"
+                }
         }) {
             score_progress.observe_js_execution();
         }
         let metrics = score_progress.metrics.clone();
+        let context_mode = GuardianContextMode::from_history(input.conversation_history.as_ref());
         let analytics = input.session_store.get::<AnalyticsEventsClient>();
         let sampled_at = SystemTime::now();
-        let tool_call_index = score_progress.observe(&input);
+        let (tool_call_index, reservation) = match input.thread_store.get::<ConversationBackend>() {
+            Some(conversation) => {
+                let (index, reservation) = conversation.reserve(|| score_progress.observe(&input));
+                (index, reservation.map(Some))
+            }
+            None => (score_progress.observe(&input), Ok(None)),
+        };
+        tracing::Span::current().record("tool_call_index", tool_call_index);
+        let reservation = match reservation {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                score_progress.invalidate(tool_call_index);
+                score_progress.fail_closed(sampled_at);
+                record_classification(
+                    metrics.as_deref(),
+                    context_mode,
+                    classification_started_at.elapsed(),
+                    "failure",
+                    Some(super::metrics::sampler_failure_reason(&error)),
+                );
+                return;
+            }
+        };
         let event_sink = Arc::clone(&self.event_sink);
         let thread_id = input.thread_store.level_id().to_owned();
         let turn_id = input.turn_id.to_owned();
         let root_turn_id = input.root_turn_id.map(str::to_owned);
+        let cyber_access_program = input
+            .turn_store
+            .get::<CyberAccessProgram>()
+            .map(|program| *program);
         let parent_response_id = input
             .turn_store
             .get::<codex_api::ResponseId>()
@@ -137,6 +191,7 @@ impl GuardianV2Extension {
                 score_progress.invalidate(tool_call_index);
                 record_classification(
                     metrics.as_deref(),
+                    context_mode,
                     classification_started_at.elapsed(),
                     "failure",
                     Some("thread_context_error"),
@@ -181,6 +236,7 @@ impl GuardianV2Extension {
                 score_progress.fail_closed(sampled_at);
                 record_classification(
                     metrics.as_deref(),
+                    context_mode,
                     classification_started_at.elapsed(),
                     "failure",
                     Some("configuration_error"),
@@ -203,7 +259,6 @@ impl GuardianV2Extension {
         let guardian_evidence = input
             .thread_store
             .get_or_init(GuardianReviewEvidence::default);
-        let context_mode = GuardianContextMode::from_history(input.conversation_history.as_ref());
         let selected_compaction = match select_parent_compaction(
             context_mode,
             &guardian_config,
@@ -224,6 +279,7 @@ impl GuardianV2Extension {
                 score_progress.fail_closed(sampled_at);
                 record_classification(
                     metrics.as_deref(),
+                    context_mode,
                     classification_started_at.elapsed(),
                     outcome,
                     failure_reason,
@@ -246,6 +302,7 @@ impl GuardianV2Extension {
                 score_progress.fail_closed(sampled_at);
                 record_classification(
                     metrics.as_deref(),
+                    context_mode,
                     classification_started_at.elapsed(),
                     "failure",
                     Some("input_too_large"),
@@ -257,6 +314,7 @@ impl GuardianV2Extension {
                 score_progress.fail_closed(sampled_at);
                 record_classification(
                     metrics.as_deref(),
+                    context_mode,
                     classification_started_at.elapsed(),
                     "failure",
                     Some("action_serialization_error"),
@@ -290,17 +348,32 @@ impl GuardianV2Extension {
             Vec::new()
         };
         // Capture root evidence before background metadata resolution or model I/O.
-        // Later root changes invalidate this sample through its captured authorization version.
-        let root_snapshot = if context_mode == GuardianContextMode::ThreadOwned {
+        // Later root authorization or review-context changes invalidate this sample.
+        let root_snapshot = if context_mode != GuardianContextMode::Legacy {
             thread.guardian_root_snapshot().await
         } else {
             None
         };
 
-        let score_authorization = ScoreAuthorization::current(&thread).await;
+        let Some(permissions) = input.permissions.await else {
+            score_progress.fail_closed(sampled_at);
+            record_classification(
+                metrics.as_deref(),
+                context_mode,
+                classification_started_at.elapsed(),
+                "failure",
+                Some("permission_resolution_error"),
+            );
+            return;
+        };
+        let score_authorization = ScoreAuthorization::current(&thread, &permissions).await;
         let classification = Classification {
+            reservation,
             classification_started_at,
             sampler,
+            decisions_sampler: input
+                .thread_store
+                .get::<super::decisions::DecisionsSampler>(),
             guardian_config,
             score_progress,
             parent_model,
@@ -312,6 +385,7 @@ impl GuardianV2Extension {
             thread_id,
             turn_id,
             root_turn_id,
+            cyber_access_program,
             parent_response_id,
             manager,
             thread,

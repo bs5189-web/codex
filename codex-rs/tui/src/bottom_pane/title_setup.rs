@@ -83,6 +83,8 @@ pub(crate) enum TerminalTitleItem {
     SessionId,
     /// Whether Fast mode is currently active.
     FastMode,
+    /// Whether Daybreak is enabled for this thread.
+    Daybreak,
     /// Current model name.
     #[strum(to_string = "model", serialize = "model-name")]
     Model,
@@ -101,7 +103,7 @@ impl TerminalTitleItem {
             TerminalTitleItem::Project => "Project name (falls back to current directory name)",
             TerminalTitleItem::CurrentDir => "Current working directory",
             TerminalTitleItem::Spinner => {
-                "Spinner while working, action-required message while blocked."
+                "Spinner while working, action-required message while blocked"
             }
             TerminalTitleItem::Status => {
                 "Compact session run-state text (Ready, Working, Thinking)"
@@ -135,6 +137,7 @@ impl TerminalTitleItem {
                 "Current thread identifier (omitted until thread starts)"
             }
             TerminalTitleItem::FastMode => "Whether Fast mode is currently active",
+            TerminalTitleItem::Daybreak => "Whether Daybreak is enabled for this thread",
             TerminalTitleItem::Model => "Current model name",
             TerminalTitleItem::ModelWithReasoning => "Current model name with reasoning level",
             TerminalTitleItem::Reasoning => "Current reasoning level",
@@ -170,6 +173,7 @@ impl TerminalTitleItem {
             }
             TerminalTitleItem::SessionId => Some(StatusSurfacePreviewItem::SessionId),
             TerminalTitleItem::FastMode => Some(StatusSurfacePreviewItem::FastMode),
+            TerminalTitleItem::Daybreak => Some(StatusSurfacePreviewItem::Daybreak),
             TerminalTitleItem::Model => Some(StatusSurfacePreviewItem::Model),
             TerminalTitleItem::ModelWithReasoning => {
                 Some(StatusSurfacePreviewItem::ModelWithReasoning)
@@ -365,6 +369,10 @@ impl TerminalTitleSetupView {
 impl BottomPaneView for TerminalTitleSetupView {
     fn keymap_contexts(&self) -> crate::keymap::KeymapContextSet {
         crate::keymap::KeymapContextSet::new(crate::keymap::KeymapContext::List)
+    }
+
+    fn accepts_input_when_disconnected(&self) -> bool {
+        true
     }
 
     fn handle_key_event(&mut self, key_event: crossterm::event::KeyEvent) {

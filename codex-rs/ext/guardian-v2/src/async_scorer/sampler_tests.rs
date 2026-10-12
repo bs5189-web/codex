@@ -1,5 +1,7 @@
 use anyhow::Result;
+use codex_api::ApiError;
 use codex_context_fragments::RenderedFragment;
+use codex_core::cyber_access_program::ApiKeyCyberAccessPrograms;
 use codex_extension_api::ContextualUserFragment;
 use codex_extension_api::ExtensionMetrics;
 use codex_guardian_context::PreviousReviews;
@@ -16,10 +18,12 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_prompts::GuardianClassifierInstructions;
 use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
+use codex_protocol::TranscriptFormat;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::turn_input::CyberAccessProgram;
 use core_test_support::responses;
 use core_test_support::responses::WebSocketConnectionConfig;
 use core_test_support::responses::ev_assistant_message;
@@ -47,6 +51,13 @@ use super::LunaSamplerConfig;
 use super::LunaSamplerError;
 use super::LunaSamplingRequest;
 use super::MAX_CONCURRENT_REQUESTS;
+
+#[path = "request_tests.rs"]
+mod request;
+#[path = "retained_sampling_tests.rs"]
+mod retained;
+#[path = "sampler_routing_tests.rs"]
+mod routing;
 
 impl LunaSampler {
     /// Waits for warm sockets to enter the client pool, beyond the server handshake.
@@ -164,7 +175,6 @@ pub(in crate::async_scorer) async fn proxy_websocket_servers_with_http(
             }
             let target = if &method == b"GET " {
                 if let ProxyPrewarmLimit::StopAfter { ready_connections } = prewarm_limit
-                    && ready_connections < INITIAL_WEBSOCKET_CONNECTIONS
                     && index == ready_connections
                     && !failed_prewarm
                 {
@@ -194,8 +204,12 @@ pub(in crate::async_scorer) async fn proxy_websocket_servers_with_http(
     Ok(format!("http://{address}/v1"))
 }
 
-pub(super) fn sampler_config(base_url: String) -> LunaSamplerConfig {
+pub(in crate::async_scorer) fn sampler_config(base_url: String) -> LunaSamplerConfig {
     LunaSamplerConfig {
+        api_key_cyber_access_programs: ApiKeyCyberAccessPrograms::Disabled,
+        workspace_routing: codex_model_provider::WorkspaceRoutingContext::new(
+            "https://chatgpt.com/backend-api".into(),
+        ),
         provider: create_model_provider(
             ModelProviderInfo::create_openai_provider(Some(base_url)),
             Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
@@ -224,6 +238,7 @@ async fn connect_sampler(config: LunaSamplerConfig) -> Result<LunaSampler> {
 
 fn classifier_instructions() -> RenderedFragment {
     GuardianClassifierInstructions::new(
+        TranscriptFormat::Line,
         "Classify using {{ tenant_policy_config }}.",
         "the tenant policy",
         "Return high for high risk or low for low risk.",
@@ -251,8 +266,9 @@ fn assert_classifier_instructions(request: &serde_json::Value) {
     );
 }
 
-pub(super) fn sample_request(parent_turn_id: &str) -> LunaSamplingRequest {
+pub(in crate::async_scorer) fn sample_request(parent_turn_id: &str) -> LunaSamplingRequest {
     LunaSamplingRequest {
+        cyber_access_program: None,
         parent_response_id: None,
         instructions: classifier_instructions(),
         input: vec![responses::user_message_item(
@@ -264,6 +280,60 @@ pub(super) fn sample_request(parent_turn_id: &str) -> LunaSamplingRequest {
         parent_turn_id: parent_turn_id.to_owned(),
         root_turn_id: None,
     }
+}
+
+#[tokio::test]
+async fn classifier_preserves_api_key_cyber_program_policy() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    for policy in [
+        ApiKeyCyberAccessPrograms::Enabled,
+        ApiKeyCyberAccessPrograms::Disabled,
+        ApiKeyCyberAccessPrograms::UnsupportedProvider,
+    ] {
+        let server = responses::start_mock_server().await;
+        let response = responses::mount_sse_once(
+            &server,
+            responses::sse(vec![
+                ev_assistant_message("score", "low"),
+                ev_completed("score"),
+            ]),
+        )
+        .await;
+        let mut config = sampler_config(server.uri());
+        config.api_key_cyber_access_programs = policy;
+        let sampler = LunaSampler::new(config);
+        let mut request = sample_request("parent");
+        request.cyber_access_program = Some(CyberAccessProgram::DaybreakRed);
+        let result = sampler.sample(request).await;
+        match policy {
+            ApiKeyCyberAccessPrograms::Disabled => {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("Cyber access programs are disabled for this API-key session.")
+                );
+                assert!(response.requests().is_empty());
+            }
+            ApiKeyCyberAccessPrograms::Enabled | ApiKeyCyberAccessPrograms::UnsupportedProvider => {
+                assert_eq!(result?, "low");
+                let expected = match policy {
+                    ApiKeyCyberAccessPrograms::Enabled => Some(json!({"cyber": "daybreak_blue"})),
+                    ApiKeyCyberAccessPrograms::UnsupportedProvider => None,
+                    ApiKeyCyberAccessPrograms::Disabled => unreachable!(),
+                };
+                assert_eq!(
+                    response
+                        .single_request()
+                        .body_json()
+                        .get("access_programs")
+                        .cloned(),
+                    expected,
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 type RecordedMetric = (String, i64, Vec<(String, String)>);
@@ -506,6 +576,10 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
     );
 
     let sampler = connect_sampler(LunaSamplerConfig {
+        api_key_cyber_access_programs: ApiKeyCyberAccessPrograms::Disabled,
+        workspace_routing: codex_model_provider::WorkspaceRoutingContext::new(
+            "https://chatgpt.com/backend-api".into(),
+        ),
         provider,
         http_client_factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         agent_identity_policy: AgentIdentityAuthPolicy::JwtOnly,
@@ -549,9 +623,12 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
 
     let first = sampler
         .sample(LunaSamplingRequest {
+            cyber_access_program: None,
             parent_response_id: None,
             instructions: classifier_instructions(),
             input: vec![ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "user".to_owned(),
                 content: vec![
@@ -585,11 +662,14 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
         }
     })
     .await?;
+    // Finish the opportunistic refill (rejected by the proxy) before rotating auth.
+    sampler.prewarm().await;
     manager.refresh_token_from_authority().await?;
     sampler.connections.clear();
     sampler.prewarm().await;
     let second = sampler
         .sample(LunaSamplingRequest {
+            cyber_access_program: None,
             parent_response_id: None,
             instructions: classifier_instructions(),
             input: vec![responses::user_message_item(
@@ -607,7 +687,13 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
     assert_eq!(second, "high");
     // Reuse the same socket after a nested owner, now with unknown root lineage.
     assert_eq!(sampler.sample(sample_request("turn-3")).await?, "low");
-    let mut requests = server.single_connection();
+    // Concurrent handshakes may finish in either order.
+    let (used, unused) = if server.single_connection().is_empty() {
+        (&idle_server, &server)
+    } else {
+        (&server, &idle_server)
+    };
+    let mut requests = used.single_connection();
     assert_eq!(requests.len(), 1);
     assert_eq!(
         refreshed.single_handshake().header("authorization"),
@@ -615,7 +701,7 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
     );
     requests.extend(refreshed.single_connection());
     assert_eq!(requests.len(), 3);
-    let thread_id = assert_connection_metadata(&server, &[("turn-1", Some("turn-1"))])?;
+    let thread_id = assert_connection_metadata(used, &[("turn-1", Some("turn-1"))])?;
     assert_connection_metadata(&refreshed, &[("turn-2", Some("root-2")), ("turn-3", None)])?;
     assert_ne!(
         requests[1].body_json()["client_metadata"]["turn_id"],
@@ -623,7 +709,7 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
     );
     assert_ne!(
         Some(thread_id),
-        idle_server.single_handshake().header("thread-id")
+        unused.single_handshake().header("thread-id")
     );
     assert_eq!(
         requests[0].body_json()["input"][2]["content"],
@@ -684,7 +770,12 @@ async fn sampler_reuses_parent_compaction_only_for_matching_model_hashes() -> Re
         request.parent_compaction_hash = parent_hash.map(str::to_owned);
         request.input.insert(
             /*index*/ 0,
-            PreviousReviews::try_from_fragments(vec!["trusted review".to_owned()])?.into_message(),
+            PreviousReviews::try_from_fragments(vec![codex_guardian_context::PreviousReview {
+                id: ResponseItemId::from_server("review-trusted".to_owned()),
+                fragment: "trusted review".to_owned(),
+            }])?
+            .into_annotated_message()
+            .into_item(),
         );
 
         let result = sampler.sample(request).await;
@@ -751,6 +842,10 @@ async fn sampler_returns_classification_token_before_terminal_response_events() 
         ))),
     );
     let sampler = connect_sampler(LunaSamplerConfig {
+        api_key_cyber_access_programs: ApiKeyCyberAccessPrograms::Disabled,
+        workspace_routing: codex_model_provider::WorkspaceRoutingContext::new(
+            "https://chatgpt.com/backend-api".into(),
+        ),
         provider,
         http_client_factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         agent_identity_policy: AgentIdentityAuthPolicy::JwtOnly,
@@ -769,6 +864,7 @@ async fn sampler_returns_classification_token_before_terminal_response_events() 
     let output = tokio::time::timeout(
         Duration::from_secs(2),
         sampler.sample(LunaSamplingRequest {
+            cyber_access_program: None,
             parent_response_id: None,
             instructions: classifier_instructions(),
             input: vec![responses::user_message_item(
@@ -888,6 +984,15 @@ async fn sampler_replaces_scored_drains_before_unfinished_classifications() -> R
         .await?,
     );
 
+    // Select the stalled socket first independently of handshake completion order.
+    let stalled_id = servers[1].single_handshake().header("thread-id").unwrap();
+    sampler
+        .connections
+        .idle_connections
+        .lock()
+        .unwrap()
+        .sort_by_key(|connection| connection.thread_id == stalled_id);
+
     let oldest_sampler = Arc::clone(&sampler);
     let oldest = tokio::spawn(async move { oldest_sampler.sample(sample_request("oldest")).await });
     tokio::time::timeout(
@@ -896,6 +1001,15 @@ async fn sampler_replaces_scored_drains_before_unfinished_classifications() -> R
     )
     .await?;
 
+    // Finish the refill before selecting a socket; it must not append after sorting.
+    sampler.prewarm().await;
+    let scored_id = servers[0].single_handshake().header("thread-id").unwrap();
+    sampler
+        .connections
+        .idle_connections
+        .lock()
+        .unwrap()
+        .sort_by_key(|connection| connection.thread_id == scored_id);
     let scored_sampler = Arc::clone(&sampler);
     let scored_request =
         tokio::spawn(async move { scored_sampler.sample(sample_request("scored")).await });
@@ -972,10 +1086,24 @@ async fn sampler_retries_expired_websockets_on_another_warm_connection() -> Resu
     ))
     .await?;
 
+    // Start on the expired socket so this exercises recovery in either open order.
+    let expired_id = expired.single_handshake().header("thread-id").unwrap();
+    sampler
+        .connections
+        .idle_connections
+        .lock()
+        .unwrap()
+        .sort_by_key(|connection| connection.thread_id == expired_id);
+
     let mut request = sample_request("turn-1");
     request.input.insert(
         /*index*/ 0,
-        PreviousReviews::try_from_fragments(vec!["trusted review".to_owned()])?.into_message(),
+        PreviousReviews::try_from_fragments(vec![codex_guardian_context::PreviousReview {
+            id: ResponseItemId::from_server("review-trusted".to_owned()),
+            fragment: "trusted review".to_owned(),
+        }])?
+        .into_annotated_message()
+        .into_item(),
     );
     request.input.insert(
         /*index*/ 1,
@@ -1055,15 +1183,20 @@ async fn sampler_uses_http_with_a_fresh_identity_when_warm_connections_expire() 
         .header("thread-id")
         .expect("HTTP classifier thread ID");
     ThreadId::from_string(&http_thread_id)?;
+    let (used, unused) = if first.single_connection().is_empty() {
+        (&second, &first)
+    } else {
+        (&first, &second)
+    };
     let thread_ids = HashSet::from([
-        assert_connection_metadata(&first, &[])?,
-        assert_connection_metadata(&second, &[("turn-1", None)])?,
+        assert_connection_metadata(unused, &[])?,
+        assert_connection_metadata(used, &[("turn-1", None)])?,
         http_thread_id,
     ]);
     assert_eq!(thread_ids.len(), 3);
     responses::assert_parent_turn(&request.body_json(), Some("turn-2"))?;
     assert_classifier_instructions(&request.body_json());
-    assert_eq!(second.single_connection().len(), 1);
+    assert_eq!(used.single_connection().len(), 1);
     Ok(())
 }
 
@@ -1082,7 +1215,11 @@ async fn sampler_reconnects_after_transient_service_failures() -> Result<()> {
         })]]]
     };
     let first = responses::start_websocket_server(unavailable()).await;
-    let second = responses::start_websocket_server(unavailable()).await;
+    let second = responses::start_websocket_server(vec![vec![vec![json!({
+        "type": "response.failed",
+        "response": {"error": {"code": "flex_unavailable", "message": "capacity unavailable"}}
+    })]]])
+    .await;
     let http = responses::start_mock_server().await;
     let recovered = responses::mount_sse_once(
         &http,
@@ -1133,13 +1270,17 @@ async fn sampler_limits_transient_recovery_attempts() -> Result<()> {
         })]]]
     };
     let first = responses::start_websocket_server(unavailable()).await;
-    let second = responses::start_websocket_server(unavailable()).await;
+    let second = responses::start_websocket_server(vec![vec![vec![json!({
+        "type": "response.failed",
+        "response": {"error": {"code": "flex_unavailable", "message": "capacity unavailable"}}
+    })]]])
+    .await;
     let http = responses::start_mock_server().await;
     let third = responses::mount_sse_once(
         &http,
         responses::sse(vec![json!({
             "type": "response.failed", "response": {
-                "error": {"code": "internal_server_error", "message": "HTTP sampling failed"}
+                "error": {"code": "flex_unavailable", "message": "HTTP sampling failed"}
             }
         })]),
     )
@@ -1159,7 +1300,10 @@ async fn sampler_limits_transient_recovery_attempts() -> Result<()> {
         .await
         .expect_err("sampling should stop after the bounded retries");
 
-    assert!(error.to_string().contains("HTTP sampling failed"));
+    assert!(matches!(
+        error,
+        LunaSamplerError::Api(ApiError::FlexUnavailable)
+    ));
     assert_eq!(first.single_connection().len(), 1);
     assert_eq!(second.single_connection().len(), 1);
     assert_eq!(third.requests().len(), 1);
@@ -1194,6 +1338,13 @@ async fn parent_response_id_survives_classifier_transport_retry() -> Result<()> 
             );
         }
         let sampler = connect_sampler(config).await?;
+        let expired_id = expired.single_handshake().header("thread-id").unwrap();
+        sampler
+            .connections
+            .idle_connections
+            .lock()
+            .unwrap()
+            .sort_by_key(|connection| connection.thread_id == expired_id);
         let parent_response_id = "resp-parent";
         let mut request = sample_request("turn-1");
         request.parent_response_id = Some(parent_response_id.to_owned());

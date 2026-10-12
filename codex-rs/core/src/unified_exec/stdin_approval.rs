@@ -2,6 +2,7 @@
 //! Permission snapshots stay host-owned; neither an earlier approval nor a policy
 //! change alters the sandbox of an already-running process. Native launches keep
 //! their configured Windows sandbox selection; executor launches use executor defaults.
+//! Runtime-internal grants alone do not require review; agent grants and policy drift do.
 
 use super::ProcessEntry;
 use super::UnifiedExecContext;
@@ -32,6 +33,7 @@ pub(crate) struct TerminalPermissions {
     policy: TerminalPolicy,
     sandbox_source: TerminalSandboxSource,
     launch_permissions: SandboxPermissions,
+    filesystem_escalated: bool,
     additional_permissions: Option<AdditionalPermissionProfile>,
     internal_permissions: Option<AdditionalPermissionProfile>,
 }
@@ -99,12 +101,17 @@ impl TerminalPermissions {
                 merge_permission_profiles(additional_permissions, internal_permissions),
             ),
             sandbox_source,
-            // A bypass is a property of the successful attempt, not a difference
-            // between settings: a full-access environment can still bypass a proxy.
+            // Retain the successful attempt's authority independently from its baseline.
             launch_permissions,
+            filesystem_escalated: false,
             additional_permissions: additional_permissions.cloned(),
             internal_permissions: internal_permissions.cloned(),
         }
+    }
+
+    pub(crate) fn with_filesystem_escalation(mut self) -> Self {
+        self.filesystem_escalated = true;
+        self
     }
 
     /// Compares launch policy with current policy including retained grants,
@@ -126,16 +133,19 @@ impl TerminalPermissions {
                 "this terminal cannot enforce the current denied-read restrictions; start a new terminal",
             );
         }
-        // Once the retained settings match, only the baseline permissions can differ.
-        Ok(if bypassed || &self.policy != current {
-            SandboxPermissions::RequireEscalated
-        } else if self.policy.sandbox.permissions
-            == effective_permission_profile(baseline, /*additional_permissions*/ None)
-        {
-            SandboxPermissions::UseDefault
-        } else {
-            SandboxPermissions::WithAdditionalPermissions
-        })
+        // Runtime-internal grants are part of an ordinary launch, so only permissions
+        // beyond the baseline plus those grants need a fresh stdin approval.
+        Ok(
+            if bypassed || self.filesystem_escalated || &self.policy != current {
+                SandboxPermissions::RequireEscalated
+            } else if self.policy.sandbox.permissions
+                == effective_permission_profile(baseline, self.internal_permissions.as_ref())
+            {
+                SandboxPermissions::UseDefault
+            } else {
+                SandboxPermissions::WithAdditionalPermissions
+            },
+        )
     }
 
     fn approval_reason(
@@ -144,6 +154,8 @@ impl TerminalPermissions {
     ) -> Result<String, serde_json::Error> {
         let authority = if self.launch_permissions.requires_escalated_permissions() {
             "This terminal was launched outside the sandbox, bypassing any managed network proxy."
+        } else if self.filesystem_escalated {
+            "This terminal has approved broader filesystem access; denied reads are still enforced."
         } else if self.policy.sandbox.permissions == PermissionProfile::Disabled {
             "This terminal runs without a filesystem sandbox."
         } else {

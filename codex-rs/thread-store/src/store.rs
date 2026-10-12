@@ -1,8 +1,10 @@
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_rollout::RolloutItem;
 use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use crate::AddThreadAttachmentOutcome;
 use crate::AddThreadAttachmentParams;
@@ -20,6 +22,7 @@ use crate::DeletedProject;
 use crate::ItemPage;
 use crate::ListItemsParams;
 use crate::ListProjectsParams;
+use crate::ListThreadAttachmentThreadsParams;
 use crate::ListThreadAttachmentsParams;
 use crate::ListThreadSectionsParams;
 use crate::ListThreadsParams;
@@ -46,6 +49,7 @@ use crate::StoredThread;
 use crate::StoredThreadHistory;
 use crate::StoredThreadSection;
 use crate::StoredThreadSectionsPage;
+use crate::ThreadAttachmentOwnerPage;
 use crate::ThreadAttachmentPage;
 use crate::ThreadMetadataPatch;
 use crate::ThreadOccurrenceSearchPage;
@@ -64,8 +68,13 @@ pub type ThreadStoreFuture<'a, T> = Pin<Box<dyn Future<Output = ThreadStoreResul
 /// Why thread persistence is being requested.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PersistContext {
+    /// Thread initialization or context injection is complete without starting a turn.
+    ThreadPreparation,
     /// Standard persistence makes the thread and all queued items durable and readable.
     Standard,
+    /// Copied subagent history may be enqueued so its durability fence can overlap relationship
+    /// persistence. The caller must await standard persistence before acknowledging the child.
+    SubagentSpawn,
     /// A turn is about to begin sampling after its input has been recorded.
     TurnStart,
     /// Accepted user input is being recorded before an active turn's next sampling request.
@@ -78,8 +87,8 @@ impl PersistContext {
     /// durability barrier. Stores may still choose to persist synchronously.
     pub fn allows_background_persistence(self) -> bool {
         match self {
-            Self::Standard => false,
-            Self::TurnStart | Self::SteeredUserInput => true,
+            Self::ThreadPreparation | Self::Standard => false,
+            Self::SubagentSpawn | Self::TurnStart | Self::SteeredUserInput => true,
         }
     }
 }
@@ -133,8 +142,18 @@ pub trait ThreadStore: Any + Send + Sync {
         })
     }
 
-    /// Reopens an existing thread for live appends.
-    fn resume_thread(&self, params: ResumeThreadParams) -> ThreadStoreFuture<'_, ()>;
+    /// Reopens an existing thread for live appends and returns its authoritative replay context.
+    ///
+    /// Stored snapshots supplied by callers may predate writer acquisition. Implementations must
+    /// include writes committed before acquisition in the returned context. Explicitly supplied
+    /// histories without a canonical session header retain their import/override semantics.
+    /// A supplied revision may enable reuse of the shared snapshot after validation; missing or
+    /// unrecognized revisions must not be treated as proof that stored history is unchanged.
+    /// On failure, implementations must release any writer acquired by this operation.
+    fn resume_thread(
+        &self,
+        params: ResumeThreadParams,
+    ) -> ThreadStoreFuture<'_, Arc<Vec<RolloutItem>>>;
 
     /// Appends raw rollout items to a live thread.
     ///
@@ -142,9 +161,22 @@ pub trait ThreadStore: Any + Send + Sync {
     /// replay history and before updating any implementation-owned projections.
     fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()>;
 
+    /// Records metadata derived from rollout items.
+    /// Unlike [`Self::update_thread_metadata`], this allows the write to be deferred.
+    ///
+    /// The default implementation awaits the update. Deferred writes must respect the
+    /// flush and shutdown guarantees documented by [`Self::persist_thread`].
+    fn record_thread_metadata(
+        &self,
+        params: UpdateThreadMetadataParams,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move { self.update_thread_metadata(params).await.map(|_| ()) })
+    }
+
     /// Materializes the thread if persistence is lazy, then persists all queued items.
     ///
-    /// Standard persistence must complete before returning. Contexts that allow background
+    /// Preparation checkpoints may leave disposable preparation data in memory without
+    /// activating storage. Standard persistence must complete before returning. Contexts that allow background
     /// persistence may complete asynchronously when the implementation enqueues the checkpoint
     /// before returning, fences it with subsequent flush or shutdown operations, and surfaces
     /// failures through those operations.
@@ -158,6 +190,7 @@ pub trait ThreadStore: Any + Send + Sync {
     fn flush_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()>;
 
     /// Flushes pending items and closes the live thread writer.
+    /// Stores with opt-in disposable preparations may discard an unactivated preparation.
     fn shutdown_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()>;
 
     /// Discards the live thread writer without forcing pending in-memory items to become durable.
@@ -321,6 +354,19 @@ pub trait ThreadStore: Any + Send + Sync {
         Box::pin(async {
             Err(ThreadStoreError::Unsupported {
                 operation: "thread/attachment/list",
+            })
+        })
+    }
+
+    /// Lists owners of an exact attachment identity, without thread browser visibility filters.
+    /// Results describe persisted membership, not an atomic claim on the referenced resource.
+    fn list_thread_attachment_threads(
+        &self,
+        _params: ListThreadAttachmentThreadsParams,
+    ) -> ThreadStoreFuture<'_, ThreadAttachmentOwnerPage> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "thread/attachmentOwner/list",
             })
         })
     }

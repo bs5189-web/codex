@@ -3,8 +3,8 @@
 
 use std::collections::HashMap;
 
-use codex_extension_api::AllowedTools;
 use codex_extension_api::ToolName;
+use codex_extension_api::ToolPolicy;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Personality;
@@ -17,6 +17,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnEnvironmentSelections;
+use codex_protocol::turn_input::CyberAccessProgram;
 use codex_protocol::turn_input::TurnInputRequest;
 use codex_protocol::turn_input::TurnStartOptions;
 use codex_protocol::user_input::UserInput;
@@ -27,15 +28,31 @@ use serde_json::Value;
 /// Keeping it in thread data avoids caching settings that can change between reviews.
 pub struct ReviewerConfig<C>(pub fn(&C) -> anyhow::Result<C>);
 
-/// Reviewer tools, including the existing Code Mode dispatchers when enabled.
-/// The host still applies feature flags and sandbox restrictions to these tools.
-pub fn reviewer_allowed_tools() -> AllowedTools {
-    AllowedTools(
-        ["exec_command", "write_stdin", "view_image", "exec", "wait"]
-            .into_iter()
-            .map(ToolName::plain)
-            .collect(),
-    )
+/// Uses Blue for either Daybreak selection without changing Standard or automatic behavior.
+pub fn guardian_cyber_access_program(
+    program: Option<CyberAccessProgram>,
+) -> Option<CyberAccessProgram> {
+    program.map(|program| match program {
+        CyberAccessProgram::Standard => CyberAccessProgram::Standard,
+        CyberAccessProgram::DaybreakBlue | CyberAccessProgram::DaybreakRed => {
+            CyberAccessProgram::DaybreakBlue
+        }
+    })
+}
+
+/// Reviewer tool selection and construction restrictions, enforced by core.
+pub fn reviewer_tool_policy() -> ToolPolicy {
+    ToolPolicy {
+        allowed_tools: Some(
+            ["exec_command", "write_stdin", "view_image", "exec", "wait"]
+                .into_iter()
+                .map(ToolName::plain)
+                .collect(),
+        ),
+        require_managed_sandbox: true,
+        require_unified_exec: true,
+        expose_additional_permissions: false,
+    }
 }
 
 /// Applies the same read-only ceiling to the reviewer and each inherited environment.
@@ -56,6 +73,8 @@ pub struct ReviewerTurn {
     pub personality: Option<Personality>,
     pub model: String,
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// The parent turn's selection; Guardian uses Blue for either Daybreak program.
+    pub cyber_access_program: Option<CyberAccessProgram>,
     pub parent_response_id: Option<String>,
     pub schema: Value,
     pub parent_turn_id: String,
@@ -74,7 +93,7 @@ impl ReviewerTurn {
         }
         TurnInputRequest::user_input(self.items)
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(self.environments),
+                environments: Some(self.environments.into_requests()),
                 approval_policy: Some(AskForApproval::Never),
                 permission_profile: Some(self.permission_profile),
                 summary: Some(self.reasoning_summary),
@@ -95,6 +114,7 @@ impl ReviewerTurn {
             )
             .on_start(TurnStartOptions {
                 turn_trigger: Some("guardian_review".to_owned()),
+                cyber_access_program: guardian_cyber_access_program(self.cyber_access_program),
                 final_output_json_schema: Some(self.schema),
                 parent_turn_id: Some(self.parent_turn_id),
                 root_turn_id: self.root_turn_id,

@@ -13,7 +13,8 @@ fn native_request() -> Value {
         "method": "openai/elicitation/create",
         "params": {
             "mode": "openai/userVerification", "title": "Verify action",
-            "description": "Verify the requested operation", "challenge": "AQID"
+            "description": "Verify the requested operation", "challenge": "AQID",
+            "_meta": {"example/display": {"label": "Operation"}}
         }
     })
 }
@@ -115,7 +116,10 @@ async fn native_mrtr_returns_validated_proof_or_cancellation_in_content() -> any
         (
             ElicitationAction::Accept,
             json!({"signature": "invalid"}),
-            json!({"action": "cancel"}),
+            json!({
+                "action": "cancel",
+                "_meta": {"openai/userVerificationReason": "invalidProof"},
+            }),
         ),
     ] {
         let server = MockServer::start().await;
@@ -206,6 +210,7 @@ async fn native_mrtr_returns_validated_proof_or_cancellation_in_content() -> any
                 assert_eq!(
                     request,
                     Elicitation::UserVerification {
+                        meta: Some(json!({"example/display": {"label": "Operation"}})),
                         title: "Verify action".into(),
                         description: "Verify the requested operation".into(),
                         challenge: "AQID".into(),

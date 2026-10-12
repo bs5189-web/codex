@@ -1,16 +1,16 @@
 //! Clipboard copy backend for the TUI's `/copy` command and `Ctrl+O` hotkey.
 //!
 //! Local copying uses the native clipboard, with WSL PowerShell as a fallback.
-//! In tmux, also forward to the attached terminal so clients attached after Codex
-//! started receive the copy. Over SSH without tmux, send OSC 52 directly.
+//! In tmux and Herdr, also forward to the attached terminal so clients attached after Codex
+//! started receive the copy. Over SSH without a multiplexer, send OSC 52 directly.
 //!
 //! Terminal writes have no delivery acknowledgement: a successful send must not
 //! suppress native copying. Both the host and attached client's clipboards may
-//! change. Outside tmux and SSH, use OSC 52 only if native copying fails.
+//! change. Outside tmux, Herdr, and SSH, use OSC 52 only if native copying fails.
 //!
 //! On Linux, X11 and some Wayland compositors require the process that wrote the
 //! clipboard to keep its handle open. `ClipboardLease` wraps the `arboard::Clipboard`
-//! so callers can store it for the lifetime of the TUI. On other platforms the lease
+//! so the copy worker can retain it for the lifetime of the TUI. On other platforms the lease
 //! is always `None`.
 //!
 //! Empty selections fail without modifying a clipboard.
@@ -19,24 +19,25 @@
 //! so callers must distinguish them from confirmed native clipboard writes.
 //! Image paste lives in `clipboard_paste`.
 
+pub(crate) mod primary;
 mod tmux;
+pub(crate) mod worker;
 
 use base64::Engine;
 use std::io::Write;
+use std::sync::Arc;
 use tmux::copy as tmux_clipboard_copy;
 
 /// Maximum raw bytes sent through tmux or directly encoded into OSC 52.
 /// Large payloads are rejected before encoding to avoid overwhelming the terminal.
 const OSC52_MAX_RAW_BYTES: usize = 100_000;
-#[cfg(target_os = "macos")]
-static STDERR_SUPPRESSION_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> =
-    std::sync::OnceLock::new();
-
-/// Whether copied text should also have a rendered HTML representation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Whether copied text should also have a rendered HTML representation and its source.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CopyFormat {
     PlainText,
     Markdown,
+    /// Visible selection text is copied literally; only HTML uses the semantic Markdown.
+    MarkdownSelection(Arc<str>),
 }
 
 /// A native clipboard write or an unacknowledged request to the user's terminal.
@@ -60,11 +61,13 @@ impl CopyOutcome {
     }
 }
 
-/// Whether a clipboard backend confirmed the write or only sent a request.
+/// Submission progress or the delivery status reported by a clipboard backend.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CopyStatus {
     Confirmed,
     Unconfirmed,
+    Pending(u64),
+    Busy,
 }
 
 impl CopyStatus {
@@ -72,14 +75,16 @@ impl CopyStatus {
         match self {
             Self::Confirmed => format!("Copied {label} to clipboard"),
             Self::Unconfirmed => "Copy unconfirmed; /export saves chat".to_string(),
+            Self::Pending(_) => format!("Copying {label}…"),
+            Self::Busy => "Copy already in progress".to_string(),
         }
     }
 }
 
 /// Copy text to the system clipboard.
 ///
-/// Try native copying, then independently attempt terminal forwarding in tmux or
-/// SSH. A terminal send is best effort and does not confirm clipboard delivery.
+/// Try native copying, then independently attempt terminal forwarding in tmux,
+/// Herdr, or SSH. A terminal send is best effort and does not confirm clipboard delivery.
 /// Terminal forwarding may replace native HTML with plain text.
 ///
 /// Native or WSL success returns `Copied`, even if terminal forwarding fails.
@@ -87,18 +92,36 @@ impl CopyStatus {
 /// existing native lease unless the backend supplies a replacement.
 ///
 /// OSC 52 is supported by kitty, WezTerm, iTerm2, Ghostty, and others.
-pub(crate) fn copy_to_clipboard(text: &str, format: CopyFormat) -> Result<CopyOutcome, String> {
+fn copy_to_clipboard(
+    text: &str,
+    format: CopyFormat,
+    begin_delivery: impl Fn() -> Result<(), String>,
+    osc52: impl Fn(&str) -> Result<(), String>,
+) -> Result<CopyOutcome, String> {
+    #[cfg(not(target_os = "android"))]
+    let native_copy = {
+        let clipboard = arboard::Clipboard::new();
+        move |text: &str, html: Option<&str>| arboard_copy(clipboard, text, html)
+    };
+    #[cfg(target_os = "android")]
+    let native_copy = |_text: &str, _html: Option<&str>| {
+        Err("native clipboard unavailable on Android".to_string())
+    };
+    // Decide before propagating setup success or failure: either result could otherwise
+    // start a native write or fallback long after the user abandoned this request.
+    begin_delivery()?;
     copy_to_clipboard_with(
         text,
         format,
         CopyEnvironment {
+            herdr_session: std::env::var("HERDR_ENV").is_ok_and(|value| value == "1"),
             ssh_session: is_ssh_session(),
             wsl_session: is_wsl_session(),
             tmux_session: is_tmux_session(),
         },
         tmux_clipboard_copy,
-        osc52_copy,
-        arboard_copy,
+        osc52,
+        native_copy,
         wsl_clipboard_copy,
     )
 }
@@ -137,6 +160,7 @@ impl ClipboardLease {
 /// without touching real clipboards or terminal I/O.
 #[derive(Clone, Copy)]
 struct CopyEnvironment {
+    herdr_session: bool,
     ssh_session: bool,
     wsl_session: bool,
     tmux_session: bool,
@@ -148,7 +172,7 @@ fn copy_to_clipboard_with(
     environment: CopyEnvironment,
     tmux_copy_fn: impl Fn(&str) -> Result<(), String>,
     osc52_copy_fn: impl Fn(&str) -> Result<(), String>,
-    arboard_copy_fn: impl Fn(&str, Option<&str>) -> Result<Option<ClipboardLease>, String>,
+    arboard_copy_fn: impl FnOnce(&str, Option<&str>) -> Result<Option<ClipboardLease>, String>,
     wsl_copy_fn: impl Fn(&str) -> Result<(), String>,
 ) -> Result<CopyOutcome, String> {
     if text.is_empty() {
@@ -177,6 +201,9 @@ fn copy_to_clipboard_with(
     let html = match format {
         CopyFormat::PlainText => None,
         CopyFormat::Markdown => Some(crate::clipboard_html::render_markdown(text)),
+        CopyFormat::MarkdownSelection(source) => {
+            Some(crate::clipboard_html::render_markdown(&source))
+        }
     };
     let native_result = arboard_copy_fn(text, html.as_deref()).or_else(|native_error| {
         if environment.wsl_session {
@@ -189,9 +216,11 @@ fn copy_to_clipboard_with(
     });
     // Copy natively first: an X11 SelectionClear from a terminal write can otherwise
     // race with arboard reusing its ownership window and clear the new native data.
-    // Persistent tmux sessions may gain remote clients after Codex starts, so still
+    // Persistent multiplexer sessions may gain remote clients after Codex starts, so still
     // forward even when no SSH variables were inherited or native copying succeeded.
-    let terminal_result = (environment.tmux_session || environment.ssh_session).then(terminal_copy);
+    let terminal_result =
+        (environment.tmux_session || environment.herdr_session || environment.ssh_session)
+            .then(terminal_copy);
     match native_result {
         Ok(lease) => Ok(CopyOutcome::Copied(lease)),
         Err(native_error) => terminal_result
@@ -204,7 +233,7 @@ fn copy_to_clipboard_with(
 }
 
 /// Detect whether the current process is running inside an SSH session.
-fn is_ssh_session() -> bool {
+pub(crate) fn is_ssh_session() -> bool {
     std::env::var_os("SSH_TTY").is_some() || std::env::var_os("SSH_CONNECTION").is_some()
 }
 
@@ -214,31 +243,23 @@ fn is_tmux_session() -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn is_wsl_session() -> bool {
+pub(crate) fn is_wsl_session() -> bool {
     crate::clipboard_paste::is_probably_wsl()
 }
 
 #[cfg(not(target_os = "linux"))]
-fn is_wsl_session() -> bool {
+pub(crate) fn is_wsl_session() -> bool {
     false
 }
 
-/// Run arboard with stderr suppressed.
-///
-/// On macOS, `arboard::Clipboard::new()` initializes `NSPasteboard` which
-/// triggers `os_log` / `NSLog` output on stderr. Because the TUI owns the
-/// terminal, that stray output corrupts the display. We temporarily redirect
-/// fd 2 to `/dev/null` around the call to keep the screen clean.
+/// Write to the native clipboard. The TUI owns any process-wide stderr redirection.
 #[cfg(not(target_os = "android"))]
-fn arboard_copy(text: &str, html: Option<&str>) -> Result<Option<ClipboardLease>, String> {
-    #[cfg(target_os = "macos")]
-    let _stderr_lock = STDERR_SUPPRESSION_MUTEX
-        .get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .map_err(|_| "stderr suppression lock poisoned".to_string())?;
-    let _guard = SuppressStderr::new();
-    let mut clipboard =
-        arboard::Clipboard::new().map_err(|e| format!("clipboard unavailable: {e}"))?;
+fn arboard_copy(
+    clipboard: Result<arboard::Clipboard, arboard::Error>,
+    text: &str,
+    html: Option<&str>,
+) -> Result<Option<ClipboardLease>, String> {
+    let mut clipboard = clipboard.map_err(|e| format!("clipboard unavailable: {e}"))?;
     match html {
         Some(html) => clipboard
             .set_html(html, Some(text))
@@ -255,11 +276,6 @@ fn arboard_copy(text: &str, html: Option<&str>) -> Result<Option<ClipboardLease>
     {
         Ok(None)
     }
-}
-
-#[cfg(target_os = "android")]
-fn arboard_copy(_text: &str, _html: Option<&str>) -> Result<Option<ClipboardLease>, String> {
-    Err("native clipboard unavailable on Android".to_string())
 }
 
 /// Copy text into the Windows clipboard from a WSL process.
@@ -316,63 +332,6 @@ fn wsl_clipboard_copy(text: &str) -> Result<(), String> {
 #[cfg(not(target_os = "linux"))]
 fn wsl_clipboard_copy(_text: &str) -> Result<(), String> {
     Err("WSL clipboard fallback unavailable on this platform".to_string())
-}
-
-/// RAII guard that redirects stderr (fd 2) to `/dev/null` on creation and
-/// restores the original fd on drop.
-#[cfg(target_os = "macos")]
-struct SuppressStderr {
-    saved_fd: Option<libc::c_int>,
-}
-
-#[cfg(target_os = "macos")]
-impl SuppressStderr {
-    fn new() -> Self {
-        unsafe {
-            // Save the current stderr fd.
-            let saved = libc::dup(2);
-            if saved < 0 {
-                return Self { saved_fd: None };
-            }
-            // Open /dev/null and point fd 2 at it.
-            let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY);
-            if devnull < 0 {
-                libc::close(saved);
-                return Self { saved_fd: None };
-            }
-            if libc::dup2(devnull, 2) < 0 {
-                libc::close(saved);
-                libc::close(devnull);
-                return Self { saved_fd: None };
-            }
-            libc::close(devnull);
-            Self {
-                saved_fd: Some(saved),
-            }
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl Drop for SuppressStderr {
-    fn drop(&mut self) {
-        if let Some(saved) = self.saved_fd {
-            unsafe {
-                libc::dup2(saved, 2);
-                libc::close(saved);
-            }
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-struct SuppressStderr;
-
-#[cfg(not(target_os = "macos"))]
-impl SuppressStderr {
-    fn new() -> Self {
-        Self
-    }
 }
 
 /// Write text to the clipboard via the OSC 52 terminal escape sequence.
@@ -436,6 +395,7 @@ mod tests {
 
     fn remote_environment() -> CopyEnvironment {
         CopyEnvironment {
+            herdr_session: false,
             ssh_session: true,
             wsl_session: true,
             tmux_session: false,
@@ -451,6 +411,7 @@ mod tests {
 
     fn local_environment() -> CopyEnvironment {
         CopyEnvironment {
+            herdr_session: false,
             ssh_session: false,
             wsl_session: false,
             tmux_session: false,
@@ -707,21 +668,27 @@ mod tests {
 
     #[test]
     fn local_copy_offers_html_only_for_markdown() {
-        for (format, html) in [
+        for (text, format, html) in [
             (
+                "**hello**",
                 CopyFormat::Markdown,
                 Some("<p><strong>hello</strong></p>\n"),
             ),
-            (CopyFormat::PlainText, None),
+            ("**hello**", CopyFormat::PlainText, None),
+            (
+                "hello /repo/my_notes!.txt",
+                CopyFormat::MarkdownSelection(r"**hello** /repo/my\_notes\!.txt".into()),
+                Some("<p><strong>hello</strong> /repo/my_notes!.txt</p>\n"),
+            ),
         ] {
             let result = copy_to_clipboard_with(
-                "**hello**",
+                text,
                 format,
                 local_environment(),
                 |_| panic!("native copy should succeed"),
                 |_| panic!("native copy should succeed"),
-                |text, actual_html| {
-                    assert_eq!((text, actual_html), ("**hello**", html));
+                |actual_text, actual_html| {
+                    assert_eq!((actual_text, actual_html), (text, html));
                     Ok(None)
                 },
                 |_| panic!("native copy should succeed"),

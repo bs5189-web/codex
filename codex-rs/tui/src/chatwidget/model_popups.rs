@@ -145,7 +145,6 @@ impl ChatWidget {
                     name: preset.display_name.clone(),
                     description,
                     is_current: model.as_str() == current_model,
-                    is_default: preset.is_default,
                     secondary_action: if requires_advanced_selection {
                         None
                     } else {
@@ -267,7 +266,6 @@ impl ChatWidget {
                 name: preset.display_name.clone(),
                 description,
                 is_current,
-                is_default: preset.is_default,
                 secondary_action: direct_effort.and_then(|effort| {
                     self.session_model_selection_action(preset.model.clone(), Some(effort))
                 }),
@@ -377,7 +375,7 @@ impl ChatWidget {
             }
             None => "the selected reasoning".to_string(),
         };
-        let plan_only_description = format!("Always use {reasoning_phrase} in Plan mode.");
+        let plan_only_description = format!("Always use {reasoning_phrase} in Plan mode");
         let plan_reasoning_source = if let Some(plan_override) =
             self.config.plan_mode_reasoning_effort.as_ref()
         {
@@ -402,7 +400,7 @@ impl ChatWidget {
             "built-in Plan default".to_string()
         };
         let all_modes_description = format!(
-            "Set the global default reasoning level and the Plan mode override. This replaces the current {plan_reasoning_source}."
+            "Set the global default reasoning level and Plan mode override, replacing the current {plan_reasoning_source}"
         );
         let subtitle = format!("Choose where to apply {reasoning_phrase}.");
         let warning = effort
@@ -498,7 +496,7 @@ impl ChatWidget {
         };
         let warning_text = warn_effort.as_ref().map(|effort| {
             let effort_label = Self::reasoning_effort_label(effort);
-            format!("⚠ {effort_label} reasoning effort can quickly consume Plus plan rate limits.")
+            format!("⚠ {effort_label} reasoning effort can quickly consume Plus plan rate limits")
         });
         let warn_for_model = preset.model.starts_with("gpt-5.1-codex")
             || preset.model.starts_with("gpt-5.1-codex-max")

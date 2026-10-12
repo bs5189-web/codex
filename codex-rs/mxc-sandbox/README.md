@@ -26,6 +26,17 @@ direct non-loopback egress and general inbound network access.
 Win32k calls and desktop handles remain available for PowerShell startup;
 clipboard, input-injection, and desktop/system-control restrictions remain.
 
+## Selection and rollout
+
+`windows.sandbox = "mxc"` is strict. The default-off `features.prefer_mxc`
+selects MXC for local execution when available unless local binding is explicitly
+forbidden; otherwise legacy configuration and setup apply. Remote executors keep
+their configured backend. Command failures never trigger backend fallback.
+Desktop can supply `-c features.prefer_mxc=true` from its saved rollout decision
+on the next local Windows launch. Gate changes require a subsequent launch, and
+rollback may require legacy setup. `config/read` retains the configured sandbox;
+`windowsSandbox/readiness` reflects the effective local selection.
+
 ## Launch contract
 
 `create_command_args()` wraps the command like the Seatbelt backend, using the
@@ -59,8 +70,8 @@ to 4096 bytes; the helper removes them before native process creation. Use
   command are not implicitly granted.
 - The native API represents paths and environment values as Unicode strings.
   Non-Unicode values fail instead of undergoing lossy conversion.
-- An explicitly empty child environment is rejected: the SDK replaces an empty
-  environment list with profile defaults and has no explicit-empty option.
+- An empty child environment uses the Windows user-profile defaults. Nonempty
+  environments remain explicit.
 - The upstream runner terminates remaining descendants when the foreground
   process exits, as well as on cancellation. Both existing Windows backends
   preserve descendants after normal exit, so detached servers currently lose

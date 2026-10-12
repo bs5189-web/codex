@@ -9,6 +9,7 @@ use ratatui::layout::Position;
 
 #[derive(Debug)]
 pub(super) struct MouseSelection {
+    pending_copy: Option<(u64, Range<usize>)>,
     origin: Range<usize>,
     unit: SelectionUnit,
     dragging: bool,
@@ -16,6 +17,34 @@ pub(super) struct MouseSelection {
 }
 
 impl TextArea {
+    pub(in crate::bottom_pane) fn defer_copy(&mut self, id: u64) {
+        if let Some(range) = self.mouse_selection_range()
+            && let Some(selection) = &mut self.mouse_selection
+        {
+            selection.pending_copy = Some((id, range));
+        }
+    }
+
+    pub(in crate::bottom_pane) fn finish_copy(
+        &mut self,
+        completion: &(u64, crate::clipboard_copy::worker::CopyResult),
+        current: bool,
+    ) -> Option<usize> {
+        let pending = self.mouse_selection.as_mut()?.pending_copy.as_ref()?;
+        if pending.0 != completion.0 {
+            return None;
+        }
+        let (_, range) = self.mouse_selection.as_mut()?.pending_copy.take()?;
+        if !current || self.mouse_selection_range().as_ref() != Some(&range) {
+            return None;
+        }
+        let characters = self.text()[range].chars().count();
+        if completion.1 == Ok(crate::clipboard_copy::CopyStatus::Confirmed) {
+            self.set_cursor(self.cursor());
+        }
+        Some(characters)
+    }
+
     pub(in crate::bottom_pane) fn contains_mouse(&self, event: MouseEvent) -> bool {
         self.rendered_area
             .get()
@@ -34,13 +63,30 @@ impl TextArea {
         (!range.is_empty()).then_some(range)
     }
 
-    pub(super) fn delete_mouse_selection(&mut self) -> bool {
-        let Some(range) = self.mouse_selection_range() else {
-            return false;
+    /// Consume events at the edges too, but only detach from the caret if the viewport moves.
+    pub(crate) fn scroll_mouse(&self, event: MouseEvent, state: &mut TextAreaState) -> bool {
+        let rows = match event.kind {
+            MouseEventKind::ScrollUp => -3,
+            MouseEventKind::ScrollDown => 3,
+            _ => return false,
         };
-        // A pointer-selected edit cannot be replayed as a keyboard-relative Vim command.
-        self.vim_commands = VimCommandState::default();
-        self.replace_range(range, "");
+        if !event.modifiers.is_empty() || !self.contains_mouse(event) {
+            return false;
+        }
+        let area = self.rendered_area.get();
+        let lines = self.wrapped_lines(area.width);
+        let total = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+        if total <= area.height {
+            return false;
+        }
+        let scroll = state
+            .scroll
+            .saturating_add_signed(rows)
+            .min(total - area.height);
+        if scroll != state.scroll {
+            state.scroll = scroll;
+            state.manual_cursor = Some(self.cursor_pos);
+        }
         true
     }
 
@@ -89,6 +135,7 @@ impl TextArea {
             let clicks =
                 crate::text_selection::click_count(&mut self.last_click, event.column, event.row);
             MouseSelection {
+                pending_copy: None,
                 origin: pos..pos,
                 // Padding remains an insertion target on repeated clicks.
                 unit: SelectionUnit::from_clicks(if pos == line.end - 1 { 1 } else { clicks }),

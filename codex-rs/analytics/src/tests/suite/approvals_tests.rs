@@ -28,6 +28,7 @@ use crate::facts::CompactionStrategy;
 use crate::facts::CompactionTrigger;
 use crate::facts::CustomAnalyticsFact;
 use crate::facts::SubAgentThreadStartedInput;
+use crate::facts::ThreadInitializationMode;
 use crate::reducer::AnalyticsReducer;
 use crate::tests::support::ingest_complete_child_turn;
 use crate::tests::support::ingest_completed_command_execution_item;
@@ -256,6 +257,7 @@ async fn guardian_review_event_ingests_custom_fact_with_optional_target_item() {
                         version: "1.0.0".to_string(),
                     },
                     capabilities: Some(InitializeCapabilities {
+                        explicit_gateway_oauth: false,
                         experimental_api: false,
                         request_attestation: false,
                         opt_out_notification_methods: None,
@@ -291,6 +293,7 @@ async fn guardian_review_event_ingests_custom_fact_with_optional_target_item() {
         .ingest(
             AnalyticsFact::Custom(CustomAnalyticsFact::GuardianReview(Box::new(
                 GuardianReviewEventParams {
+                    guardian_context_mode: None,
                     thread_id: "thread-guardian".to_string(),
                     turn_id: "turn-guardian".to_string(),
                     review_id: "review-guardian".to_string(),
@@ -855,6 +858,7 @@ async fn guardian_events_keep_thread_source_and_originator_with_explicit_turn_co
                     ephemeral: false,
                     thread_source: Some(ThreadSource::GuardianReview),
                     subagent_source: SubAgentSource::Other("guardian".to_string()),
+                    initialization_mode: ThreadInitializationMode::New,
                     created_at: 130,
                 },
             )),
@@ -877,6 +881,7 @@ async fn guardian_events_keep_thread_source_and_originator_with_explicit_turn_co
                     status: CompactionStatus::Completed,
                     codex_error_kind: None,
                     codex_error_http_status_code: None,
+                    usage_limit_window_minutes: None,
                     active_context_tokens_before: 131_000,
                     active_context_tokens_after: 64_000,
                     retained_image_count: None,

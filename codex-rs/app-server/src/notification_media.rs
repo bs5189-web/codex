@@ -57,6 +57,7 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
         ServerNotification::Error(_)
         | ServerNotification::ThreadStarted(_)
         | ServerNotification::ThreadStatusChanged(_)
+        | ServerNotification::ThreadReadStateChanged(_)
         | ServerNotification::ThreadArchived(_)
         | ServerNotification::ThreadDeleted(_)
         | ServerNotification::ThreadUnarchived(_)
@@ -66,6 +67,7 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
         | ServerNotification::ThreadNameUpdated(_)
         | ServerNotification::ThreadAttachmentUpdated(_)
         | ServerNotification::ThreadGoalUpdated(_)
+        | ServerNotification::ThreadPredictionUpdated(_)
         | ServerNotification::ThreadGoalCleared(_)
         | ServerNotification::ThreadQueueChanged(_)
         | ServerNotification::ProjectChanged(_)
@@ -134,7 +136,8 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
         | ServerNotification::ThreadRealtimeClosed(_)
         | ServerNotification::WindowsWorldWritableWarning(_)
         | ServerNotification::WindowsSandboxSetupCompleted(_)
-        | ServerNotification::AccountLoginCompleted(_) => notification,
+        | ServerNotification::AccountLoginCompleted(_)
+        | ServerNotification::GatewayOAuthChanged(_) => notification,
     }
 }
 

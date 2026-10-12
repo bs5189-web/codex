@@ -66,7 +66,7 @@ use rmcp::model::PrimitiveSchemaDefinition;
 use rmcp::model::ProtocolVersion;
 use rmcp::model::RequestMetaObject;
 use rmcp::model::ServerCapabilities;
-use rmcp::model::ServerInfo;
+use rmcp::model::ServerConfig;
 use rmcp::model::Tool;
 use rmcp::model::ToolAnnotations;
 use rmcp::service::RequestContext;
@@ -259,6 +259,7 @@ async fn mcp_server_tool_call_forwards_only_server_extensions() -> Result<()> {
             version: "0.1.0".to_string(),
         },
         Some(InitializeCapabilities {
+            explicit_gateway_oauth: false,
             experimental_api: true,
             request_attestation: false,
             mcp_server_openai_form_elicitation: true,
@@ -354,6 +355,7 @@ async fn model_mcp_tool_call_uses_session_client_extensions() -> Result<()> {
             version: "0.1.0".to_string(),
         },
         Some(InitializeCapabilities {
+            explicit_gateway_oauth: false,
             experimental_api: true,
             request_attestation: false,
             mcp_server_openai_form_elicitation: true,
@@ -1283,8 +1285,8 @@ impl ServerHandler for ToolAppsMcpServer {
         Ok(self.get_info())
     }
 
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
     }
 
     async fn list_tools(

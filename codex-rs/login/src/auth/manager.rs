@@ -222,6 +222,9 @@ pub enum RefreshTokenError {
     Permanent(#[from] RefreshTokenFailedError),
     #[error(transparent)]
     Transient(#[from] std::io::Error),
+    /// Denied by application policy; neither retry nor cache as a credential failure.
+    #[error(transparent)]
+    Policy(#[from] codex_http_client::NetworkPolicyDenied),
 }
 
 /// Error returned when constructing an [`AuthManager`] from resolved configuration.
@@ -295,7 +298,16 @@ impl RefreshTokenError {
     pub fn failed_reason(&self) -> Option<RefreshTokenFailedReason> {
         match self {
             Self::Permanent(error) => Some(error.reason),
-            Self::Transient(_) => None,
+            Self::Transient(_) | Self::Policy(_) => None,
+        }
+    }
+}
+
+impl From<codex_http_client::HttpError> for RefreshTokenError {
+    fn from(error: codex_http_client::HttpError) -> Self {
+        match error {
+            codex_http_client::HttpError::Policy(denied) => Self::Policy(denied),
+            error => Self::Transient(std::io::Error::other(error)),
         }
     }
 }
@@ -305,6 +317,9 @@ impl From<RefreshTokenError> for std::io::Error {
         match err {
             RefreshTokenError::Permanent(failed) => std::io::Error::other(failed),
             RefreshTokenError::Transient(inner) => inner,
+            RefreshTokenError::Policy(error) => {
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, error)
+            }
         }
     }
 }
@@ -961,8 +976,8 @@ fn read_non_empty_env_var(key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// Delete the auth.json file inside `codex_home` if it exists. Returns `Ok(true)`
-/// if a file was removed, `Ok(false)` if no auth file was present.
+/// Delete credentials for `codex_home` through the selected storage backend.
+/// Returns `Ok(true)` if credentials were removed, `Ok(false)` if none were present.
 pub fn logout(
     codex_home: &Path,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
@@ -1003,7 +1018,7 @@ pub async fn logout_with_revoke(
     )
 }
 
-/// Writes an `auth.json` that contains only the API key.
+/// Store API-key credentials through the selected storage backend.
 pub fn login_with_api_key(
     codex_home: &Path,
     api_key: &str,
@@ -1028,7 +1043,8 @@ pub fn login_with_api_key(
     )
 }
 
-/// Writes an `auth.json` that contains only the access token.
+/// Validate and store personal-access-token or Agent Identity credentials through
+/// the selected storage backend.
 pub async fn login_with_access_token(
     codex_home: &Path,
     access_token: &str,
@@ -1439,7 +1455,7 @@ fn logout_with_message(
     );
     let error_message = match removal_result {
         Ok(_) => message,
-        Err(err) => format!("{message}. Failed to remove auth.json: {err}"),
+        Err(err) => format!("{message}. Failed to remove stored credentials: {err}"),
     };
     Err(std::io::Error::other(error_message))
 }
@@ -1633,6 +1649,9 @@ async fn request_chatgpt_token_refresh(
     {
         Ok(response) => Ok(response),
         Err(OAuthError::Rejected(rejection)) => {
+            if let Some(codex_http_client::HttpError::Policy(denied)) = rejection.body_read_error {
+                return Err(denied.into());
+            }
             let status = rejection.status;
             let detail = &rejection.detail;
             tracing::error!(%status, ?detail, "Failed to refresh token");
@@ -1651,7 +1670,8 @@ async fn request_chatgpt_token_refresh(
                 )))
             }
         }
-        Err(error @ (OAuthError::Transport(_) | OAuthError::InvalidResponse)) => {
+        Err(OAuthError::Transport(error)) => Err(error.into()),
+        Err(error @ OAuthError::InvalidResponse) => {
             Err(RefreshTokenError::Transient(std::io::Error::other(error)))
         }
     }
@@ -2012,12 +2032,12 @@ impl UnauthorizedRecovery {
     }
 }
 
-/// Central manager providing a single source of truth for auth.json derived
+/// Central manager providing a single source of truth for stored
 /// authentication data. It loads once (or on preference change) and then
 /// hands out cloned `CodexAuth` values so the rest of the program has a
 /// consistent snapshot.
 ///
-/// External modifications to `auth.json` will NOT be observed until
+/// External modifications to stored credentials will NOT be observed until
 /// `reload()` is called explicitly. This matches the design goal of avoiding
 /// different parts of the program seeing inconsistent auth data mid‑run.
 pub struct AuthManager {
@@ -2114,6 +2134,18 @@ fn default_agent_identity_authapi_base_url() -> Option<String> {
 }
 
 impl AuthManager {
+    /// Returns the application policy associated with this account owner.
+    pub fn application_network_policy(&self) -> codex_http_client::NetworkPolicy {
+        self.auth_route_config.application_network_policy().clone()
+    }
+
+    /// Creates content clients bound to the account currently owned by this manager.
+    pub fn http_client_factory(&self) -> HttpClientFactory {
+        self.auth_route_config
+            .http_client_factory()
+            .clone()
+            .with_network_policy(self.application_network_policy().for_current_account())
+    }
     /// Create a new manager loading the initial auth using the provided
     /// preferred auth method. Errors loading auth are swallowed; `auth()` will
     /// simply return `None` in that case so callers can treat it as an
@@ -2372,6 +2404,14 @@ impl AuthManager {
         self.auth_cached()
     }
 
+    /// Refreshes auth, then captures credentials and their account-bound factory together.
+    /// The auth read lock prevents an identity change between the two snapshots.
+    pub async fn auth_with_http_client_factory(&self) -> Option<(CodexAuth, HttpClientFactory)> {
+        self.auth().await;
+        let cached = self.inner.read().ok()?;
+        Some((cached.auth.clone()?, self.http_client_factory()))
+    }
+
     pub async fn agent_identity_auth(
         &self,
         policy: AgentIdentityAuthPolicy,
@@ -2552,6 +2592,7 @@ impl AuthManager {
                             cached_auth
                         }
                         RefreshTokenError::Transient(_) => None,
+                        RefreshTokenError::Policy(_) => cached_auth,
                     }
                 }
             };
@@ -2591,6 +2632,11 @@ impl AuthManager {
                 !Self::auths_equal_for_refresh(previous, new_auth.as_ref());
             let owner_changed =
                 auth_changed_for_refresh && !same_owner(previous, new_auth.as_ref());
+            if owner_changed {
+                self.auth_route_config
+                    .application_network_policy()
+                    .invalidate();
+            }
             if auth_changed_for_refresh {
                 guard.permanent_refresh_failure = None;
             }
@@ -2890,10 +2936,10 @@ impl AuthManager {
         result
     }
 
-    /// Log out by deleting the on‑disk auth.json (if present). Returns Ok(true)
-    /// if a file was removed, Ok(false) if no auth file existed. On success,
-    /// reloads the in‑memory auth cache so callers immediately observe the
-    /// unauthenticated state.
+    /// Log out by deleting credentials from the selected storage backend and the
+    /// ephemeral store. Returns `Ok(true)` if credentials were removed, `Ok(false)`
+    /// if none were present. On success, reloads the in-memory auth cache so
+    /// callers immediately observe the unauthenticated state.
     pub async fn logout(&self) -> std::io::Result<bool> {
         self.ensure_logout_allowed()?;
         let removed = logout_all_stores(
@@ -2901,7 +2947,7 @@ impl AuthManager {
             self.auth_credentials_store_mode,
             self.keyring_backend_kind,
         )?;
-        // Always reload to clear any cached auth (even if file absent).
+        // Always reload to clear cached auth, even if no stored credentials were present.
         self.clear_external_auth();
         self.reload().await;
         Ok(removed)
@@ -2921,7 +2967,7 @@ impl AuthManager {
             self.auth_credentials_store_mode,
             self.keyring_backend_kind,
         )?;
-        // Always reload to clear any cached auth (even if file absent).
+        // Always reload to clear cached auth, even if no stored credentials were present.
         self.clear_external_auth();
         self.reload().await;
         Ok(result)

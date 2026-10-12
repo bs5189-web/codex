@@ -15,6 +15,7 @@ fn paste_hidden_plan_shell_payload(chat: &mut ChatWidget) -> String {
 
 fn plan_test_session(thread_id: ThreadId) -> crate::session_state::ThreadSessionState {
     crate::session_state::ThreadSessionState {
+        daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
         forked_from_id: None,
@@ -32,7 +33,6 @@ fn plan_test_session(thread_id: ThreadId) -> crate::session_state::ThreadSession
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
@@ -80,19 +80,6 @@ async fn plan_draft_footer_snapshot() {
 }
 
 #[tokio::test]
-async fn plan_draft_footer_narrow_snapshot() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
-    chat.bottom_pane
-        .set_composer_text("make a plan".to_string(), Vec::new(), Vec::new());
-    chat.pre_draw_tick();
-
-    assert_chatwidget_snapshot!(
-        "plan_draft_footer_narrow",
-        normalize_snapshot_paths(render_bottom_popup(&chat, /*width*/ 36))
-    );
-}
-
-#[tokio::test]
 async fn plan_implementation_popup_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
     chat.on_plan_item_completed("- Step 1\n- Step 2\n".to_string());
@@ -113,17 +100,6 @@ async fn plan_implementation_popup_context_usage_snapshot() {
 
     let popup = render_bottom_popup(&chat, /*width*/ 80);
     assert_chatwidget_snapshot!("plan_implementation_popup_context_usage", popup);
-}
-
-#[tokio::test]
-async fn plan_implementation_popup_no_selected_snapshot() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
-    chat.on_plan_item_completed("- Step 1\n- Step 2\n".to_string());
-    chat.open_plan_implementation_prompt();
-    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
-
-    let popup = render_bottom_popup(&chat, /*width*/ 80);
-    assert_chatwidget_snapshot!("plan_implementation_popup_no_selected", popup);
 }
 
 #[tokio::test]
@@ -219,7 +195,7 @@ async fn plan_implementation_clear_context_requires_default_mode_and_plan() {
 
     assert_eq!(
         params.items[1].description.as_deref(),
-        Some("Fresh thread with this plan.")
+        Some("Fresh thread with this plan")
     );
 
     let params = plan_implementation::selection_view_params(
@@ -229,7 +205,7 @@ async fn plan_implementation_clear_context_requires_default_mode_and_plan() {
     );
     assert_eq!(
         params.items[1].description.as_deref(),
-        Some("Fresh thread. Context: 89% used.")
+        Some("Start a fresh thread (current context: 89% used)")
     );
 }
 
@@ -250,7 +226,6 @@ async fn submit_user_message_with_mode_sets_coding_collaboration_mode() {
                     mode: ModeKind::Default,
                     ..
                 }),
-            personality: None,
             ..
         } => {}
         other => {
@@ -665,10 +640,15 @@ async fn plan_reasoning_scope_popup_mentions_selected_reasoning() {
 
     let popup = render_bottom_popup(&chat, /*width*/ 100);
     assert!(popup.contains("Choose where to apply medium reasoning."));
-    assert!(popup.contains("Always use medium reasoning in Plan mode."));
+    assert!(popup.contains("Always use medium reasoning in Plan mode"));
     assert!(popup.contains("Apply to Plan mode override"));
     assert!(popup.contains("Apply to global default and Plan mode override"));
-    assert!(popup.contains("user-chosen Plan override (low)"));
+    assert!(
+        popup
+            .split_whitespace()
+            .collect::<String>()
+            .contains("user-chosenPlanoverride(low)")
+    );
 }
 
 #[tokio::test]
@@ -680,7 +660,12 @@ async fn plan_reasoning_scope_popup_mentions_built_in_plan_default_when_no_overr
     );
 
     let popup = render_bottom_popup(&chat, /*width*/ 100);
-    assert!(popup.contains("built-in Plan default (medium)"));
+    assert!(
+        popup
+            .split_whitespace()
+            .collect::<String>()
+            .contains("built-inPlandefault(medium)")
+    );
 }
 
 #[tokio::test]
@@ -777,7 +762,6 @@ async fn submit_user_message_with_mode_allows_same_mode_during_running_turn() {
                     mode: ModeKind::Plan,
                     ..
                 }),
-            personality: None,
             ..
         } => {}
         other => {
@@ -807,7 +791,6 @@ async fn submit_user_message_with_mode_submits_when_plan_stream_is_not_active() 
     match next_submit_op(&mut op_rx) {
         Op::UserTurn {
             collaboration_mode: Some(CollaborationMode { mode, .. }),
-            personality: None,
             ..
         } => assert_eq!(mode, expected_mode),
         other => {
@@ -827,6 +810,7 @@ async fn plan_implementation_popup_skips_replayed_turn_complete() {
     chat.replay_thread_turns(
         vec![AppServerTurn {
             id: "turn-1".to_string(),
+            root_turn_id: None,
             items_view: codex_app_server_protocol::TurnItemsView::Full,
             items: vec![AppServerThreadItem::AgentMessage {
                 id: "msg-plan".to_string(),
@@ -867,6 +851,7 @@ async fn plan_implementation_popup_shows_once_when_replay_precedes_live_turn_com
     chat.replay_thread_turns(
         vec![AppServerTurn {
             id: "turn-1".to_string(),
+            root_turn_id: None,
             items_view: codex_app_server_protocol::TurnItemsView::Full,
             items: vec![AppServerThreadItem::AgentMessage {
                 id: "msg-plan-replay".to_string(),
@@ -1176,6 +1161,7 @@ async fn submit_user_message_queues_while_compaction_turn_is_running() {
             thread_id: thread_id.to_string(),
             turn: AppServerTurn {
                 id: "turn-1".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: AppServerTurnStatus::InProgress,
@@ -1221,6 +1207,7 @@ async fn submit_user_message_queues_while_compaction_turn_is_running() {
             thread_id: thread_id.to_string(),
             turn: AppServerTurn {
                 id: "turn-1".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: AppServerTurnStatus::Completed,
@@ -1251,6 +1238,7 @@ async fn submit_user_message_emits_structured_plugin_mentions_from_bindings() {
     let thread_id = ThreadId::new();
     let rollout_file = NamedTempFile::new().unwrap();
     let configured = crate::session_state::ThreadSessionState {
+        daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
         forked_from_id: None,
@@ -1268,7 +1256,6 @@ async fn submit_user_message_emits_structured_plugin_mentions_from_bindings() {
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),

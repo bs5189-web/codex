@@ -32,6 +32,7 @@ use codex_api::ApiError;
 use codex_api::ResponsesWebsocketClient;
 use codex_api::is_azure_responses_provider;
 use codex_arg0::Arg0DispatchPaths;
+use codex_config::ConfigLoadError;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerTransportConfig;
 use codex_core::config::Config;
@@ -525,14 +526,38 @@ async fn build_report(
             ) = tokio::join!(
                 async {
                     run_sync_check("config", progress.clone(), || {
-                        DoctorCheck::new(
+                        let check = DoctorCheck::new(
                             "config.load",
                             "config",
                             CheckStatus::Fail,
                             "config could not be loaded",
                         )
-                        .detail(err.to_string())
-                        .remediation("Fix the reported config error, then rerun codex doctor.")
+                        .remediation("Fix the reported config error, then rerun codex doctor.");
+                        // Error messages can echo config values. Report only typed metadata,
+                        // including errors wrapped by io::Error, whose source skips the wrapper.
+                        let config_error = err.chain().find_map(|cause| {
+                            cause.downcast_ref::<ConfigLoadError>().or_else(|| {
+                                cause
+                                    .downcast_ref::<std::io::Error>()?
+                                    .get_ref()?
+                                    .downcast_ref::<ConfigLoadError>()
+                            })
+                        });
+                        if let Some(error) = config_error {
+                            let error = error.config_error();
+                            return check
+                                .detail("error: invalid configuration")
+                                .detail(format!("file: {}", error.path.display()))
+                                .detail(format!("line: {}", error.range.start.line))
+                                .detail(format!("column: {}", error.range.start.column));
+                        }
+                        let io_error = err
+                            .chain()
+                            .find_map(|cause| cause.downcast_ref::<std::io::Error>());
+                        match io_error {
+                            Some(error) => check.detail(format!("error: {}", error.kind())),
+                            None => check.detail("error: configuration load failed"),
+                        }
                     })
                 },
                 async {
@@ -639,7 +664,6 @@ fn config_overrides_from_interactive(
             .flatten(),
         codex_self_exe: arg0_paths.codex_self_exe.clone(),
         codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe.clone(),
-        main_execve_wrapper_exe: arg0_paths.main_execve_wrapper_exe.clone(),
         show_raw_agent_reasoning: interactive.oss.then_some(true),
         additional_writable_roots: interactive.add_dir.clone(),
         ..Default::default()
@@ -1088,6 +1112,14 @@ fn config_check(config: &Config) -> DoctorCheck {
         config.model.as_deref().unwrap_or("<default>")
     ));
     details.push(format!("model provider: {}", config.model_provider_id));
+    details.push(format!(
+        "configured TUI mode: {}",
+        if config.tui_fullscreen_transcript {
+            "fullscreen"
+        } else {
+            "scrollback"
+        }
+    ));
     details.push(format!("log dir: {}", config.log_dir.display()));
     details.push(format!(
         "sqlite home: {}",
@@ -1697,6 +1729,7 @@ fn terminal_check(no_color_flag: bool) -> DoctorCheck {
 
 #[cfg(windows)]
 fn windows_console_details() -> Vec<String> {
+    use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::System::Console::ENABLE_VIRTUAL_TERMINAL_PROCESSING;
     use windows_sys::Win32::System::Console::GetConsoleCP;
@@ -1720,8 +1753,8 @@ fn windows_console_details() -> Vec<String> {
         GetStdHandle(STD_ERROR_HANDLE)
     }));
 
-    fn console_mode_detail(label: &str, handle: isize) -> String {
-        if handle == 0 || handle == INVALID_HANDLE_VALUE {
+    fn console_mode_detail(label: &str, handle: HANDLE) -> String {
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
             return format!("{label}: unavailable");
         }
         let mut mode = 0_u32;
@@ -2071,36 +2104,56 @@ async fn state_check(config: &Config, command: &DoctorCommand) -> DoctorCheck {
     path_readiness(&mut details, "CODEX_HOME", &config.codex_home);
     path_readiness(&mut details, "log dir", &config.log_dir);
     path_readiness(&mut details, "sqlite home", config.sqlite_config().home());
+
     let mut status = CheckStatus::Ok;
+    let mut failed_databases = Vec::new();
     for db in config.sqlite_config().runtime_db_paths() {
         path_readiness(&mut details, db.label, &db.path);
         // Feedback collection gives each database its own budget; direct runs scan fully.
         let deadline = command
             .feedback
             .then(|| Instant::now() + Duration::from_secs(1));
-        status = status.max(
-            sqlite_integrity_detail(
-                config.sqlite_config(),
-                &mut details,
-                db.label,
-                &db.path,
-                deadline,
-            )
-            .await,
-        );
+        let db_status = sqlite_integrity_detail(
+            config.sqlite_config(),
+            &mut details,
+            db.label,
+            &db.path,
+            deadline,
+        )
+        .await;
+        if db_status == CheckStatus::Fail {
+            failed_databases.push(db.path.display().to_string());
+        }
+        status = status.max(db_status);
     }
     rollout_stats_details(&mut details, &config.codex_home);
     standalone_release_cache_details(&mut details);
 
     let summary = match status {
-        CheckStatus::Ok => "state paths and databases are inspectable",
-        CheckStatus::Warning => "some database integrity checks exceeded their time limit",
-        CheckStatus::Fail => "state database integrity check failed",
+        CheckStatus::Ok => "state paths and databases are inspectable".to_string(),
+        CheckStatus::Warning => {
+            "some database integrity checks exceeded their time limit".to_string()
+        }
+        CheckStatus::Fail => "state database integrity check failed".to_string(),
     };
     let mut check = DoctorCheck::new("state.paths", "state", status, summary).details(details);
     if status == CheckStatus::Fail {
-        check = check.remediation(
-            "Move the damaged SQLite database aside, then restart the interactive CLI or app server so it can rebuild that runtime database from saved data. Other entry points may not rebuild automatically.",
+        let noun = if failed_databases.len() == 1 {
+            "database"
+        } else {
+            "databases"
+        };
+        check = check.issue(
+            DoctorIssue::new(
+                CheckStatus::Fail,
+                format!(
+                    "{} {noun} failed integrity check",
+                    failed_databases.join(", ")
+                ),
+            )
+            .remedy(
+                "Move the damaged SQLite database aside, then restart the interactive CLI or app server so it can rebuild that runtime database from saved data. Other entry points may not rebuild automatically.",
+            ),
         );
     }
     check
@@ -2384,17 +2437,20 @@ fn websocket_error_detail(err: &ApiError) -> String {
             format!("handshake API error: {status} {message}")
         }
         ApiError::Stream(message) => format!("handshake stream error: {message}"),
-        ApiError::ContextWindowExceeded
+        ApiError::ContentFilter
+        | ApiError::ContextWindowExceeded
         | ApiError::QuotaExceeded
         | ApiError::UsageNotIncluded
         | ApiError::Retryable { .. }
         | ApiError::RateLimitExceeded { .. }
         | ApiError::RateLimit(_)
         | ApiError::InvalidRequest { .. }
+        | ApiError::InvalidPrompt { .. }
         | ApiError::CyberPolicy { .. }
         | ApiError::BioPolicy { .. }
         | ApiError::MisalignmentPolicyViolation { .. }
-        | ApiError::ServerOverloaded => format!("handshake error: {err}"),
+        | ApiError::FlexUnavailable
+        | ApiError::ServerOverloaded { .. } => format!("handshake error: {err}"),
     }
 }
 
@@ -3172,7 +3228,7 @@ mod tests {
         let arg0_paths = Arg0DispatchPaths {
             codex_self_exe: Some(PathBuf::from("/bin/codex")),
             codex_linux_sandbox_exe: Some(PathBuf::from("/bin/codex-linux-sandbox")),
-            main_execve_wrapper_exe: Some(PathBuf::from("/bin/codex-execve-wrapper")),
+            ..Default::default()
         };
 
         let overrides = config_overrides_from_interactive(&interactive, &arg0_paths);
@@ -3191,10 +3247,6 @@ mod tests {
         assert_eq!(
             overrides.codex_linux_sandbox_exe,
             arg0_paths.codex_linux_sandbox_exe
-        );
-        assert_eq!(
-            overrides.main_execve_wrapper_exe,
-            arg0_paths.main_execve_wrapper_exe
         );
     }
 

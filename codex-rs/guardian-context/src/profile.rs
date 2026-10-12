@@ -3,6 +3,7 @@
 //! in cacheable chunks. Hosts still own history snapshots and delivery cursors.
 //! User messages and manual approvals stay complete until whole-request admission.
 //! They may be shortened with explicit markers only during budget recovery.
+//! The host selects line or JSON rendering; JSON keeps embedded headers inside text.
 
 use codex_protocol::protocol::TruncationPolicy;
 
@@ -13,11 +14,14 @@ use crate::ConversationTranscriptConfig;
 use crate::ConversationTranscriptEntry;
 use crate::ConversationTranscriptEntryKind;
 use crate::ConversationTranscriptOptions;
-use crate::RenderedTranscript;
+use crate::PreparedTranscript;
 use crate::Retention;
+use crate::TranscriptContent;
 use crate::TranscriptEntryLimits;
+use crate::TranscriptFormat;
 use crate::TranscriptRetentionConfig;
 use crate::TruncationObservation;
+use crate::transcript_record::TranscriptRecord;
 
 use self::window::TranscriptWindow;
 mod window;
@@ -29,6 +33,7 @@ const MIN_RECENT_TOOL_ENTRIES: usize = 5;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ContextProfile {
     pub target: ContextTarget,
+    pub transcript_format: TranscriptFormat,
     pub transcript: ConversationTranscriptConfig,
     pub retention: TranscriptRetentionConfig,
     pub include_images: bool,
@@ -45,10 +50,11 @@ enum TranscriptEntryKind {
 
 struct TranscriptEntry {
     kind: TranscriptEntryKind,
-    text: String,
+    content: TranscriptContent,
     tokens: usize,
     original_bytes: usize,
     retained_bytes: usize,
+    source: Option<codex_history::RetainedSource>,
 }
 
 impl ContextProfile {
@@ -56,6 +62,7 @@ impl ContextProfile {
     pub const fn synchronous() -> Self {
         Self {
             target: ContextTarget::Sync,
+            transcript_format: TranscriptFormat::Line,
             transcript: ConversationTranscriptConfig {
                 options: ConversationTranscriptOptions {
                     include_tool_calls: true,
@@ -81,6 +88,7 @@ impl ContextProfile {
     pub const fn asynchronous() -> Self {
         Self {
             target: ContextTarget::Async,
+            transcript_format: TranscriptFormat::Line,
             transcript: ConversationTranscriptConfig {
                 options: ConversationTranscriptOptions {
                     include_tool_calls: true,
@@ -102,14 +110,14 @@ impl ContextProfile {
         }
     }
 
-    /// Selects bounded entries without advancing the host's full/delta cursor.
+    /// Prepares structured, bounded entries without advancing the host's full/delta cursor.
     /// The host supplies the slice and original offset; empty placeholders depend
     /// on its full/delta presentation and are supplied after selection.
-    pub fn render_transcript(
+    pub fn prepare_transcript(
         &self,
         transcript_entries: &[ConversationTranscriptEntry],
         entry_number_offset: usize,
-    ) -> RenderedTranscript {
+    ) -> PreparedTranscript {
         let entries = transcript_entries
             .iter()
             .enumerate()
@@ -131,18 +139,43 @@ impl ContextProfile {
                     }
                 };
                 let number = index + entry_number_offset + 1;
-                let role = entry.kind.role();
                 let suffix = match self.target {
                     ContextTarget::Sync => "",
                     ContextTarget::Async => "\n",
                 };
-                let text = format!("[{number}] {role}: {}{suffix}", entry.text);
+                let retained_source = entry
+                    .retained_source
+                    .as_ref()
+                    .filter(|_| entry.kind == ConversationTranscriptEntryKind::User);
+                let prepare_text = |text: &str| {
+                    let record = TranscriptRecord::new(
+                        &entry.kind,
+                        number,
+                        text.to_owned(),
+                        retained_source.map(|retained| retained.order.clone()),
+                        self.transcript_format,
+                        suffix,
+                    );
+                    let tokens =
+                        TruncationPolicy::Bytes(record.rendered().text_bytes).token_budget();
+                    (TranscriptContent::Record(record), tokens, text.len())
+                };
+                let (content, tokens, retained_bytes) = match &entry.content {
+                    TranscriptContent::Text(text) => prepare_text(text),
+                    TranscriptContent::Record(record) => prepare_text(record.text()),
+                    TranscriptContent::AgentMessage(message) => (
+                        TranscriptContent::AgentMessage(message.clone()),
+                        crate::estimate_input_tokens(message),
+                        entry.original_bytes,
+                    ),
+                };
                 TranscriptEntry {
                     kind,
-                    tokens: TruncationPolicy::Bytes(text.len()).token_budget(),
-                    text,
+                    tokens,
+                    content,
                     original_bytes: entry.original_bytes,
-                    retained_bytes: entry.text.len(),
+                    retained_bytes,
+                    source: retained_source.map(|retained| retained.source.clone()),
                 }
             })
             .collect::<Vec<_>>();
@@ -201,7 +234,7 @@ impl ContextProfile {
         }
         let omission_note = (self.target == ContextTarget::Sync
             && included.iter().any(|included| !included))
-        .then(|| "Some conversation entries were omitted.".to_owned());
+        .then(|| crate::transcript::TRANSCRIPT_OMISSION_NOTICE.to_owned());
         let mut truncations = Vec::new();
         let mut items: Vec<_> = entries
             .into_iter()
@@ -229,14 +262,20 @@ impl ContextProfile {
                 if included[index] {
                     Some(match entry.kind {
                         TranscriptEntryKind::User | TranscriptEntryKind::ManualApproval => {
-                            Budgeted::historical(entry.text)
+                            if let Some(source) = entry.source {
+                                let mut item = Budgeted::required(entry.content);
+                                item.source = Some(source);
+                                item
+                            } else {
+                                Budgeted::historical(entry.content)
+                            }
                         }
-                        TranscriptEntryKind::ProtectedMessage => Budgeted::required(entry.text),
+                        TranscriptEntryKind::ProtectedMessage => Budgeted::required(entry.content),
                         TranscriptEntryKind::Message => {
-                            Budgeted::optional(entry.text, BudgetPriority::Commentary)
+                            Budgeted::optional(entry.content, BudgetPriority::Commentary)
                         }
                         TranscriptEntryKind::Tool => {
-                            Budgeted::optional(entry.text, BudgetPriority::Tool)
+                            Budgeted::optional(entry.content, BudgetPriority::Tool)
                         }
                     })
                 } else {
@@ -253,7 +292,7 @@ impl ContextProfile {
         {
             item.retention = Retention::Required;
         }
-        RenderedTranscript {
+        PreparedTranscript {
             items,
             omission_note,
             truncations,

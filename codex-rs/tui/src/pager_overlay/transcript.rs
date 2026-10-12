@@ -123,7 +123,7 @@ impl TranscriptOverlay {
                 .map(|column| (status.x + column, status.y));
             if let Some(notice) = &self.notice {
                 let notice = Line::from(notice.clone()).dim();
-                if self.view.is_search_active() {
+                if self.view.is_search_editing() {
                     footer.text.lines.truncate(/*len*/ 1);
                     footer.text.lines.push(notice);
                 } else {
@@ -139,7 +139,13 @@ impl TranscriptOverlay {
                 Line::from(notice.as_str()).dim().render(status, buf);
             } else {
                 self.view
-                    .status_line_with_navigation("Ctrl+Space select", self.motion)
+                    .status_line_with_navigation(
+                        &format!(
+                            "{} select",
+                            crate::key_hint::ctrl(KeyCode::Char(' ')).display_label()
+                        ),
+                        self.motion,
+                    )
                     .render(status, buf);
             }
             self.render_hints(hints, buf);
@@ -170,7 +176,22 @@ impl TranscriptOverlay {
     }
 
     pub(crate) fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
-        if matches!(event, TuiEvent::Resume) {
+        if let Some(completion) = tui.clipboard.poll()
+            && let Some(follow) =
+                self.view
+                    .finish_copy(&self.cells, completion, /*current*/ true)
+        {
+            self.notice = Some(match &completion.1 {
+                Ok(status) => status.message("selection"),
+                Err(error) => format!("Copy failed: {error}"),
+            });
+            if follow {
+                self.view.jump_to_latest();
+                self.is_done = self.browsing_footer.is_some();
+            }
+        }
+        if matches!(event, TuiEvent::Resume | TuiEvent::FocusLost) {
+            self.view.cancel_primary();
             self.view.end_drag();
         }
         // Apply a queued prompt jump before navigation can move away from it.
@@ -193,7 +214,7 @@ impl TranscriptOverlay {
                 self.view.handle_mouse(mouse, &self.cells)
             }
             TuiEvent::Paste(text) => {
-                if self.view.is_search_active() {
+                if self.view.is_search_editing() {
                     self.view.end_selection(&self.cells);
                 }
                 self.view.paste_search(&text).then_some(ViewAction::Changed)
@@ -206,10 +227,7 @@ impl TranscriptOverlay {
                 self.draw(tui)?;
                 return Ok(());
             }
-            TuiEvent::FocusLost => {
-                self.view.end_drag();
-                None
-            }
+            TuiEvent::FocusLost => None,
         };
         if let Some(action) = action {
             self.apply_action(tui, action);
@@ -234,8 +252,8 @@ impl TranscriptOverlay {
         self.view.begin_search();
     }
 
-    pub(crate) fn is_search_active(&self) -> bool {
-        self.view.is_search_active()
+    pub(crate) fn is_search_editing(&self) -> bool {
+        self.view.is_search_editing()
     }
 
     pub(crate) fn owns_interaction_key(&self, key: KeyEvent) -> bool {
@@ -379,6 +397,15 @@ impl TranscriptOverlay {
         self.view.sync_live_tail(width, key, compute_lines)
     }
 
+    pub(crate) fn sync_search_live_tail(
+        &mut self,
+        width: u16,
+        key: Option<ActiveCellTranscriptKey>,
+        compute_lines: impl FnOnce(u16) -> Option<Vec<HyperlinkLine>>,
+    ) {
+        self.view.sync_search_live_tail(width, key, compute_lines);
+    }
+
     pub(crate) fn set_highlight_cell(&mut self, cell: Option<usize>) {
         self.highlight_cell = cell.filter(|index| *index < self.cells.len());
         self.pending_highlight = self.highlight_cell;
@@ -397,7 +424,7 @@ impl TranscriptOverlay {
         if key.kind == KeyEventKind::Release {
             return None;
         }
-        if !self.view.is_search_active()
+        if !self.view.is_search_editing()
             && (!self.view.has_active_interaction() || !self.view.owns_interaction_key(key))
             && self.keymap.find.is_pressed(key)
         {
@@ -425,31 +452,20 @@ impl TranscriptOverlay {
 
     fn apply_action(&mut self, tui: &mut tui::Tui, action: ViewAction) {
         self.notice = None;
-        let resume_following = matches!(action, ViewAction::CopyAndFollow(_));
-        match action {
-            ViewAction::Changed => {}
-            ViewAction::Copy(text) | ViewAction::CopyAndFollow(text) => {
-                let result = self
-                    .view
-                    .copy_selected_text_with(&self.cells, &text, |text| {
-                        tui.copy_transcript_selection(text)
-                    });
-                if resume_following
-                    && matches!(result, Ok(crate::clipboard_copy::CopyStatus::Confirmed))
-                {
-                    self.view.jump_to_latest();
-                    self.is_done = self.browsing_footer.is_some();
-                }
-                self.notice = Some(match result {
-                    Ok(status) => status.message("selection"),
-                    Err(error) => error,
-                });
-            }
-            ViewAction::OpenLink(url) => {
-                if let Err(error) = webbrowser::open(&url) {
-                    self.notice = Some(format!("Could not open link: {error}"));
-                }
-            }
+        if let Some((_, result)) = self.view.copy_action(
+            tui,
+            &self.cells,
+            &action,
+            crate::clipboard_copy::CopyFormat::Markdown,
+        ) {
+            self.notice = Some(match result {
+                Ok(status) => status.message("selection"),
+                Err(error) => error,
+            });
+        } else if let ViewAction::OpenLink(url) = action
+            && let Err(error) = webbrowser::open(&url)
+        {
+            self.notice = Some(format!("Could not open link: {error}"));
         }
     }
 

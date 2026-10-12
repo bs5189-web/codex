@@ -92,6 +92,7 @@ pub(super) fn test_tracking_context(thread_id: &str, turn_id: &str) -> TrackEven
         thread_id: thread_id.to_string(),
         turn_id: turn_id.to_string(),
         product_client_id: TEST_PRODUCT_CLIENT_ID.to_string(),
+        turn_metadata: None,
     }
 }
 
@@ -264,6 +265,7 @@ pub(super) fn sample_turn_start_response(turn_id: &str) -> ClientResponsePayload
     ClientResponsePayload::TurnStart(codex_app_server_protocol::TurnStartResponse {
         turn: Turn {
             id: turn_id.to_string(),
+            root_turn_id: None,
             items_view: codex_app_server_protocol::TurnItemsView::Full,
             items: vec![],
             status: AppServerTurnStatus::InProgress,
@@ -283,6 +285,7 @@ pub(super) fn sample_turn_started_notification(
         thread_id: thread_id.to_string(),
         turn: Turn {
             id: turn_id.to_string(),
+            root_turn_id: None,
             items_view: codex_app_server_protocol::TurnItemsView::Full,
             items: vec![],
             status: AppServerTurnStatus::InProgress,
@@ -320,6 +323,7 @@ pub(super) fn sample_turn_completed_notification(
         thread_id: thread_id.to_string(),
         turn: Turn {
             id: turn_id.to_string(),
+            root_turn_id: None,
             items_view: codex_app_server_protocol::TurnItemsView::Full,
             items: vec![],
             status,
@@ -359,6 +363,7 @@ pub(super) fn sample_turn_resolved_config(
         approval_policy: AskForApproval::OnRequest,
         approvals_reviewer: ApprovalsReviewer::AutoReview,
         guardian_v2_enabled: false,
+        multi_agent_version: codex_protocol::protocol::MultiAgentVersion::Disabled,
         sandbox_network_access: true,
         collaboration_mode: ModeKind::Plan,
         personality: None,
@@ -377,6 +382,7 @@ pub(super) fn sample_turn_profile() -> TurnProfile {
         after_last_sampling_ms: 94,
         sampling_request_count: 2,
         sampling_retry_count: 1,
+        tools_change_count: 2,
     }
 }
 
@@ -584,6 +590,7 @@ pub(super) fn sample_initialize_fact(connection_id: u64) -> AnalyticsFact {
                 version: "1.0.0".to_string(),
             },
             capabilities: Some(InitializeCapabilities {
+                explicit_gateway_oauth: false,
                 experimental_api: false,
                 request_attestation: false,
                 opt_out_notification_methods: None,
@@ -645,6 +652,7 @@ pub(super) fn sample_command_execution_item_with_id(
 ) -> ThreadItem {
     ThreadItem::CommandExecution {
         model_context: None,
+        sandbox_type: None,
         id: id.to_string(),
         plugin_id: None,
         script_path: None,

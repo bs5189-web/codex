@@ -94,7 +94,7 @@ impl NetworkProxySpec {
     }
 
     pub(crate) fn credential_broker_enabled(&self) -> bool {
-        self.config.credential_broker && self.constraints.enabled != Some(false)
+        self.enabled() && self.config.credential_broker && self.constraints.enabled != Some(false)
     }
 
     pub fn proxy_host_and_port(&self) -> String {
@@ -245,7 +245,7 @@ impl NetworkProxySpec {
         )
     }
 
-    /// Returns the effective traffic policy without exposing controller-owned proxy settings.
+    /// Returns proxy activation and traffic policy without controller-owned runtime settings.
     pub fn environment_policy(&self) -> EnvironmentNetworkPolicy {
         EnvironmentNetworkPolicy::from_config(&self.config, self.hard_deny_allowlist_misses)
     }
@@ -276,15 +276,15 @@ impl NetworkProxySpec {
                     enabled: true,
                     // Without a controller, the owner supplies the entire permission ceiling.
                     dangerously_allow_all_unix_sockets: Some(true),
-                    allow_local_binding: Some(true),
+                    allow_local_binding: Some(policy.allow_local_binding.unwrap_or(false)),
                     ..NetworkProxyConfig::default()
                 },
                 /*requirements*/ None,
                 permission_profile,
             )?,
         };
-        spec.config.allow_local_binding = Some(local_binding_policy.resolve(&spec.config));
         policy.apply_to(&mut spec.config);
+        spec.config.allow_local_binding = Some(local_binding_policy.resolve(&spec.config));
         let protected_denials = spec.config.denied_domains().unwrap_or_default();
 
         // A fixed controller allowlist remains a ceiling; an expandable one is only a baseline.
@@ -378,9 +378,14 @@ impl NetworkProxySpec {
         &self,
         executor_os: Platform,
     ) -> std::io::Result<ConfigState> {
-        build_config_state(self.config.clone(), self.constraints.clone(), executor_os).map_err(
-            |err| std::io::Error::other(format!("failed to build network proxy state: {err}")),
-        )
+        let mut config = self.config.clone();
+        if !self.enabled() {
+            // Retained managed constraints must not let brokerage activate a disabled proxy.
+            config.set_credential_broker_enabled(/*enabled*/ false);
+        }
+        build_config_state(config, self.constraints.clone(), executor_os).map_err(|err| {
+            std::io::Error::other(format!("failed to build network proxy state: {err}"))
+        })
     }
 
     fn apply_requirements(

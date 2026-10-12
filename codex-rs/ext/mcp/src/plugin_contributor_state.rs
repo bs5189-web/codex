@@ -1,6 +1,9 @@
-//! Thread-owned cloud catalog and legacy selected-root cache, guarded by a short-lived mutex.
+//! Thread-owned cloud catalog and stable selected-root metadata, guarded by a short-lived mutex.
 
 use codex_core_plugins::PluginCatalog;
+use codex_core_plugins::PluginRootOwnership;
+use codex_exec_server::FileSystemSandboxContext;
+use codex_extension_api::SelectedPluginContribution;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::McpResourceClient;
 use codex_mcp::McpResourceClientAuthKey;
@@ -109,14 +112,13 @@ impl PluginContributorState {
 
 pub(crate) struct CachedSelectedRoot {
     pub(crate) root: SelectedCapabilityRoot,
-    pub(crate) metadata: Option<SelectedPluginMetadata>,
+    pub(crate) ownership: Option<PluginRootOwnership>,
+    pub(crate) ownership_sandbox: Option<Box<FileSystemSandboxContext>>,
+    pub(crate) metadata: CachedPluginMetadata,
 }
 
-/// Frozen declarations retain the logical environment ID across executor reconnections.
-#[derive(Clone)]
-pub(crate) struct SelectedPluginMetadata {
-    pub(crate) plugin_id: String,
-    pub(crate) plugin_display_name: String,
-    pub(crate) servers: Vec<(String, codex_config::McpServerConfig)>,
-    pub(crate) connector_ids: Vec<String>,
+/// Denied roots retain ownership without loading their capabilities.
+pub(crate) enum CachedPluginMetadata {
+    Unloaded,
+    Loaded(Option<SelectedPluginContribution>),
 }

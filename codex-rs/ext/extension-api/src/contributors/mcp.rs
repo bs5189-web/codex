@@ -2,9 +2,11 @@ use codex_config::McpServerConfig;
 use codex_exec_server_protocol::ExecutorCapabilityDiscoverySnapshot;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::TurnEnvironmentSelection;
 
 use crate::ExtensionData;
 use crate::ExtensionDataInit;
+use crate::ExtensionFuture;
 
 /// Input supplied while resolving MCP server contributions.
 ///
@@ -24,6 +26,8 @@ pub struct McpServerContributionContext<'a, C> {
     session_source: Option<&'a SessionSource>,
     /// Effective request originator for the active thread, when resolution is thread-scoped.
     originator: Option<&'a str>,
+    /// All selected environments captured for this projection, in priority order.
+    selected_environments: Option<&'a [TurnEnvironmentSelection]>,
     /// Selected roots resolved against ready environments for this exact step.
     ready_selected_capability_roots: Option<&'a [SelectedCapabilityRoot]>,
     /// Executor-materialized capability files shared by all consumers in this exact step.
@@ -48,6 +52,7 @@ impl<'a, C> McpServerContributionContext<'a, C> {
             thread_init: None,
             session_source: None,
             originator: None,
+            selected_environments: None,
             ready_selected_capability_roots: None,
             executor_capability_discovery: None,
         }
@@ -69,9 +74,28 @@ impl<'a, C> McpServerContributionContext<'a, C> {
             thread_init: Some(thread_init),
             session_source: None,
             originator: Some(originator),
+            selected_environments: None,
             ready_selected_capability_roots: Some(ready_selected_capability_roots),
             executor_capability_discovery,
         }
+    }
+
+    /// Attaches the same environment snapshot used to project MCP authority.
+    ///
+    /// Preserve pending and failed selections: an unavailable primary executor
+    /// must not silently select a different ready executor for hosted tools.
+    pub fn with_selected_environments(
+        mut self,
+        environments: &'a [TurnEnvironmentSelection],
+    ) -> Self {
+        self.selected_environments = Some(environments);
+        self
+    }
+
+    /// Returns the selected executor snapshot, or `None` for threadless discovery.
+    /// An empty slice means the thread explicitly has no selected environments.
+    pub fn selected_environments(&self) -> Option<&'a [TurnEnvironmentSelection]> {
+        self.selected_environments
     }
 
     /// Marks whether this projection replaces the published MCP authentication.
@@ -127,7 +151,7 @@ impl<'a, C> McpServerContributionContext<'a, C> {
     }
 }
 
-/// Validated plugin identities projected for the current set of selected roots.
+/// Selected plugin identities and executor roots whose skills must be hidden.
 #[derive(Clone, Debug, Default)]
 pub struct SelectedPluginSnapshot {
     pub plugins: Vec<SelectedPluginIdentity>,
@@ -135,11 +159,31 @@ pub struct SelectedPluginSnapshot {
     pub disabled_plugin_roots: Vec<String>,
 }
 
-/// The configured identity of a plugin resolved from one selected root.
+/// The configured identity of a selected plugin and, when present, the root owning its skills.
 #[derive(Clone, Debug)]
 pub struct SelectedPluginIdentity {
+    /// Hosted plugins have no executor root and cannot own skills from an executor folder.
+    pub selected_root_id: Option<String>,
+    pub plugin_id: String,
+}
+
+/// An executor plugin and its deferred MCP data. Callers that only need the identity can drop
+/// `mcp` without loading server or connector configuration. A plugin still owns its skills when
+/// it has no MCP data.
+pub struct SelectedPlugin<'a> {
     pub selected_root_id: String,
     pub plugin_id: String,
+    pub mcp: ExtensionFuture<'a, SelectedPluginContribution>,
+}
+
+/// MCP data attributed by the host to the plugin that declared it.
+#[derive(Clone)]
+pub struct SelectedPluginContribution {
+    pub plugin_display_name: String,
+    /// Environment that supplied the plugin, independent of where its MCP servers run.
+    pub source_environment_id: String,
+    pub connector_ids: Vec<String>,
+    pub servers: Vec<(String, McpServerConfig)>,
 }
 
 /// One extension-owned overlay for the runtime MCP server configuration.
@@ -164,17 +208,9 @@ pub enum McpServerContribution {
         /// Overrides the HTTP protocol mode, or uses the hosted Apps default when absent.
         protocol_mode: Option<crate::McpProtocolMode>,
     },
-    /// Registers a server declared by a plugin selected for this thread.
-    SelectedPlugin {
-        name: String,
-        plugin_id: String,
-        plugin_display_name: String,
-        selection_order: usize,
-        config: Box<McpServerConfig>,
-    },
-    /// Records a plugin selected for this thread and any connector IDs it declares.
-    SelectedPluginPackage {
-        selected_root_id: String,
+    /// Attributes Apps connectors to an account-hosted plugin. Plugins from executor folders must
+    /// use `McpServerContributor::selected_plugins`, even if they only provide Apps connectors.
+    HostedPluginConnectors {
         plugin_id: String,
         plugin_display_name: String,
         connector_ids: Vec<String>,

@@ -1,11 +1,17 @@
 //! Exercises classifier fallback, cooldown, and cancellation against local servers.
 
 use super::super::LunaSampler;
+use super::super::tests::ProxyPrewarmLimit;
+use super::super::tests::proxy_websocket_servers_with_http;
 use super::super::tests::sample_request;
 use super::super::tests::sampler_config;
 use super::*;
 use anyhow::Result;
 use codex_login::AuthManager;
+use codex_login::WorkspaceRouting;
+use codex_login::WorkspaceRoutingRequest;
+use codex_login::WorkspaceRoutingResolver;
+use codex_model_provider::ModelProviderFuture;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
 use core_test_support::responses;
@@ -79,6 +85,99 @@ impl Drop for Gateway {
 }
 
 #[tokio::test]
+async fn stalled_handshake_does_not_delay_other_warm_sockets() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let stalled = responses::start_websocket_server_with_headers(vec![
+        responses::WebSocketConnectionConfig {
+            requests: Vec::new(),
+            response_headers: Vec::new(),
+            accept_delay: Some(Duration::from_secs(/*secs*/ 10)),
+            close_after_requests: false,
+        },
+    ])
+    .await;
+    let healthy = responses::start_websocket_server(vec![vec![vec![
+        responses::ev_output_text_delta("low"),
+        responses::ev_completed("score"),
+    ]]])
+    .await;
+    let url = proxy_websocket_servers_with_http(
+        &[&stalled, &healthy],
+        ProxyPrewarmLimit::AllConnections,
+        /*http_url*/ None,
+    )
+    .await?;
+    let sampler = LunaSampler::new(sampler_config(url));
+    let opener = sampler.connections.replenish().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while sampler
+            .connections
+            .idle_connections
+            .lock()
+            .unwrap()
+            .is_empty()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert!(!opener.is_finished());
+    assert_eq!(
+        sampler.sample(sample_request("healthy-socket")).await?,
+        "low"
+    );
+    assert_eq!(healthy.single_connection().len(), 1);
+    opener.abort();
+    let _ = opener.await;
+    drop(stalled);
+    healthy.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn replenishes_before_last_idle_socket_is_leased() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let mut servers = Vec::new();
+    for _ in 0..INITIAL_WEBSOCKET_CONNECTIONS + 1 {
+        servers.push(
+            responses::start_websocket_server_with_headers(vec![
+                responses::WebSocketConnectionConfig {
+                    requests: Vec::new(),
+                    response_headers: Vec::new(),
+                    accept_delay: None,
+                    close_after_requests: false,
+                },
+            ])
+            .await,
+        );
+    }
+    let url = proxy_websocket_servers_with_http(
+        &servers.iter().collect::<Vec<_>>(),
+        ProxyPrewarmLimit::AllConnections,
+        /*http_url*/ None,
+    )
+    .await?;
+    let sampler = LunaSampler::new(sampler_config(url));
+    sampler.prewarm().await;
+    let held = sampler.connections.lease().await?;
+    assert!(matches!(held.connection, Connection::Websocket(_)));
+    // A healthy socket remains available, but the next burst needs the reserve restored.
+    sampler.wait_for_prewarm(Duration::from_secs(2)).await?;
+    let mut burst = Vec::new();
+    for _ in 0..INITIAL_WEBSOCKET_CONNECTIONS {
+        let lease = sampler.connections.lease().await?;
+        assert!(matches!(lease.connection, Connection::Websocket(_)));
+        burst.push(lease);
+    }
+    drop(burst);
+    drop(held);
+    for server in servers {
+        server.shutdown().await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn cold_pool_uses_http_during_open_timeout_then_recovers_after_cooldown() -> Result<()> {
     skip_if_no_network!(Ok(()));
     for uses_codex_backend in [false, true] {
@@ -127,7 +226,10 @@ async fn cold_pool_uses_http_during_open_timeout_then_recovers_after_cooldown() 
             sampler.sample(sample_request("parent-turn-2")).await?,
             "low"
         );
-        assert_eq!(gateway.opens.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            gateway.opens.load(Ordering::SeqCst),
+            INITIAL_WEBSOCKET_CONNECTIONS
+        );
         assert!(!opener.is_finished());
         assert!(sampler.connections.replenish().is_none());
 
@@ -140,7 +242,10 @@ async fn cold_pool_uses_http_during_open_timeout_then_recovers_after_cooldown() 
             sampler.sample(sample_request("during-cooldown")).await?,
             "low"
         );
-        assert_eq!(gateway.opens.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            gateway.opens.load(Ordering::SeqCst),
+            INITIAL_WEBSOCKET_CONNECTIONS
+        );
 
         let requests = http_mock.requests();
         let first = &requests[0];
@@ -175,14 +280,14 @@ async fn cold_pool_uses_http_during_open_timeout_then_recovers_after_cooldown() 
         tokio::time::resume();
         sampler.connections.replenish().unwrap().await?;
         assert_eq!(
+            gateway.opens.load(Ordering::SeqCst),
+            2 * INITIAL_WEBSOCKET_CONNECTIONS
+        );
+        assert_eq!(
             sampler.sample(sample_request("after-cooldown")).await?,
             "low"
         );
         assert_eq!(http_mock.requests().len(), 3);
-        assert_eq!(
-            gateway.opens.load(Ordering::SeqCst),
-            1 + INITIAL_WEBSOCKET_CONNECTIONS
-        );
     }
     Ok(())
 }
@@ -205,7 +310,14 @@ async fn cooldown_preserves_healthy_sockets_and_both_transports_share_capacity()
     let sampler = LunaSampler::new(sampler_config(format!("{}/v1", gateway.url)));
     let opener = sampler.connections.replenish().unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while gateway.opens.load(Ordering::SeqCst) < 2 {
+        while gateway.opens.load(Ordering::SeqCst) < 2
+            || sampler
+                .connections
+                .idle_connections
+                .lock()
+                .unwrap()
+                .is_empty()
+        {
             tokio::task::yield_now().await;
         }
     })
@@ -367,5 +479,92 @@ async fn supersession_closes_http_before_headers_and_while_draining_the_body() -
             Some(1)
         );
     }
+    Ok(())
+}
+
+struct RoutingPolicy(Mutex<Option<WorkspaceRouting>>);
+
+impl WorkspaceRoutingResolver for RoutingPolicy {
+    fn resolve(
+        &self,
+        _request: WorkspaceRoutingRequest,
+    ) -> ModelProviderFuture<'_, std::io::Result<Option<WorkspaceRouting>>> {
+        Box::pin(async { Ok(self.0.lock().unwrap().clone()) })
+    }
+}
+
+#[tokio::test]
+async fn http_cache_preserves_no_constraint_redirect_policy_and_configured_headers() -> Result<()> {
+    let base_url = "https://localhost:9/backend-api/codex".to_owned();
+    let auth =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let resolver = Arc::new(RoutingPolicy(Mutex::new(None)));
+    let routing_owner: Arc<dyn WorkspaceRoutingResolver> = resolver.clone();
+    auth.set_workspace_routing_resolver(Arc::downgrade(&routing_owner));
+    let mut config = sampler_config(base_url.clone());
+    config.provider = create_model_provider(
+        ModelProviderInfo::create_openai_provider(Some(base_url)),
+        Some(auth),
+    );
+    let pool = ConnectionPool::new(Arc::new(config));
+    // Exercise HTTP leases without starting a background WebSocket opener.
+    *pool.retry_after.lock().unwrap() = Some(Instant::now() + CONNECT_COOLDOWN);
+    let mut previous: Option<Arc<HttpTransport>> = None;
+    for (routing, expected_policy) in [
+        (None, ClientRedirectPolicy::Default),
+        (Some("NO_CONSTRAINT"), ClientRedirectPolicy::Reject),
+        (Some("NO_CONSTRAINT"), ClientRedirectPolicy::Reject),
+        (None, ClientRedirectPolicy::Default),
+    ] {
+        *resolver.0.lock().unwrap() = routing.map(|account_routing_override| WorkspaceRouting {
+            chatgpt_account_id: "account_id".into(),
+            backend_origin: "https://localhost:9".into(),
+            account_routing_override: account_routing_override.into(),
+        });
+        let setup = pool.client_setup().await?;
+        assert!(!setup.provider.headers.contains_key(ACCOUNT_ROUTING_HEADER));
+        let lease = pool.lease().await?;
+        assert!(matches!(lease.connection, Connection::Http(_)));
+        let cached = Arc::clone(pool.http_transport.lock().unwrap().as_ref().unwrap());
+        assert_eq!(
+            (cached.url.as_str(), cached.redirect_policy),
+            (
+                "https://localhost:9/backend-api/codex/responses",
+                expected_policy
+            ),
+        );
+        if let Some(previous) = previous {
+            assert_eq!(
+                Arc::ptr_eq(&previous, &cached),
+                previous.redirect_policy == expected_policy,
+            );
+        }
+        previous = Some(cached);
+    }
+
+    let mut config = sampler_config("https://localhost:9/v1".into());
+    let mut info = config.provider.info().clone();
+    info.http_headers = Some(std::collections::HashMap::from([(
+        ACCOUNT_ROUTING_HEADER.into(),
+        "us".into(),
+    )]));
+    config.provider = create_model_provider(info, config.provider.auth_manager());
+    let pool = ConnectionPool::new(Arc::new(config));
+    *pool.retry_after.lock().unwrap() = Some(Instant::now() + CONNECT_COOLDOWN);
+    assert_eq!(
+        pool.client_setup().await?.redirect_policy,
+        ClientRedirectPolicy::Default
+    );
+    let lease = pool.lease().await?;
+    assert!(matches!(lease.connection, Connection::Http(_)));
+    assert_eq!(
+        pool.http_transport
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .redirect_policy,
+        ClientRedirectPolicy::Reject,
+    );
     Ok(())
 }

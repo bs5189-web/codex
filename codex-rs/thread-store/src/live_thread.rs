@@ -96,14 +96,12 @@ impl LiveThreadInitGuard {
         self.live_thread = None;
     }
 
-    pub async fn discard(&mut self) {
-        let _ = self.finish_acquisition().await;
+    pub async fn discard(&mut self) -> ThreadStoreResult<()> {
+        self.finish_acquisition().await?;
         let Some(live_thread) = self.live_thread.take() else {
-            return;
+            return Ok(());
         };
-        if let Err(err) = live_thread.discard().await {
-            warn!("failed to discard thread persistence for failed session init: {err}");
-        }
+        live_thread.discard().await
     }
 }
 
@@ -179,14 +177,13 @@ impl LiveThread {
         Ok(live_thread)
     }
 
+    /// Reopens persistence and returns the replay history selected under writer ownership.
     pub async fn resume(
         thread_store: Arc<dyn ThreadStore>,
         history_mode: ThreadHistoryMode,
-        params: ResumeThreadParams,
-    ) -> ThreadStoreResult<Self> {
+        mut params: ResumeThreadParams,
+    ) -> ThreadStoreResult<(Self, Arc<Vec<RolloutItem>>)> {
         let thread_id = params.thread_id;
-        let should_load_history = params.history.is_none();
-        let include_archived = params.include_archived;
         let metadata = if history_mode == ThreadHistoryMode::Paginated
             && let Some(local_store) = thread_store.as_any().downcast_ref::<LocalThreadStore>()
             && let Some(state_db) = local_store.state_db().await
@@ -200,34 +197,19 @@ impl LiveThread {
         } else {
             None
         };
-        let mut metadata_sync = ThreadMetadataSync::for_resume(&params, metadata.as_ref());
-        thread_store.resume_thread(params).await?;
-        if should_load_history {
-            match thread_store
-                .load_history(LoadThreadHistoryParams {
-                    thread_id,
-                    include_archived,
-                })
-                .await
-            {
-                Ok(history) => metadata_sync.record_resume_history(&history.items),
-                Err(err) => {
-                    if let Err(discard_err) = thread_store.discard_thread(thread_id).await {
-                        warn!(
-                            "failed to discard thread persistence after resume history load failed: {discard_err}"
-                        );
-                    }
-                    return Err(err);
-                }
-            }
-        }
-        Ok(Self {
-            thread_id,
-            history_mode,
-            thread_store,
-            metadata_sync: Arc::new(Mutex::new(metadata_sync)),
-            persistence_telemetry: RolloutPersistenceTelemetry::new(thread_id),
-        })
+        let history = thread_store.resume_thread(params.clone()).await?;
+        params.history = Some(Arc::clone(&history));
+        let metadata_sync = ThreadMetadataSync::for_resume(&params, metadata.as_ref());
+        Ok((
+            Self {
+                thread_id,
+                history_mode,
+                thread_store,
+                metadata_sync: Arc::new(Mutex::new(metadata_sync)),
+                persistence_telemetry: RolloutPersistenceTelemetry::new(thread_id),
+            },
+            history,
+        ))
     }
 
     #[tracing::instrument(
@@ -247,7 +229,7 @@ impl LiveThread {
             .observe_appended_items(items.as_slice());
         if let Some(update) = update {
             self.thread_store
-                .update_thread_metadata(UpdateThreadMetadataParams {
+                .record_thread_metadata(UpdateThreadMetadataParams {
                     thread_id: self.thread_id,
                     patch: update.patch.clone(),
                     include_archived: true,
@@ -291,13 +273,18 @@ impl LiveThread {
 
     pub async fn persist(&self, context: PersistContext) -> ThreadStoreResult<()> {
         if context.allows_background_persistence() {
-            self.flush_pending_metadata_update_for_existing_history()
-                .await?;
+            let update = self
+                .metadata_sync
+                .lock()
+                .await
+                .take_pending_update_for_existing_history();
+            self.apply_pending_metadata_update(update, context).await?;
         }
         self.thread_store
             .persist_thread(self.thread_id, context)
             .await?;
-        self.flush_pending_metadata_update().await
+        let update = self.metadata_sync.lock().await.take_pending_update();
+        self.apply_pending_metadata_update(update, context).await
     }
 
     pub async fn flush(&self) -> ThreadStoreResult<()> {
@@ -417,7 +404,8 @@ impl LiveThread {
 
     async fn flush_pending_metadata_update(&self) -> ThreadStoreResult<()> {
         let update = self.metadata_sync.lock().await.take_pending_update();
-        self.apply_pending_metadata_update(update).await
+        self.apply_pending_metadata_update(update, PersistContext::Standard)
+            .await
     }
 
     async fn flush_pending_metadata_update_for_existing_history(&self) -> ThreadStoreResult<()> {
@@ -426,23 +414,28 @@ impl LiveThread {
             .lock()
             .await
             .take_pending_update_for_existing_history();
-        self.apply_pending_metadata_update(update).await
+        self.apply_pending_metadata_update(update, PersistContext::Standard)
+            .await
     }
 
     async fn apply_pending_metadata_update(
         &self,
         update: Option<crate::thread_metadata_sync::PendingThreadMetadataPatch>,
+        context: PersistContext,
     ) -> ThreadStoreResult<()> {
         let Some(update) = update else {
             return Ok(());
         };
-        self.thread_store
-            .update_thread_metadata(UpdateThreadMetadataParams {
-                thread_id: self.thread_id,
-                patch: update.patch.clone(),
-                include_archived: true,
-            })
-            .await?;
+        let params = UpdateThreadMetadataParams {
+            thread_id: self.thread_id,
+            patch: update.patch.clone(),
+            include_archived: true,
+        };
+        if context == PersistContext::Standard {
+            self.thread_store.update_thread_metadata(params).await?;
+        } else {
+            self.thread_store.record_thread_metadata(params).await?;
+        }
         self.metadata_sync
             .lock()
             .await

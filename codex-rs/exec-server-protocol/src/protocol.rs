@@ -6,6 +6,7 @@ use codex_file_system::FileSystemSandboxContext;
 pub use codex_file_system::WalkOptions;
 pub use codex_file_system::WalkOutcome;
 use codex_file_system::WireFileSystemSandboxContext;
+use codex_install_context::InstallContext;
 use codex_network_proxy::ManagedNetworkSandboxContext;
 use codex_network_proxy::RemoteNetworkProxyLaunchConfig;
 use codex_protocol::ThreadId;
@@ -34,6 +35,7 @@ pub const ENVIRONMENT_STATUS_METHOD: &str = "environment/status";
 pub const FS_READ_FILE_METHOD: &str = "fs/readFile";
 pub const FS_OPEN_METHOD: &str = "fs/open";
 pub const FS_READ_BLOCK_METHOD: &str = "fs/readBlock";
+pub const FS_WRITE_BLOCK_METHOD: &str = "fs/writeBlock";
 pub const FS_CLOSE_METHOD: &str = "fs/close";
 pub const FS_WRITE_FILE_METHOD: &str = "fs/writeFile";
 pub const FS_CREATE_DIRECTORY_METHOD: &str = "fs/createDirectory";
@@ -58,19 +60,26 @@ pub const HTTP_REQUEST_BODY_DELTA_METHOD: &str = "http/request/bodyDelta";
 /// Maximum decoded response-body bytes carried by one streamed HTTP notification.
 pub const MAX_HTTP_BODY_DELTA_BYTES: usize = 1024 * 1024;
 
+/// Shared immutable bytes, encoded as a base64 string on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct ByteChunk(#[serde(with = "base64_bytes")] pub Vec<u8>);
+pub struct ByteChunk(#[serde(with = "base64_bytes")] pub Arc<Vec<u8>>);
 
 impl ByteChunk {
     pub fn into_inner(self) -> Vec<u8> {
-        self.0
+        Arc::unwrap_or_clone(self.0)
     }
 }
 
 impl From<Vec<u8>> for ByteChunk {
     fn from(value: Vec<u8>) -> Self {
-        Self(value)
+        Self(Arc::new(value))
+    }
+}
+
+impl AsRef<[u8]> for ByteChunk {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
     }
 }
 
@@ -116,6 +125,9 @@ pub struct EnvironmentInfo {
     /// Operating system reported by the executor; absent for legacy exec-servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_os: Option<String>,
+    /// Executor directories to prepend to `PATH` when missing, in priority order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prepend_path_dirs: Vec<PathUri>,
     /// Executor-local default directories for resolving `:tmpdir`, when reported.
     /// On Windows, a command's `TEMP` or `TMP` overrides take precedence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -142,6 +154,9 @@ pub struct EnvironmentCapabilities {
     /// Whether capability discovery applies the filesystem sandbox sent with each root.
     #[serde(default)]
     pub capability_discovery_sandbox: bool,
+    /// Whether this executor supports V2 capability discovery.
+    #[serde(default)]
+    pub capability_discovery_v2: bool,
     /// Whether this executor supports the `environmentConfig/read` request.
     #[serde(default)]
     pub environment_config_read: bool,
@@ -151,12 +166,21 @@ pub struct EnvironmentCapabilities {
     /// Whether filesystem streams can use the requested platform sandbox.
     #[serde(default)]
     pub sandboxed_file_streaming: bool,
+    /// Whether `fs/open` supports replacement mode and `fs/writeBlock` is supported.
+    #[serde(default)]
+    pub file_write_streaming: bool,
     /// Whether shell state can be cached and restored entirely inside the executor.
     #[serde(default)]
     pub shell_snapshot_v2: bool,
     /// Whether requests may explicitly select the MXC Windows sandbox backend.
     #[serde(default)]
     pub windows_mxc: bool,
+    /// Whether a Linux filesystem sandbox preserves standard devices when `/` is writable.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub linux_root_write_preserves_devices: bool,
+    /// Whether approved Linux root writes preserve devices and denied root-metadata symlink targets.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub linux_approved_root_write_preserves_restrictions: bool,
 }
 
 /// Status returned by an initialized exec-server connection.
@@ -243,16 +267,27 @@ impl EnvironmentInfo {
             cwd: cwd.and_then(|cwd| PathUri::from_host_native_path(cwd).ok()),
             user_home_dir: PathUri::from_host_native_path("~").ok(),
             platform_os: Some(std::env::consts::OS.to_string()),
+            prepend_path_dirs: InstallContext::current()
+                .package_layout
+                .as_ref()
+                .and_then(|layout| layout.path_dir.as_ref())
+                .into_iter()
+                .map(PathUri::from_abs_path)
+                .collect(),
             temporary_directories: Some(temporary_directories),
             temp_dir,
             capabilities: EnvironmentCapabilities {
                 network_proxy_launch: true,
                 capability_discovery_sandbox: true,
+                capability_discovery_v2: true,
                 environment_config_read: true,
                 http_header_env_vars: true,
                 sandboxed_file_streaming: true,
+                file_write_streaming: true,
                 shell_snapshot_v2: cfg!(unix),
                 windows_mxc,
+                linux_root_write_preserves_devices: cfg!(target_os = "linux"),
+                linux_approved_root_write_preserves_restrictions: cfg!(target_os = "linux"),
             },
         }
     }
@@ -278,7 +313,7 @@ impl From<DetectedShell> for ShellInfo {
     }
 }
 
-/// Optional tool attribution for executor telemetry, not authorization.
+/// Optional tool attribution for executor telemetry and child environments, not authorization.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecMetadata {
@@ -543,11 +578,24 @@ pub struct FsReadFileResponse {
     pub data_base64: String,
 }
 
+/// Defaults preserve read-only opens for legacy callers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FsOpenMode {
+    /// Open an existing file for reading.
+    #[default]
+    Read,
+    /// Open for writing, creating a missing file or truncating an existing file.
+    Replace,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FsOpenParams {
     pub handle_id: String,
     pub path: PathUri,
+    #[serde(default)]
+    pub mode: FsOpenMode,
     pub sandbox: Option<FileSystemSandboxContext>,
 }
 
@@ -557,6 +605,8 @@ pub struct FsOpenParams {
 pub struct WireFsOpenParams {
     handle_id: String,
     path: PathUri,
+    #[serde(default)]
+    mode: FsOpenMode,
     sandbox: Option<WireFileSystemSandboxContext>,
 }
 
@@ -580,6 +630,20 @@ pub struct FsReadBlockResponse {
     pub chunk: ByteChunk,
     pub eof: bool,
 }
+
+/// Writes a nonempty block of at most [`codex_file_system::FILE_WRITE_CHUNK_SIZE`] decoded bytes at `offset`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsWriteBlockParams {
+    pub handle_id: String,
+    pub offset: u64,
+    pub chunk: ByteChunk,
+}
+
+/// A successful response confirms that every byte in the requested block was written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsWriteBlockResponse {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -851,7 +915,7 @@ macro_rules! impl_wire_filesystem_request {
 
 impl_wire_filesystem_request! {
     WireFsReadFileParams => FsReadFileParams { path, follow_symlinks },
-    WireFsOpenParams => FsOpenParams { handle_id, path },
+    WireFsOpenParams => FsOpenParams { handle_id, path, mode },
     WireFsWriteFileParams => FsWriteFileParams { path, data_base64, follow_symlinks },
     WireFsCreateDirectoryParams => FsCreateDirectoryParams { path, recursive, follow_symlinks },
     WireFsGetMetadataParams => FsGetMetadataParams { path, follow_symlinks },
@@ -1136,6 +1200,7 @@ mod base64_bytes {
     use serde::Deserialize;
     use serde::Deserializer;
     use serde::Serializer;
+    use std::sync::Arc;
 
     pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -1144,13 +1209,14 @@ mod base64_bytes {
         serializer.serialize_str(&BASE64_STANDARD.encode(bytes))
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<Vec<u8>>, D::Error>
     where
         D: Deserializer<'de>,
     {
         let encoded = String::deserialize(deserializer)?;
         BASE64_STANDARD
             .decode(encoded)
+            .map(Arc::new)
             .map_err(serde::de::Error::custom)
     }
 }
@@ -1158,12 +1224,28 @@ mod base64_bytes {
 #[cfg(test)]
 mod tests {
     use super::CapabilityRootDiscoverRequest;
+    use super::WireExecParams;
+    #[test]
+    fn discovery_v2_support_defaults_off_for_older_executors() -> serde_json::Result<()> {
+        let legacy: super::EnvironmentCapabilities = serde_json::from_value(serde_json::json!({}))?;
+        assert!(!legacy.capability_discovery_v2);
+        let capabilities = super::EnvironmentInfo::local().capabilities;
+        assert_eq!(
+            serde_json::from_value::<super::EnvironmentCapabilities>(serde_json::to_value(
+                &capabilities
+            )?)?,
+            capabilities
+        );
+        Ok(())
+    }
+
     use super::EnvironmentCapabilities;
     use super::EnvironmentInfo;
     use super::ExecExitedNotification;
     use super::ExecMetadata;
     use super::ExecParams;
     use super::ExecResponse;
+    use super::FsOpenMode;
     use super::FsOpenParams;
     use super::FsReadFileParams;
     use super::HttpRequestParams;
@@ -1188,9 +1270,28 @@ mod tests {
     use codex_protocol::permissions::FileSystemSandboxPolicy;
     use codex_protocol::permissions::FileSystemSpecialPath;
     use codex_protocol::permissions::NetworkSandboxPolicy;
+    use codex_protocol::sandbox::SandboxOverride;
     use codex_utils_path_uri::PathUri;
     use pretty_assertions::assert_eq;
     use std::collections::HashMap;
+
+    #[test]
+    fn shared_byte_chunks_preserve_base64_and_owned_bytes() {
+        let chunk = super::ByteChunk::from(vec![0, 255, 10]);
+        let shared = chunk.clone();
+        assert_eq!(serde_json::to_string(&shared).unwrap(), r#""AP8K""#);
+        assert_eq!(
+            serde_json::from_str::<super::ByteChunk>(r#""AP8K""#).unwrap(),
+            chunk,
+        );
+
+        let mut owned = shared.into_inner();
+        owned[0] = 1;
+        assert_eq!(
+            (owned, chunk.into_inner()),
+            (vec![1, 255, 10], vec![0, 255, 10])
+        );
+    }
 
     #[test]
     fn exec_params_keeps_proxy_launch_separate_from_sandbox_facts() {
@@ -1279,6 +1380,35 @@ mod tests {
         assert!(legacy_serialized.get("threadId").is_none());
         assert!(legacy_serialized.get("toolCallId").is_none());
         assert!(legacy_serialized.get("metadata").is_none());
+
+        for sandbox_override in [
+            SandboxOverride::NoOverride,
+            SandboxOverride::EscalatedSandboxWithRestrictions,
+            SandboxOverride::BypassSandboxFirstAttempt,
+        ] {
+            let mut params = params.clone();
+            let mut sandbox = FileSystemSandboxContext::from_permission_profile(
+                PermissionProfile::read_only(),
+                params.cwd.clone(),
+            );
+            sandbox.sandbox_override = sandbox_override;
+            params.sandbox = Some(sandbox);
+            let mut json = serde_json::to_value(&params).expect("serialize sandboxed exec");
+            assert_eq!(
+                json["sandbox"].get("sandboxOverride").is_none(),
+                sandbox_override.is_no_override(),
+            );
+            let wire: WireExecParams = serde_json::from_value(json.clone()).expect("wire exec");
+            assert_eq!(ExecParams::from(wire), params);
+
+            json["sandbox"]
+                .as_object_mut()
+                .unwrap()
+                .remove("sandboxOverride");
+            params.sandbox.as_mut().unwrap().sandbox_override = SandboxOverride::NoOverride;
+            let legacy: WireExecParams = serde_json::from_value(json).expect("legacy wire exec");
+            assert_eq!(ExecParams::from(legacy), params);
+        }
     }
 
     #[test]
@@ -1346,6 +1476,7 @@ mod tests {
                 cwd: None,
                 user_home_dir: None,
                 platform_os: None,
+                prepend_path_dirs: Vec::new(),
                 temporary_directories: None,
                 temp_dir: None,
                 capabilities: EnvironmentCapabilities::default(),
@@ -1366,12 +1497,50 @@ mod tests {
             EnvironmentCapabilities {
                 network_proxy_launch: true,
                 capability_discovery_sandbox: true,
+                capability_discovery_v2: false,
                 environment_config_read: false,
                 http_header_env_vars: false,
                 sandboxed_file_streaming: false,
+                file_write_streaming: false,
                 shell_snapshot_v2: false,
                 windows_mxc: false,
+                linux_root_write_preserves_devices: false,
+                linux_approved_root_write_preserves_restrictions: false,
             }
+        );
+    }
+
+    #[test]
+    fn linux_approved_root_write_support_is_opt_in_on_the_wire() {
+        let mut capabilities = EnvironmentCapabilities::default();
+        let legacy = serde_json::to_value(&capabilities).unwrap();
+        assert!(legacy.get("linuxRootWritePreservesDevices").is_none());
+        assert!(
+            legacy
+                .get("linuxApprovedRootWritePreservesRestrictions")
+                .is_none()
+        );
+        capabilities.linux_root_write_preserves_devices = true;
+        let device_only = serde_json::from_value::<EnvironmentCapabilities>(
+            serde_json::to_value(&capabilities).unwrap(),
+        )
+        .unwrap();
+        assert!(!device_only.linux_approved_root_write_preserves_restrictions);
+        capabilities.linux_approved_root_write_preserves_restrictions = true;
+        assert_eq!(
+            serde_json::from_value::<EnvironmentCapabilities>(
+                serde_json::to_value(&capabilities).unwrap()
+            )
+            .unwrap(),
+            capabilities
+        );
+        let local = EnvironmentInfo::local().capabilities;
+        assert_eq!(
+            (
+                local.linux_root_write_preserves_devices,
+                local.linux_approved_root_write_preserves_restrictions,
+            ),
+            (cfg!(target_os = "linux"), cfg!(target_os = "linux"))
         );
     }
 
@@ -1384,13 +1553,16 @@ mod tests {
             "cwd": null,
             "userHomeDir": "file:///C:/Users/remote",
             "platformOs": "windows",
+            "prependPathDirs": ["file:///C:/tools/bin", "file:///D:/tools/bin"],
             "temporaryDirectories": ["file:///C:/Temp", "file:///D:/Temp"],
             "capabilities": {
                 "networkProxyLaunch": false,
                 "capabilityDiscoverySandbox": false,
+                "capabilityDiscoveryV2": false,
                 "environmentConfigRead": false,
                 "httpHeaderEnvVars": false,
                 "sandboxedFileStreaming": false,
+                "fileWriteStreaming": false,
                 "shellSnapshotV2": false,
                 "windowsMxc": false,
             },
@@ -1638,6 +1810,7 @@ mod tests {
         let workspace = PathUri::parse("file:///workspace/other").expect("selected workspace");
         let path = cwd.join("note.txt").expect("read path");
         let sandbox = FileSystemSandboxContext {
+            sandbox_override: SandboxOverride::EscalatedSandboxWithRestrictions,
             workspace_roots: vec![workspace],
             ..FileSystemSandboxContext::from_permission_profile(PermissionProfile::Disabled, cwd)
         };
@@ -1660,6 +1833,26 @@ mod tests {
         assert_eq!(request, params);
     }
 
+    /// Legacy `fs/open` callers continue to open existing files for reading only.
+    #[test]
+    fn filesystem_open_accepts_legacy_request_without_mode() {
+        let wire: WireFsOpenParams = serde_json::from_value(serde_json::json!({
+            "handleId": "legacy-handle",
+            "path": "file:///tmp/existing.txt",
+        }))
+        .expect("legacy open should deserialize");
+        assert_eq!(
+            wire.try_into_request(|_| panic!("no sandbox to resolve"))
+                .expect("legacy open should resolve"),
+            FsOpenParams {
+                handle_id: "legacy-handle".to_string(),
+                path: PathUri::parse("file:///tmp/existing.txt").expect("file URI"),
+                mode: FsOpenMode::Read,
+                sandbox: None,
+            }
+        );
+    }
+
     /// Only filesystem RPCs need the additive policy field; capability discovery keeps its original wire cwd.
     #[test]
     fn filesystem_open_and_capability_discovery_keep_their_existing_cwd_contracts() {
@@ -1673,6 +1866,7 @@ mod tests {
         let open = FsOpenParams {
             handle_id: "handle".to_owned(),
             path: path.clone(),
+            mode: FsOpenMode::Read,
             sandbox: Some(sandbox.clone()),
         };
         let capability = CapabilityRootDiscoverRequest {

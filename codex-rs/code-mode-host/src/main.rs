@@ -18,7 +18,7 @@ const OTEL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 5);
 
 #[derive(Debug, Parser)]
 struct Cli {
-    /// Transport endpoint: `stdio`, `stdio://`, or `grpc://IP:PORT`.
+    /// Transport endpoint: `stdio`, `stdio://`, `grpc+stdio://`, or `grpc://IP:PORT`.
     #[arg(
         long,
         value_name = "URL",
@@ -90,6 +90,9 @@ async fn main() -> anyhow::Result<()> {
 
 fn build_trace_provider(endpoint: &str) -> anyhow::Result<OtelProvider> {
     OtelProvider::try_new(&OtelSettings {
+        http_client_factory: codex_http_client::HttpClientFactory::new(
+            codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+        ),
         environment: "code-mode-host".to_string(),
         service_name: "codex-code-mode-host".to_string(),
         service_version: env!("CARGO_PKG_VERSION").to_string(),

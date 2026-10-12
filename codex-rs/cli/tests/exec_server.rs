@@ -1,3 +1,7 @@
+#[cfg(target_os = "linux")]
+#[path = "exec_server/pid_namespace_tests.rs"]
+mod pid_namespace_tests;
+
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::io::BufRead as _;
@@ -29,6 +33,7 @@ use codex_exec_server::NoiseRendezvousConnectBundle;
 use codex_exec_server::ProcessId;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
+use codex_utils_cargo_bin::copy_executable;
 use futures::SinkExt;
 use futures::StreamExt;
 use predicates::prelude::PredicateBooleanExt;
@@ -89,6 +94,75 @@ fn local_exec_server_ignores_invalid_config_without_strict_config() -> Result<()
         .success()
         .stderr(contains("not valid toml").not());
 
+    Ok(())
+}
+
+/// Real global CLI flags must reach executor config reads; unrelated startup flags stay private.
+#[tokio::test]
+async fn local_exec_server_projects_global_mxc_preference() -> Result<()> {
+    let home = TempDir::new()?;
+    let cwd = url::Url::from_directory_path(home.path())
+        .map_err(|()| anyhow::anyhow!("could not convert home to file URL"))?;
+    let mut child = tokio::process::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?)
+        .env("CODEX_HOME", home.path())
+        .args([
+            "-c",
+            "features.prefer_mxc=true",
+            "-c",
+            "model='private-startup-model'",
+            "exec-server",
+            "--listen",
+            "stdio",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut stdin = child.stdin.take().context("exec-server stdin")?;
+    let mut stdout = BufReader::new(child.stdout.take().context("exec-server stdout")?);
+    let result = tokio::time::timeout(Duration::from_secs(30), async {
+        send_json_line(
+            &mut stdin,
+            &serde_json::json!({"id": 1, "method": "initialize",
+                "params": {"clientName": "mxc-test", "resumeSessionId": null}}),
+        )
+        .await?;
+        wait_for_response(&mut stdout, /*expected_id*/ 1).await?;
+        send_json_line(
+            &mut stdin,
+            &serde_json::json!({"method": "initialized", "params": {}}),
+        )
+        .await?;
+        send_json_line(
+            &mut stdin,
+            &serde_json::json!({"id": 2, "method": "environmentConfig/read", "params": {
+                "cwd": cwd, "configPaths": [["features", "prefer_mxc"], ["model"]],
+                "requirementsPaths": []
+            }}),
+        )
+        .await?;
+        wait_for_response(&mut stdout, /*expected_id*/ 2).await
+    })
+    .await
+    .context("executor CLI config read timed out")??;
+    let layers = result["result"]["config"]["layers"]
+        .as_array()
+        .context("config layers")?;
+    let session = layers
+        .iter()
+        .find(|l| l["source"] == "session-flags")
+        .context("session flags")?;
+    let value: toml::Value = toml::from_str(session["toml"].as_str().context("session TOML")?)?;
+    assert_eq!(
+        value,
+        toml::Value::Table(toml::toml! { [features] prefer_mxc = true })
+    );
+    drop(stdin);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(30), child.wait())
+            .await??
+            .success()
+    );
     Ok(())
 }
 
@@ -181,7 +255,9 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{collector_url}/v1/metrics", pr
     let bin_dir = package.path().join("bin");
     std::fs::create_dir(&bin_dir)?;
     let executable = bin_dir.join(format!("codex{}", std::env::consts::EXE_SUFFIX));
-    std::fs::copy(codex_utils_cargo_bin::cargo_bin("codex")?, &executable)?;
+    copy_executable(&codex_utils_cargo_bin::cargo_bin("codex")?, &executable)?;
+    let codex_path_dir = package.path().join("codex-path");
+    std::fs::create_dir(&codex_path_dir)?;
     let manifest = package.path().join("codex-package.json");
     std::fs::write(&manifest, r#"{"version":"1.2.3-alpha.4"}"#)?;
 
@@ -205,7 +281,7 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{collector_url}/v1/metrics", pr
             "2",
         ])
         .stdin(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::inherit())
         .kill_on_drop(true);
 
     let mut child = command.spawn()?;
@@ -214,7 +290,9 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{collector_url}/v1/metrics", pr
         .take()
         .ok_or_else(|| anyhow::anyhow!("remote exec-server stdin was not piped"))?;
 
-    let environment_websocket = accept_parent_lifetime_websocket(&listener, TEST_TIMEOUT).await?;
+    let environment_websocket = accept_parent_lifetime_websocket(&listener, TEST_TIMEOUT)
+        .await
+        .context("remote executor failed to attach")?;
     // Remote startup must capture the version before registration, not on the first initialize.
     std::fs::write(&manifest, r#"{"version":"9.9.9"}"#)?;
     let executor_public_key = registered_parent_lifetime_executor_public_key(&registry).await?;
@@ -235,7 +313,9 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{collector_url}/v1/metrics", pr
     };
     let client_task =
         tokio::spawn(async move { ExecServerClient::connect_noise_rendezvous(harness_args).await });
-    let harness_websocket = accept_parent_lifetime_websocket(&listener, TEST_TIMEOUT).await?;
+    let harness_websocket = accept_parent_lifetime_websocket(&listener, TEST_TIMEOUT)
+        .await
+        .context("harness failed to attach")?;
     let relay_task = tokio::spawn(proxy_parent_lifetime_relay(
         environment_websocket,
         harness_websocket,
@@ -245,21 +325,33 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{collector_url}/v1/metrics", pr
         .context("remote harness did not connect")???;
 
     let environment_info = client.environment_info().await?;
+    assert_eq!(
+        environment_info
+            .prepend_path_dirs
+            .iter()
+            .map(|path| std::fs::canonicalize(path.inferred_native_path_string()))
+            .collect::<std::io::Result<Vec<_>>>()?,
+        vec![codex_path_dir.canonicalize()?]
+    );
     let expected_info = EnvironmentInfo {
         executor_version: "1.2.3-alpha.4".to_string(),
         // The build identity belongs to the spawned CLI, not this test process.
         provider_id: environment_info.provider_id.clone(),
+        prepend_path_dirs: environment_info.prepend_path_dirs.clone(),
         ..EnvironmentInfo::local()
     };
-    assert_eq!(environment_info, expected_info);
+    assert_eq!(environment_info.as_ref(), &expected_info);
     std::fs::remove_file(&manifest)?;
     assert_eq!(client.force_environment_info().await?, expected_info);
 
     #[cfg(windows)]
     let argv = vec![
-        "cmd.exe",
-        "/C",
-        "if defined CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE (exit /b 1) else ping -n 61 127.0.0.1",
+        "powershell.exe",
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "if (Test-Path Env:CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE) { exit 1 }; Start-Sleep -Seconds 60",
     ];
     #[cfg(not(windows))]
     let argv = vec![
@@ -300,15 +392,10 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{collector_url}/v1/metrics", pr
 
     drop(stdin);
 
-    let output = tokio::time::timeout(TEST_TIMEOUT, child.wait_with_output())
+    let status = tokio::time::timeout(TEST_TIMEOUT, child.wait())
         .await
         .map_err(|_| anyhow::anyhow!("remote exec-server did not exit after stdin closed"))??;
-    anyhow::ensure!(
-        output.status.success(),
-        "remote exec-server exited with {}; stderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
+    anyhow::ensure!(status.success(), "remote exec-server exited with {status}");
 
     relay_task.abort();
     let _ = relay_task.await;
@@ -601,7 +688,7 @@ fn local_exec_server_exits_successfully_on_sigterm() -> Result<()> {
 async fn wait_for_response(
     stdout: &mut (impl tokio::io::AsyncBufRead + Unpin),
     expected_id: i64,
-) -> Result<()> {
+) -> Result<serde_json::Value> {
     loop {
         let mut line = String::new();
         if stdout.read_line(&mut line).await? == 0 {
@@ -613,7 +700,7 @@ async fn wait_for_response(
                 message.get("error").is_none(),
                 "exec-server request {expected_id} failed: {message}"
             );
-            return Ok(());
+            return Ok(message);
         }
     }
 }

@@ -675,6 +675,7 @@ mod tests {
             thread_id: "thread-1".to_string(),
             turn: Turn {
                 id: turn_id.to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: TurnStatus::Completed,
@@ -928,6 +929,7 @@ mod tests {
                 && let ServerRequest::McpServerElicitationRequest { params, .. } = &mut request
             {
                 params.request = McpServerElicitationRequest::UserVerification {
+                    meta: None,
                     title: "Verify".to_string(),
                     description: "Approve deployment".to_string(),
                     challenge: "AQID".to_string(),
