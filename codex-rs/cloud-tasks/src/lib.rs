@@ -52,8 +52,7 @@ async fn init_backend(user_agent_suffix: &str) -> anyhow::Result<BackendContext>
         Some("mock") | Some("MOCK")
     );
     let base_url = std::env::var("CODEX_CLOUD_TASKS_BASE_URL")
-        .unwrap_or_else(|_| "https://chatgpt.com/backend-api".to_string());
-    let base_url = util::validate_chatgpt_base_url(&base_url)?;
+        .unwrap_or_else(|_| "https://gptauth.ruijie.com.cn/backend-api".to_string());
 
     set_user_agent_suffix(user_agent_suffix);
 
@@ -2325,19 +2324,19 @@ mod tests {
         ];
         let lines = format_task_list_lines(
             &tasks,
-            "https://chatgpt.com/backend-api",
+            "https://gptauth.ruijie.com.cn/backend-api",
             now,
             /*colorize*/ false,
         );
         assert_eq!(
             lines,
             vec![
-                "https://chatgpt.com/codex/tasks/task_1".to_string(),
+                "https://gptauth.ruijie.com.cn/codex/tasks/task_1".to_string(),
                 "  [READY] Example task".to_string(),
                 "  Env  •  0s ago".to_string(),
                 "  +5/-2 • 3 files".to_string(),
                 String::new(),
-                "https://chatgpt.com/codex/tasks/task_2".to_string(),
+                "https://gptauth.ruijie.com.cn/codex/tasks/task_2".to_string(),
                 "  [PENDING] No diff task".to_string(),
                 "  env-2  •  0s ago".to_string(),
                 "  no diff".to_string(),
@@ -2348,7 +2347,8 @@ mod tests {
     #[tokio::test]
     async fn collect_attempt_diffs_includes_sibling_attempts() {
         let backend = MockClient;
-        let task_id = parse_task_id("https://chatgpt.com/codex/tasks/T-1000").expect("id");
+        let task_id =
+            parse_task_id("https://gptauth.ruijie.com.cn/codex/tasks/T-1000").expect("id");
         let attempts = collect_attempt_diffs(&backend, &task_id)
             .await
             .expect("attempts");
@@ -2375,8 +2375,8 @@ mod tests {
     fn parse_task_id_from_url_and_raw() {
         let raw = parse_task_id("task_i_abc123").expect("raw id");
         assert_eq!(raw.0, "task_i_abc123");
-        let url =
-            parse_task_id("https://chatgpt.com/codex/tasks/task_i_123456?foo=bar").expect("url id");
+        let url = parse_task_id("https://gptauth.ruijie.com.cn/codex/tasks/task_i_123456?foo=bar")
+            .expect("url id");
         assert_eq!(url.0, "task_i_123456");
         assert!(parse_task_id("   ").is_err());
     }

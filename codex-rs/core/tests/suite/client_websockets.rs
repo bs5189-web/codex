@@ -422,7 +422,7 @@ async fn responses_websocket_streams_without_feature_flag_when_provider_supports
     ]]])
     .await;
 
-    let harness = websocket_harness_with_options(&server, /*runtime_metrics_enabled*/ false).await;
+    let harness = websocket_harness_with_item_ids(&server, /*runtime_metrics_enabled*/ false).await;
     let mut client_session = harness.client.new_session();
     let prompt = prompt_with_input(vec![message_item("hello")]);
 
@@ -736,7 +736,7 @@ async fn responses_websocket_request_prewarm_reuses_connection() {
         provider,
         /*runtime_metrics_enabled*/ true,
         /*concurrent_reasoning_summaries_enabled*/ true,
-        /*enabled_features*/ &[],
+        /*enabled_features*/ &[Feature::ItemIds],
     )
     .await;
     let mut client_session = harness.client.new_session();
@@ -834,7 +834,7 @@ async fn responses_websocket_request_prewarm_uses_caller_supplied_metadata() {
     ]]])
     .await;
 
-    let harness = websocket_harness_with_options(&server, /*runtime_metrics_enabled*/ true).await;
+    let harness = websocket_harness_with_item_ids(&server, /*runtime_metrics_enabled*/ true).await;
     let mut client_session = harness.client.new_session();
     let prompt = prompt_with_input(vec![message_item("hello")]);
     let responses_metadata = turn_metadata(&harness, /*turn_id*/ None);
@@ -877,7 +877,7 @@ async fn responses_websocket_request_prewarm_traces_logical_request() {
     ]])
     .await;
 
-    let harness = websocket_harness_with_options(&server, /*runtime_metrics_enabled*/ true).await;
+    let harness = websocket_harness_with_item_ids(&server, /*runtime_metrics_enabled*/ true).await;
     let mut client_session = harness.client.new_session();
     let prompt = prompt_with_input(vec![message_item("hello")]);
     let prewarm_responses_metadata = prewarm_metadata(&harness, /*turn_id*/ None);
@@ -1317,7 +1317,7 @@ async fn responses_websocket_v2_requests_use_v2_when_provider_supports_websocket
     ]])
     .await;
 
-    let harness = websocket_harness_with_options(&server, /*runtime_metrics_enabled*/ true).await;
+    let harness = websocket_harness_with_item_ids(&server, /*runtime_metrics_enabled*/ true).await;
     let mut client_session = harness.client.new_session();
     let prompt_one = prompt_with_input(vec![message_item("hello")]);
     let prompt_two = prompt_with_input(vec![
@@ -1384,7 +1384,7 @@ async fn responses_websocket_v2_incremental_requests_are_reused_across_turns() {
         provider,
         /*runtime_metrics_enabled*/ false,
         /*concurrent_reasoning_summaries_enabled*/ false,
-        /*enabled_features*/ &[],
+        /*enabled_features*/ &[Feature::ItemIds],
     )
     .await;
 
@@ -1466,7 +1466,7 @@ async fn responses_websocket_v2_wins_when_both_features_enabled() {
     ]])
     .await;
 
-    let harness = websocket_harness_with_options(&server, /*runtime_metrics_enabled*/ false).await;
+    let harness = websocket_harness_with_item_ids(&server, /*runtime_metrics_enabled*/ false).await;
     let mut client_session = harness.client.new_session();
     let prompt_one = prompt_with_input(vec![message_item("hello")]);
     let prompt_two = prompt_with_input(vec![
@@ -2718,10 +2718,12 @@ fn websocket_provider_with_connect_timeout(
         env_key: None,
         env_key_instructions: None,
         experimental_bearer_token: None,
+        api_key: None,
         auth: None,
         gateway_oauth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_model_prefixes: Vec::new(),
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -2731,6 +2733,8 @@ fn websocket_provider_with_connect_timeout(
         websocket_connect_timeout_ms,
         requires_openai_auth: false,
         supports_websockets: true,
+        supports_image_generation: false,
+        supports_web_search: false,
         supports_standalone_web_search: false,
         capabilities: None,
         include_internal_metadata: false,
@@ -2738,7 +2742,7 @@ fn websocket_provider_with_connect_timeout(
 }
 
 async fn websocket_harness(server: &WebSocketTestServer) -> WebsocketTestHarness {
-    websocket_harness_with_runtime_metrics(server, /*runtime_metrics_enabled*/ false).await
+    websocket_harness_with_item_ids(server, /*runtime_metrics_enabled*/ false).await
 }
 
 async fn websocket_harness_for_codex_backend(server: &WebSocketTestServer) -> WebsocketTestHarness {
@@ -2764,7 +2768,20 @@ async fn websocket_harness_with_v2(
     server: &WebSocketTestServer,
     runtime_metrics_enabled: bool,
 ) -> WebsocketTestHarness {
-    websocket_harness_with_options(server, runtime_metrics_enabled).await
+    websocket_harness_with_item_ids(server, runtime_metrics_enabled).await
+}
+
+async fn websocket_harness_with_item_ids(
+    server: &WebSocketTestServer,
+    runtime_metrics_enabled: bool,
+) -> WebsocketTestHarness {
+    websocket_harness_with_provider_options(
+        websocket_provider(server),
+        runtime_metrics_enabled,
+        /*concurrent_reasoning_summaries_enabled*/ false,
+        /*enabled_features*/ &[Feature::ItemIds],
+    )
+    .await
 }
 
 async fn websocket_harness_with_options(

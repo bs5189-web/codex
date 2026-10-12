@@ -645,6 +645,9 @@ async fn response_item_ids_persist_across_resume_and_preserve_server_ids() -> an
 
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert_eq!(request.body_json()["store"].as_bool(), Some(true));
+    }
     let user_id = response_message_item_id(&requests[0], "user", "before resume");
     let user_uuid = user_id
         .strip_prefix("msg_")
@@ -803,6 +806,7 @@ async fn response_item_ids_are_sent_for_all_remote_v2_compaction_requests() -> a
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 3);
     for (request_index, request) in requests.iter().enumerate() {
+        assert_eq!(request.body_json()["store"].as_bool(), Some(true));
         let input = request.input();
         assert!(!input.is_empty(), "request {request_index} input is empty");
         for item in input {
@@ -1703,10 +1707,12 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
         env_key: None,
         env_key_instructions: None,
         experimental_bearer_token: None,
+        api_key: None,
         auth: Some(auth),
         gateway_oauth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_model_prefixes: Vec::new(),
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -1716,6 +1722,8 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
+        supports_image_generation: false,
+        supports_web_search: false,
         supports_standalone_web_search: false,
         capabilities: None,
         include_internal_metadata: false,
@@ -1969,6 +1977,8 @@ async fn prefers_apikey_when_config_prefers_apikey_even_with_chatgpt_tokens() {
     let model_provider = ModelProviderInfo {
         base_url: Some(format!("{}/v1", server.uri())),
         supports_websockets: false,
+        supports_image_generation: false,
+        supports_web_search: false,
         ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
     };
 
@@ -3209,10 +3219,12 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
         env_key: None,
         env_key_instructions: None,
         experimental_bearer_token: None,
+        api_key: None,
         auth: None,
         gateway_oauth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_model_prefixes: Vec::new(),
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -3222,6 +3234,8 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
+        supports_image_generation: false,
+        supports_web_search: false,
         supports_standalone_web_search: false,
         capabilities: None,
         include_internal_metadata: false,
@@ -3848,6 +3862,7 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
         // Reuse the existing environment variable to avoid using unsafe code
         env_key: Some(EXISTING_ENV_VAR_WITH_NON_EMPTY_VALUE.to_string()),
         experimental_bearer_token: None,
+        api_key: None,
         auth: None,
         gateway_oauth: None,
         aws: None,
@@ -3857,6 +3872,7 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
         )])),
         env_key_instructions: None,
         wire_api: WireApi::Responses,
+        chat_model_prefixes: Vec::new(),
         http_headers: Some(std::collections::HashMap::from([(
             "Custom-Header".to_string(),
             "Value".into(),
@@ -3868,6 +3884,8 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
+        supports_image_generation: false,
+        supports_web_search: false,
         supports_standalone_web_search: false,
         capabilities: None,
         include_internal_metadata: false,
@@ -3941,10 +3959,12 @@ async fn env_var_overrides_loaded_auth() {
         )])),
         env_key_instructions: None,
         experimental_bearer_token: None,
+        api_key: None,
         auth: None,
         gateway_oauth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_model_prefixes: Vec::new(),
         http_headers: Some(std::collections::HashMap::from([(
             "Custom-Header".to_string(),
             "Value".into(),
@@ -3956,6 +3976,8 @@ async fn env_var_overrides_loaded_auth() {
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
+        supports_image_generation: false,
+        supports_web_search: false,
         supports_standalone_web_search: false,
         capabilities: None,
         include_internal_metadata: false,

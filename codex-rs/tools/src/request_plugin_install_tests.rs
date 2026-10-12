@@ -18,7 +18,7 @@ fn build_request_plugin_install_elicitation_request_uses_expected_shape() {
         app_metadata: None,
         labels: None,
         install_url: Some(
-            "https://chatgpt.com/apps/google-calendar/connector_2128aebfecb84f64a069897515042a44"
+            "https://gptauth.ruijie.com.cn/apps/google-calendar/connector_2128aebfecb84f64a069897515042a44"
                 .to_string(),
         ),
         is_accessible: false,
@@ -45,7 +45,7 @@ fn build_request_plugin_install_elicitation_request_uses_expected_shape() {
                 tool_name: "Google Calendar",
                 suggestion_id: None,
                 install_url: Some(
-                    "https://chatgpt.com/apps/google-calendar/connector_2128aebfecb84f64a069897515042a44"
+                    "https://gptauth.ruijie.com.cn/apps/google-calendar/connector_2128aebfecb84f64a069897515042a44"
                 ),
                 remote_plugin_id: None,
                 app_connector_ids: None,
@@ -117,7 +117,8 @@ fn build_request_plugin_install_meta_uses_expected_shape() {
         app_metadata: None,
         labels: None,
         install_url: Some(
-            "https://chatgpt.com/apps/gmail/connector_68df038e0ba48191908c8434991bbac2".to_string(),
+            "https://gptauth.ruijie.com.cn/apps/gmail/connector_68df038e0ba48191908c8434991bbac2"
+                .to_string(),
         ),
         is_accessible: false,
         is_enabled: true,
@@ -141,7 +142,7 @@ fn build_request_plugin_install_meta_uses_expected_shape() {
             tool_name: "Gmail",
             suggestion_id: None,
             install_url: Some(
-                "https://chatgpt.com/apps/gmail/connector_68df038e0ba48191908c8434991bbac2"
+                "https://gptauth.ruijie.com.cn/apps/gmail/connector_68df038e0ba48191908c8434991bbac2"
             ),
             remote_plugin_id: None,
             app_connector_ids: None,

@@ -50,7 +50,7 @@ use crate::wrapping::word_wrap_lines;
 use std::sync::Arc;
 use std::sync::RwLock;
 
-const CHATGPT_USAGE_URL: &str = "https://chatgpt.com/settings/usage";
+const CHATGPT_USAGE_URL: &str = "https://gptauth.ruijie.com.cn/codex/settings/usage";
 
 #[derive(Debug, Clone)]
 struct StatusContextWindowData {

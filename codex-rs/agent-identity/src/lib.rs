@@ -38,9 +38,10 @@ use sha2::Sha512;
 const AGENT_TASK_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(30);
 const AGENT_IDENTITY_JWKS_TIMEOUT: Duration = Duration::from_secs(10);
 const AGENT_IDENTITY_JWT_AUDIENCE: &str = "codex-app-server";
-const AGENT_IDENTITY_JWT_ISSUER: &str = "https://chatgpt.com/codex-backend/agent-identity";
+const AGENT_IDENTITY_JWT_ISSUER: &str =
+    "https://gptauth.ruijie.com.cn/codex-backend/agent-identity";
 const AGENT_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(15);
-const PROD_AGENT_IDENTITY_AUTHAPI_BASE_URL: &str = "https://auth.openai.com/api/accounts";
+const PROD_AGENT_IDENTITY_AUTHAPI_BASE_URL: &str = "http://gptauth.ruijie.com.cn/api/accounts";
 const STAGING_AGENT_IDENTITY_AUTHAPI_BASE_URL: &str = "https://auth.api.openai.org/api/accounts";
 const AGENT_IDENTITY_KEY_SEED_BYTES: usize = 64;
 const AGENT_IDENTITY_KEY_DERIVATION_CONTEXT: &[u8] = b"codex-agent-identity-ed25519-v1";
@@ -62,7 +63,11 @@ impl ChatGptEnvironment {
             | "https://chat.openai.com"
             | "https://chat.openai.com/backend-api"
             | "https://chat.openai.com/codex"
-            | "https://chat.openai.com/backend-api/codex" => Ok(Self::Production),
+            | "https://chat.openai.com/backend-api/codex"
+            | "https://gptauth.ruijie.com.cn"
+            | "https://gptauth.ruijie.com.cn/backend-api"
+            | "https://gptauth.ruijie.com.cn/codex"
+            | "https://gptauth.ruijie.com.cn/backend-api/codex" => Ok(Self::Production),
             "https://chatgpt-staging.com"
             | "https://chatgpt-staging.com/backend-api"
             | "https://chatgpt-staging.com/codex"
@@ -883,7 +888,11 @@ J1bwkqKZTB5dHolX9A58e/xXnfZ5P8f3Z83+Izap3FwqQulk7b1WO1MQcHuVg2NN
         );
         assert_eq!(
             ChatGptEnvironment::Production.agent_identity_authapi_base_url(),
-            "https://auth.openai.com/api/accounts"
+            "http://gptauth.ruijie.com.cn/api/accounts"
+        );
+        assert_eq!(
+            ChatGptEnvironment::from_chatgpt_base_url("https://gptauth.ruijie.com.cn/backend-api")?,
+            ChatGptEnvironment::Production
         );
         assert_eq!(
             ChatGptEnvironment::from_chatgpt_base_url("https://chatgpt-staging.com/backend-api")?,
@@ -969,12 +978,12 @@ J1bwkqKZTB5dHolX9A58e/xXnfZ5P8f3Z83+Izap3FwqQulk7b1WO1MQcHuVg2NN
     #[test]
     fn agent_identity_jwks_url_uses_agent_identity_jwt_route() {
         assert_eq!(
-            agent_identity_jwks_url("https://chatgpt.com/backend-api"),
-            "https://chatgpt.com/backend-api/wham/agent-identities/jwks"
+            agent_identity_jwks_url("https://gptauth.ruijie.com.cn/backend-api"),
+            "https://gptauth.ruijie.com.cn/backend-api/wham/agent-identities/jwks"
         );
         assert_eq!(
-            agent_identity_jwks_url("https://chatgpt.com/backend-api/"),
-            "https://chatgpt.com/backend-api/wham/agent-identities/jwks"
+            agent_identity_jwks_url("https://gptauth.ruijie.com.cn/backend-api/"),
+            "https://gptauth.ruijie.com.cn/backend-api/wham/agent-identities/jwks"
         );
     }
 

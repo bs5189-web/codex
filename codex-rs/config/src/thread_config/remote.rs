@@ -177,6 +177,7 @@ fn model_provider_from_proto(
         env_key: provider.env_key,
         env_key_instructions: provider.env_key_instructions,
         experimental_bearer_token: provider.experimental_bearer_token.map(Into::into),
+        api_key: None,
         auth: provider
             .auth
             .map(model_provider_auth_from_proto)
@@ -184,6 +185,7 @@ fn model_provider_from_proto(
         gateway_oauth: None,
         aws: None,
         wire_api,
+        chat_model_prefixes: Vec::new(),
         query_params: provider.query_params.map(redacted_string_map),
         http_headers: provider.http_headers.map(redacted_string_map),
         env_http_headers: provider.env_http_headers.map(|map| map.values),
@@ -193,6 +195,12 @@ fn model_provider_from_proto(
         websocket_connect_timeout_ms: provider.websocket_connect_timeout_ms,
         requires_openai_auth: provider.requires_openai_auth,
         supports_websockets: provider.supports_websockets,
+        supports_image_generation: provider
+            .supports_image_generation
+            .unwrap_or(ModelProviderInfo::default().supports_image_generation),
+        supports_web_search: provider
+            .supports_web_search
+            .unwrap_or(ModelProviderInfo::default().supports_web_search),
         supports_standalone_web_search: provider.supports_standalone_web_search,
         capabilities: None,
         include_internal_metadata: false,
@@ -212,10 +220,12 @@ fn model_provider_to_proto(
         env_key,
         env_key_instructions,
         experimental_bearer_token,
+        api_key: _,
         auth,
         gateway_oauth: _,
         aws: _,
         wire_api,
+        chat_model_prefixes: _,
         query_params,
         http_headers,
         env_http_headers,
@@ -225,6 +235,8 @@ fn model_provider_to_proto(
         websocket_connect_timeout_ms,
         requires_openai_auth,
         supports_websockets,
+        supports_image_generation,
+        supports_web_search,
         supports_standalone_web_search,
         include_internal_metadata: _,
         capabilities: _,
@@ -249,6 +261,8 @@ fn model_provider_to_proto(
         websocket_connect_timeout_ms,
         requires_openai_auth,
         supports_websockets,
+        supports_image_generation: Some(supports_image_generation),
+        supports_web_search: Some(supports_web_search),
         supports_standalone_web_search,
     }
 }
@@ -314,6 +328,7 @@ fn proto_string_map(values: HashMap<String, RedactedString>) -> proto::StringMap
 fn proto_wire_api(wire_api: WireApi) -> proto::WireApi {
     match wire_api {
         WireApi::Responses => proto::WireApi::Responses,
+        WireApi::Chat => proto::WireApi::Responses,
     }
 }
 
@@ -518,6 +533,8 @@ mod tests {
                             websocket_connect_timeout_ms: Some(10_000),
                             requires_openai_auth: false,
                             supports_websockets: true,
+                            supports_image_generation: Some(false),
+                            supports_web_search: Some(false),
                             supports_standalone_web_search: true,
                         }],
                         features: HashMap::from([
@@ -557,6 +574,7 @@ mod tests {
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
+            api_key: None,
             auth: Some(ModelProviderAuthInfo {
                 command: "token-helper".to_string(),
                 args: vec!["--json".into()],
@@ -565,6 +583,7 @@ mod tests {
                 cwd: workspace_dir(),
             }),
             wire_api: WireApi::Responses,
+            chat_model_prefixes: Vec::new(),
             query_params: Some(HashMap::from([(
                 "api-version".to_string(),
                 "2026-04-16".into(),
@@ -580,6 +599,8 @@ mod tests {
             websocket_connect_timeout_ms: Some(10_000),
             requires_openai_auth: false,
             supports_websockets: true,
+            supports_image_generation: false,
+            supports_web_search: false,
             supports_standalone_web_search: true,
             gateway_oauth: None,
             aws: None,

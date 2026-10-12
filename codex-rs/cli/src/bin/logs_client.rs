@@ -11,13 +11,14 @@ use codex_state::LogRow;
 use codex_state::SqliteConfig;
 use codex_state::StateRuntime;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use dirs::home_dir;
 use owo_colors::OwoColorize;
 
 #[derive(Debug, Parser)]
 #[command(name = "codex-state-logs")]
 #[command(about = "Tail Codex logs from the dedicated logs SQLite DB with simple filters")]
 struct Args {
-    /// Path to CODEX_HOME. Defaults to $CODEX_HOME or ~/.codex.
+    /// Path to CODEX_HOME. Defaults to $CODEX_HOME or ~/.ruizhi.
     #[arg(long, env = "CODEX_HOME")]
     codex_home: Option<PathBuf>,
 
@@ -140,11 +141,17 @@ async fn resolve_sqlite_config(args: &Args) -> anyhow::Result<SqliteConfig> {
     }
 
     let mut config_builder = ConfigBuilder::default();
-    if let Some(codex_home) = args.codex_home.as_ref() {
-        config_builder = config_builder.codex_home(codex_home.clone());
-    }
+    config_builder =
+        config_builder.codex_home(args.codex_home.clone().unwrap_or_else(default_codex_home));
     let config = config_builder.build().await?;
     Ok(config.sqlite_config().clone())
+}
+
+fn default_codex_home() -> PathBuf {
+    if let Some(home) = home_dir() {
+        return home.join(".ruizhi");
+    }
+    PathBuf::from(".ruizhi")
 }
 
 fn build_filter(args: &Args) -> anyhow::Result<LogFilter> {

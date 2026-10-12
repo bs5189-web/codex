@@ -12,6 +12,7 @@ async fn api_key_discovery_disabled_preserves_command_auth_discovery_and_merging
     )];
     let endpoint = Arc::new(TestModelsEndpoint {
         has_command_auth: true,
+        provider_cache_key: "test-provider".to_string(),
         responses: Mutex::new(vec![Ok(models.clone())].into()),
         ..TestModelsEndpoint::default()
     });

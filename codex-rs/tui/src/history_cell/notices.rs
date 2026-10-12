@@ -142,6 +142,8 @@ pub(crate) fn new_server_version_warning(
     }
 }
 
+const TRUSTED_ACCESS_FOR_CYBER_URL: &str = "https://gptauth.ruijie.com.cn/cyber";
+
 #[derive(Debug)]
 pub(crate) struct SafetyAccessBlockCell {
     title: &'static str,
@@ -176,7 +178,7 @@ pub(crate) fn new_cyber_policy_error_event(
                 ("Learn more", SAFETY_ACCESS_BLOCK_LEARN_MORE_URL),
                 (
                     "Apply for Daybreak",
-                    "https://openai.com/form/enterprise-trusted-access-for-cyber/",
+                    TRUSTED_ACCESS_FOR_CYBER_URL,
                 ),
             ],
         ),

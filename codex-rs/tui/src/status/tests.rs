@@ -845,14 +845,15 @@ async fn status_uses_server_provider_id_and_auth_requirement() {
             }
         }
         assert_eq!(
-            fragments, "https://chatgpt.com/settings/usage",
+            fragments, "https://gptauth.ruijie.com.cn/codex/settings/usage",
             "width {width}"
         );
         assert!(!destinations.is_empty());
         assert!(
             destinations
                 .iter()
-                .all(|destination| destination == "https://chatgpt.com/settings/usage")
+                .all(|destination| destination
+                    == "https://gptauth.ruijie.com.cn/codex/settings/usage")
         );
     }
 }

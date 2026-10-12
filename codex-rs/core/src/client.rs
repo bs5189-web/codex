@@ -41,6 +41,7 @@ use async_channel::Sender;
 use codex_api::AgentIdentityTelemetry;
 use codex_api::ApiError;
 use codex_api::AuthProvider;
+use codex_api::ChatCompletionsClient as ApiChatCompletionsClient;
 use codex_api::Compression;
 use codex_api::MemoriesClient as ApiMemoriesClient;
 use codex_api::MemorySummarizeInput as ApiMemorySummarizeInput;
@@ -77,6 +78,7 @@ use codex_login::RefreshTokenError;
 use codex_login::UnauthorizedRecovery;
 use codex_login::default_client::ClientRedirectPolicy;
 use codex_login::default_client::add_originator_header;
+use codex_login::default_client::create_client;
 use codex_login::default_client::create_client_for_route;
 use codex_otel::SessionTelemetry;
 use codex_otel::WEBSOCKET_CONTINUATION_COUNT_METRIC;
@@ -175,7 +177,8 @@ const WS_REQUEST_HEADER_RESPONSES_LITE_CLIENT_METADATA_KEY: &str =
 const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
 const X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER: &str =
     "x-openai-internal-codex-responses-lite";
-const REALTIME_CALLS_ENDPOINT: &str = "/realtime/calls";
+const RESPONSES_ENDPOINT: &str = "/responses";
+const CHAT_COMPLETIONS_ENDPOINT: &str = "/chat/completions";
 const MEMORIES_SUMMARIZE_ENDPOINT: &str = "/memories/trace_summarize";
 #[cfg(test)]
 pub(crate) const WEBSOCKET_CONNECT_TIMEOUT: Duration =
@@ -307,6 +310,12 @@ pub struct ModelClientSession {
     /// appends, or continuation requests), and must not send it between different turns.
     /// An auth ownership change clears it so the new owner gets fresh routing state.
     turn_state: Arc<OnceLock<String>>,
+    /// When set, overrides the provider's `wire_api` selection so subsequent `stream`
+    /// calls use the Chat Completions API instead of the Responses API.
+    ///
+    /// Activated by [`ModelClientSession::try_switch_to_chat_api`] as a fallback when
+    /// the gateway rejects Responses API access for the requested model.
+    wire_api_override: Option<WireApi>,
 }
 
 #[derive(Debug, Clone)]
@@ -678,6 +687,7 @@ impl ModelClient {
             client: self.clone(),
             websocket_session,
             turn_state: Arc::new(OnceLock::new()),
+            wire_api_override: None,
         }
     }
 
@@ -751,12 +761,8 @@ impl ModelClient {
         sideband_headers.extend(sideband_websocket_auth_headers(
             client_setup.api_auth.as_ref(),
         ));
+        let transport = ReqwestTransport::from_http_client(create_client());
         let api_provider = api_provider_override.unwrap_or(client_setup.api_provider);
-        let transport = self.build_api_transport(
-            &api_provider,
-            REALTIME_CALLS_ENDPOINT,
-            client_setup.redirect_policy,
-        )?;
         let response = ApiRealtimeCallClient::new(transport, api_provider, client_setup.api_auth)
             .create_with_session_and_headers(sdp, session_config, extra_headers)
             .await
@@ -804,11 +810,7 @@ impl ModelClient {
         let client_setup = self
             .current_client_setup(ClientRouting::ConfiguredProvider)
             .await?;
-        let transport = self.build_api_transport(
-            &client_setup.api_provider,
-            MEMORIES_SUMMARIZE_ENDPOINT,
-            client_setup.redirect_policy,
-        )?;
+        let transport = ReqwestTransport::from_http_client(create_client());
         let request_telemetry = Self::build_request_telemetry(
             session_telemetry,
             AuthRequestTelemetryContext::new(
@@ -931,19 +933,21 @@ impl ModelClient {
         model_info: &ModelInfo,
         effort: Option<ReasoningEffortConfig>,
         summary: ReasoningSummaryConfig,
-    ) -> Reasoning {
-        Reasoning {
-            effort: effort
-                .or_else(|| model_info.default_reasoning_level.clone())
-                .map(|effort| model_info.resolve_reasoning_effort(effort)),
-            summary: (model_info.supports_reasoning_summary_parameter
-                && summary != ReasoningSummaryConfig::None)
-                .then_some(summary),
-            // When Responses Lite is disabled, omit context so Responses uses the default,
-            // which is currently `current_turn`.
-            context: model_info
-                .use_responses_lite
-                .then_some(ReasoningContext::AllTurns),
+    ) -> Option<Reasoning> {
+        if model_info.supports_reasoning_summary_parameter {
+            Some(Reasoning {
+                effort: effort
+                    .or_else(|| model_info.default_reasoning_level.clone())
+                    .map(|effort| model_info.resolve_reasoning_effort(effort)),
+                summary: (summary != ReasoningSummaryConfig::None).then_some(summary),
+                // When Responses Lite is disabled, omit context so Responses uses the default,
+                // which is currently `current_turn`.
+                context: model_info
+                    .use_responses_lite
+                    .then_some(ReasoningContext::AllTurns),
+            })
+        } else {
+            None
         }
     }
 
@@ -1022,11 +1026,17 @@ impl ModelClient {
         let reasoning = self.build_reasoning(model_info, effort, summary);
         let stream_options = (self.state.concurrent_reasoning_summaries_enabled
             && is_openai
-            && reasoning.summary.is_some())
+            && reasoning
+                .as_ref()
+                .is_some_and(|reasoning| reasoning.summary.is_some()))
         .then_some(StreamOptions {
             reasoning_summary_delivery: codex_api::ReasoningSummaryDelivery::SequentialCutoff,
         });
-        let mut include = vec!["reasoning.encrypted_content".to_string()];
+        let mut include = if reasoning.is_some() {
+            vec!["reasoning.encrypted_content".to_string()]
+        } else {
+            Vec::new()
+        };
         if self.state.output_token_replay_enabled && is_openai {
             include.push("output.encrypted_content".to_string());
         }
@@ -1070,8 +1080,11 @@ impl ModelClient {
             tools,
             tool_choice: "auto".to_string(),
             parallel_tool_calls: prompt.parallel_tool_calls && !model_info.use_responses_lite,
-            reasoning: Some(reasoning),
-            store: false,
+            reasoning,
+            store: codex_api::is_azure_responses_provider(
+                &self.state.provider.info().name,
+                self.state.provider.info().base_url.as_deref(),
+            ),
             stream: true,
             stream_options,
             include,
@@ -1084,7 +1097,11 @@ impl ModelClient {
         Ok(request)
     }
 
-    fn prepare_response_items_for_request(&self, input: &mut [ResponseItem]) {
+    fn prepare_response_items_for_request(&self, input: &mut [ResponseItem], store: bool) {
+        if store {
+            return;
+        }
+
         for item in input {
             if item.id().is_some_and(|id| !id.is_prefixed()) {
                 item.set_id(/*new_id*/ None);
@@ -1250,7 +1267,7 @@ impl ModelClient {
         HeaderValue::from_str(&routing_hint).ok()
     }
 
-    fn build_api_transport(
+    fn build_responses_transport(
         &self,
         api_provider: &ApiProvider,
         endpoint: &str,
@@ -1760,9 +1777,9 @@ impl ModelClientSession {
                 .client
                 .responses_headers(client_setup.auth.as_ref(), &model_info.slug);
             tracing::Span::current().record("api.path", "/responses");
-            let transport = self.client.build_api_transport(
+            let transport = self.client.build_responses_transport(
                 &client_setup.api_provider,
-                "/responses",
+                RESPONSES_ENDPOINT,
                 client_setup.redirect_policy,
             )?;
             let request_auth_context = AuthRequestTelemetryContext::new(
@@ -1820,7 +1837,7 @@ impl ModelClientSession {
                 self.client.api_key_cyber_access_programs,
             )?;
             self.client
-                .prepare_response_items_for_request(&mut request.input);
+                .prepare_response_items_for_request(&mut request.input, request.store);
             if crate::guardian::is_basic_session_source(&self.client.state.session_source) {
                 crate::guardian::observe_guardian_request(session_telemetry, &request);
             }
@@ -1869,6 +1886,140 @@ impl ModelClientSession {
                         .provider
                         .is_recoverable_auth_error(&unauthorized_transport) =>
                 {
+                    let response_debug_context =
+                        extract_response_debug_context(&unauthorized_transport);
+                    inference_trace_attempt.record_failed(
+                        &unauthorized_transport,
+                        response_debug_context.request_id.as_deref(),
+                        /*output_items*/ &[],
+                    );
+                    pending_retry = PendingUnauthorizedRetry::from_recovery(
+                        handle_unauthorized(
+                            unauthorized_transport,
+                            &mut auth_recovery,
+                            &mut provider_auth_recovery_attempted,
+                            session_telemetry,
+                            &self.client.state.provider,
+                            self.client.event_sender.as_ref(),
+                            responses_metadata.turn_id.as_deref(),
+                        )
+                        .await?,
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    let response_debug_context =
+                        extract_response_debug_context_from_api_error(&err);
+                    let err = self.client.state.provider.map_api_error(err);
+                    inference_trace_attempt.record_failed(
+                        &err,
+                        response_debug_context.request_id.as_deref(),
+                        /*output_items*/ &[],
+                    );
+                    return Err(err);
+                }
+            }
+        }
+    }
+
+    /// Streams a turn through an OpenAI-compatible Chat Completions provider.
+    ///
+    /// The API crate adapts Codex's Responses-shaped request and stream events to the older
+    /// chat-completions wire format.
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(
+        name = "model_client.stream_chat_completions_api",
+        level = "info",
+        skip_all,
+        fields(
+            model = %model_info.slug,
+            wire_api = %self.client.state.provider.info().wire_api,
+            transport = "chat_completions_http",
+            http.method = "POST",
+            api.path = "chat/completions",
+            turn.has_metadata_header = responses_metadata.has_turn_metadata()
+        )
+    )]
+    async fn stream_chat_completions_api(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<String>,
+        responses_metadata: &CodexResponsesMetadata,
+        inference_trace: &InferenceTraceContext,
+    ) -> Result<ResponseStream> {
+        let auth_manager = self.client.state.provider.auth_manager();
+        let mut auth_recovery = auth_manager
+            .as_ref()
+            .map(AuthManager::unauthorized_recovery);
+        let mut provider_auth_recovery_attempted = false;
+        let mut pending_retry = PendingUnauthorizedRetry::default();
+        loop {
+            let client_setup = self
+                .client
+                .current_client_setup(ClientRouting::ConfiguredProvider)
+                .await?;
+            let transport = ReqwestTransport::from_http_client(create_client());
+            let request_auth_context = AuthRequestTelemetryContext::new(
+                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup.api_auth.as_ref(),
+                client_setup.agent_identity_telemetry.clone(),
+                pending_retry,
+            );
+            let (request_telemetry, _sse_telemetry) = Self::build_streaming_telemetry(
+                session_telemetry,
+                request_auth_context,
+                RequestRouteTelemetry::for_endpoint(CHAT_COMPLETIONS_ENDPOINT),
+                self.client.state.auth_env_telemetry.clone(),
+            );
+            let mut options = self
+                .build_responses_options(
+                    responses_metadata,
+                    Compression::None,
+                    model_info.use_responses_lite,
+                )
+                .await;
+
+            let mut request = self.client.build_responses_request(
+                prompt,
+                model_info,
+                effort.clone(),
+                summary,
+                service_tier.clone(),
+                responses_metadata,
+            )?;
+            let store = request.store;
+            self.client
+                .prepare_response_items_for_request(&mut request.input, store);
+            let request_session_telemetry =
+                session_telemetry_for_request(session_telemetry, &request);
+            let inference_trace_attempt = inference_trace.start_attempt();
+            inference_trace_attempt.add_request_headers(&mut options.extra_headers);
+            inference_trace_attempt.record_started(&request);
+            let client = ApiChatCompletionsClient::new(
+                transport,
+                client_setup.api_provider,
+                client_setup.api_auth,
+            )
+            .with_telemetry(Some(request_telemetry));
+            let stream_result = client.stream_request(request, options).await;
+
+            match stream_result {
+                Ok(stream) => {
+                    let (stream, _) = map_response_stream(
+                        stream,
+                        request_session_telemetry,
+                        inference_trace_attempt,
+                        Arc::clone(&self.client.state.provider),
+                    );
+                    return Ok(stream);
+                }
+                Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                )) if status == StatusCode::UNAUTHORIZED => {
                     let response_debug_context =
                         extract_response_debug_context(&unauthorized_transport);
                     inference_trace_attempt.record_failed(
@@ -2098,7 +2249,7 @@ impl ModelClientSession {
             };
             let original_item_ids = if let Some(incremental_items) = &mut incremental_items {
                 self.client
-                    .prepare_response_items_for_request(incremental_items);
+                    .prepare_response_items_for_request(incremental_items, request.store);
                 None
             } else {
                 let original_item_ids = request
@@ -2107,7 +2258,7 @@ impl ModelClientSession {
                     .map(|item| item.id().cloned())
                     .collect::<Vec<_>>();
                 self.client
-                    .prepare_response_items_for_request(&mut request.input);
+                    .prepare_response_items_for_request(&mut request.input, request.store);
                 Some(original_item_ids)
             };
             let mut ws_payload = ResponseCreateWsRequest {
@@ -2329,7 +2480,13 @@ impl ModelClientSession {
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
-        let wire_api = self.client.state.provider.info().wire_api;
+        let wire_api = self.wire_api_override.unwrap_or_else(|| {
+            self.client
+                .state
+                .provider
+                .info()
+                .wire_api_for_model(&model_info.slug)
+        });
         match wire_api {
             WireApi::Responses => {
                 if self.client.responses_websocket_enabled() {
@@ -2368,6 +2525,19 @@ impl ModelClientSession {
                 )
                 .await
             }
+            WireApi::Chat => {
+                self.stream_chat_completions_api(
+                    prompt,
+                    model_info,
+                    session_telemetry,
+                    effort,
+                    summary,
+                    service_tier,
+                    responses_metadata,
+                    inference_trace,
+                )
+                .await
+            }
         }
     }
 
@@ -2387,6 +2557,25 @@ impl ModelClientSession {
             .force_http_fallback(session_telemetry, model_info);
         self.websocket_session = WebsocketSession::default();
         activated
+    }
+
+    /// Switches this session to use the Chat Completions API for all subsequent
+    /// requests, as a fallback when the Responses API is unavailable.
+    ///
+    /// Triggers:
+    /// - The gateway rejected Responses API access for the model (e.g. code `400005`).
+    ///
+    /// Returns `true` if this call activated the switch, or `false` if the session
+    /// was already using the Chat Completions API.
+    pub(crate) fn try_switch_to_chat_api(&mut self) -> bool {
+        if matches!(self.wire_api_override, Some(WireApi::Chat)) {
+            return false;
+        }
+        self.wire_api_override = Some(WireApi::Chat);
+        // WebSockets are Responses-only; clear any pending session so the next
+        // request goes through the HTTP Chat Completions transport.
+        self.websocket_session = WebsocketSession::default();
+        true
     }
 }
 

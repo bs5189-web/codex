@@ -125,7 +125,7 @@ mod tests {
         let context = extract_response_debug_context(&TransportError::Http {
             retry_after: None,
             status: StatusCode::UNAUTHORIZED,
-            url: Some("https://chatgpt.com/backend-api/codex/models".to_string()),
+            url: Some("https://gptauth.ruijie.com.cn/backend-api/codex/models".to_string()),
             headers: Some(headers),
             body: Some(r#"{"error":{"message":"plain text error"},"status":401}"#.to_string()),
         });
@@ -146,7 +146,7 @@ mod tests {
         let transport = TransportError::Http {
             retry_after: None,
             status: StatusCode::UNAUTHORIZED,
-            url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
+            url: Some("https://gptauth.ruijie.com.cn/backend-api/codex/responses".to_string()),
             headers: None,
             body: Some(r#"{"error":{"message":"secret token leaked"}}"#.to_string()),
         };

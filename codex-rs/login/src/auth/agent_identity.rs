@@ -461,7 +461,6 @@ mod tests {
     async fn from_jwt_registers_task() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/backend-api/wham/agent-identities/jwks"))
             .respond_with(ResponseTemplate::new(200).set_body_json(test_jwks_body()))
             .expect(1)
             .mount(&server)
@@ -541,7 +540,7 @@ mod tests {
         jsonwebtoken::encode(
             &header,
             &json!({
-                "iss": "https://chatgpt.com/codex-backend/agent-identity",
+                "iss": "https://gptauth.ruijie.com.cn/codex-backend/agent-identity",
                 "aud": "codex-app-server",
                 "iat": 1_700_000_000usize,
                 "exp": 4_000_000_000usize,

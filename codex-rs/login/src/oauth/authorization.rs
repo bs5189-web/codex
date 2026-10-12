@@ -54,6 +54,8 @@ pub(crate) struct CallbackParameters {
     pub state: Option<String>,
     pub error: Option<String>,
     pub error_description: Option<String>,
+    /// Optional token appended by custom issuers to hand the client a codex API token.
+    pub codex_token: Option<String>,
 }
 
 pub(crate) enum CallbackError<'a> {
@@ -74,6 +76,7 @@ impl CallbackParameters {
                 "state" => params.state = Some(value.into_owned()),
                 "error" => params.error = Some(value.into_owned()),
                 "error_description" => params.error_description = Some(value.into_owned()),
+                "codex-token" => params.codex_token = Some(value.into_owned()),
                 _ => {}
             }
         }

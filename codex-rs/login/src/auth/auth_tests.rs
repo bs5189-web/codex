@@ -2746,7 +2746,7 @@ fn fake_agent_identity_jwt_with_plan_type(
     let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     let header_b64 = encode(br#"{"alg":"EdDSA","typ":"JWT"}"#);
     let payload = json!({
-        "iss": "https://chatgpt.com/codex-backend/agent-identity",
+        "iss": "https://gptauth.ruijie.com.cn/codex-backend/agent-identity",
         "aud": "codex-app-server",
         "iat": 1_700_000_000usize,
         "exp": 4_000_000_000usize,
@@ -2772,7 +2772,7 @@ fn signed_agent_identity_jwt(
     jsonwebtoken::encode(
         &header,
         &json!({
-            "iss": "https://chatgpt.com/codex-backend/agent-identity",
+            "iss": "https://gptauth.ruijie.com.cn/codex-backend/agent-identity",
             "aud": "codex-app-server",
             "iat": 1_700_000_000usize,
             "exp": 4_000_000_000usize,
